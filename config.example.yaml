@@ -30,15 +30,15 @@ chunking:
 # ---------------------------------------------------------------------------
 chat:
   provider: "lmstudio"            # ollama | lmstudio
-  model: "local-model"            # whatever model id LM Studio shows
-  base_url: "http://localhost:1234/v1"
+  model: "google/gemma-4-e4b"            # whatever model id LM Studio shows
+  base_url: "http://192.168.50.84:1234/v1"
   temperature: 0.2
   max_tokens: 800
 
 embeddings:
   provider: "lmstudio"            # ollama | lmstudio
-  model: "text-embedding-model"   # whatever embedding model id LM Studio shows
-  base_url: "http://localhost:1234/v1"
+  model: "text-embedding-nomic-embed-text-v1.5"   # whatever embedding model id LM Studio shows
+  base_url: "http://192.168.50.84:1234/v1"
 
 # ---------------------------------------------------------------------------
 # Alternative: Ollama for both chat and embeddings.
@@ -49,7 +49,7 @@ embeddings:
 # chat:
 #   provider: "ollama"
 #   model: "gemma3:12b"
-#   base_url: "http://localhost:11434"
+#   base_url: "http://192.168.50.84:11434"
 #   temperature: 0.2
 #   max_tokens: 800
 #
