@@ -86,16 +86,46 @@ to see the query flow as five lines of Python.
     ollama pull embeddinggemma
     ```
 
-### Quick start with `run.bat` (recommended on Windows)
+### Quick start with `gui.bat` (easiest)
 
-The repo ships with a [`run.bat`](run.bat) launcher that on first run will:
+For interactive use, run the desktop GUI:
 
-1. Create a virtual environment in `.venv\`.
-2. Install every required Python package (typer, chromadb, pydantic, httpx, pypdf, rich, openai, pyyaml, ...).
-3. Copy `config.example.yaml` to `config.yaml` if it does not exist.
+```powershell
+.\gui.bat
+```
 
-Subsequent runs are instant — it skips setup as long as the venv exists and
-all imports succeed.
+On first run it creates `.venv\`, installs every dependency (including
+PySide6), bootstraps `config.yaml` from the example, and opens a four-tab
+window:
+
+| Tab | What it does |
+|---|---|
+| **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunk size / `top_k`, then *Save to config.yaml*. URLs you've used before are remembered between sessions. |
+| **Ingest** | Index the configured documents folder, a single file, or any folder you pick. Force re-ingest is a checkbox. |
+| **Ask** | Type a question, tick *Debug* to also see retrieved chunks and the literal prompt sent to the LLM. |
+| **Stats** | Inspect the vector store, refresh on demand, or clear it. |
+
+**Recommended GUI workflow on first run:**
+
+1. **Settings** tab → set the **Chat** panel: provider (`ollama` / `lmstudio`),
+   base URL, then *Refresh models* → pick a chat model from the dropdown.
+2. Repeat for the **Embedding** panel (use a model whose badge says
+   `embedding` in LM Studio, or any Ollama model with embedding support).
+3. Tune chunking / top_k if you want, then click **Save to config.yaml**.
+4. **Ingest** tab → leave the path empty (uses `documents\`) → click **Ingest**.
+   Watch the summary panel until "done".
+5. **Ask** tab → type a question, tick **Debug**, click **Ask**. The answer,
+   sources table, and retrieved-chunk preview all populate together.
+6. **Stats** tab → click **Refresh** to see chunk count + embedding dimension.
+
+URLs you type into the *Base URL* combobox are saved between sessions, so the
+next time you open the GUI the dropdown is pre-filled with everything you've
+tried.
+
+### Quick start with `run.bat` (CLI mode)
+
+The repo also ships with a [`run.bat`](run.bat) CLI launcher with the same
+self-setup logic:
 
 ```powershell
 .\run.bat                              # show CLI help
@@ -261,6 +291,7 @@ Debug mode prints:
 ```text
 RAG_system/
   run.bat                      # Windows launcher: venv + deps + CLI
+  gui.bat                      # Windows launcher: venv + deps + PySide6 GUI
   pyproject.toml               # package metadata + runtime dependencies
   config.example.yaml          # copied to config.yaml on first run
   documents/                   # source documents (kept as source of truth)
@@ -289,6 +320,15 @@ RAG_system/
       retriever.py             # embed question + search
       prompt_builder.py        # builds system + user messages
       rag_service.py           # full query flow + DebugInfo
+    gui/
+      app.py                   # MainWindow + dark Fusion palette + entry point
+      provider_panel.py        # reusable chat/embedding provider widget
+      settings_tab.py          # provider + chunking + retrieval config
+      ingest_tab.py            # ingestion runner with progress + summary
+      ask_tab.py               # query box, answer panel, sources + debug
+      stats_tab.py             # vector store stats + clear
+      workers.py               # QThread helper for background ops
+      settings_store.py        # QSettings-backed URL history
     utils/
       logging.py               # rich-based logging setup
   tests/
