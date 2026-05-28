@@ -111,3 +111,64 @@ class ChromaVectorStore(VectorStore):
             "persist_dir": self.persist_dir,
             "count": self._collection.count(),
         }
+
+    # ----- inspection helpers (used by the `inspect` CLI command) ---------
+
+    def get(self, chunk_id: str) -> RetrievedChunk | None:
+        """Fetch one chunk by id, or None if it doesn't exist."""
+
+        result = self._collection.get(ids=[chunk_id])
+        ids = result.get("ids") or []
+        if not ids:
+            return None
+        documents = result.get("documents") or [""]
+        metadatas = result.get("metadatas") or [{}]
+        return RetrievedChunk(
+            id=ids[0],
+            text=documents[0] or "",
+            metadata=metadatas[0] or {},
+            score=None,
+        )
+
+    def list_chunks(
+        self,
+        *,
+        where: dict | None = None,
+        limit: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """List chunks, optionally filtered by metadata and capped at `limit`."""
+
+        kwargs: dict = {"include": ["documents", "metadatas"]}
+        if where:
+            kwargs["where"] = where
+        if limit is not None:
+            kwargs["limit"] = limit
+        result = self._collection.get(**kwargs)
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        out: list[RetrievedChunk] = []
+        for i, cid in enumerate(ids):
+            out.append(
+                RetrievedChunk(
+                    id=cid,
+                    text=documents[i] if i < len(documents) else "",
+                    metadata=metadatas[i] if i < len(metadatas) else {},
+                    score=None,
+                )
+            )
+        return out
+
+    def peek_embedding_dim(self) -> int | None:
+        """Return the dimension of any one stored embedding, or None if empty."""
+
+        result = self._collection.get(limit=1, include=["embeddings"])
+        embeddings = result.get("embeddings")
+        # Chroma returns embeddings as numpy arrays; can't use truthiness on
+        # them. Be explicit about None / empty checks.
+        if embeddings is None or len(embeddings) == 0:
+            return None
+        first = embeddings[0]
+        if first is None:
+            return None
+        return int(len(first))

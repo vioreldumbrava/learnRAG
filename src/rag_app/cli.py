@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from rag_app.config import AppConfig, load_config
+from rag_app.eval.runner import EvalReport, run_eval_file
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
 from rag_app.retrieval.prompt_builder import PromptBuilder
@@ -147,6 +149,214 @@ def query(
 
 
 @app.command()
+def retrieve(
+    question: str = typer.Argument(..., help="The question to retrieve chunks for."),
+    config: Path = ConfigOption,
+    top_k: Optional[int] = typer.Option(
+        None,
+        "--top-k",
+        "-k",
+        help="Override the top_k from config for this run.",
+    ),
+) -> None:
+    """Run retrieval ONLY — no LLM call.
+
+    Useful when you want to debug whether the vector store is returning the
+    right chunks for a question, separately from how the LLM uses them.
+    """
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+
+    embedding_provider = build_embedding_provider(cfg.embeddings)
+    vector_store = _make_vector_store(cfg)
+    retriever = Retriever(
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        top_k=top_k if top_k is not None else cfg.retrieval.top_k,
+        score_threshold=cfg.retrieval.score_threshold,
+    )
+
+    console.print(
+        Panel.fit(
+            f"[bold]Retrieve only[/bold] (no LLM call)\n"
+            f"Embeddings: {cfg.embeddings.provider} / {cfg.embeddings.model}\n"
+            f"top_k:      {retriever.top_k}\n"
+            f"Question:   {question}",
+            title="rag-app retrieve",
+            border_style="cyan",
+        )
+    )
+
+    chunks = retriever.retrieve(question)
+    if not chunks:
+        console.print("[yellow]No chunks retrieved.[/yellow]")
+        return
+
+    table = Table(title="Retrieved chunks", border_style="cyan")
+    table.add_column("#", justify="right")
+    table.add_column("file")
+    table.add_column("chunk", justify="right")
+    table.add_column("score (distance)", justify="right")
+    table.add_column("preview")
+    for i, chunk in enumerate(chunks, start=1):
+        score = f"{chunk.score:.4f}" if chunk.score is not None else "n/a"
+        preview = chunk.text.strip().replace("\n", " ")
+        if len(preview) > 100:
+            preview = preview[:97] + "..."
+        table.add_row(
+            str(i),
+            str(chunk.metadata.get("source_file", "?")),
+            str(chunk.metadata.get("chunk_index", "?")),
+            score,
+            preview,
+        )
+    console.print(table)
+
+
+@app.command()
+def inspect(
+    config: Path = ConfigOption,
+    id: Optional[str] = typer.Option(None, "--id", help="Show a single chunk by id."),
+    file: Optional[str] = typer.Option(
+        None, "--file", help="List chunks belonging to a source filename."
+    ),
+    sample: Optional[int] = typer.Option(
+        None, "--sample", help="Show N random chunks with preview."
+    ),
+) -> None:
+    """Look inside the vector store — what's actually stored?
+
+    With no flags: print a summary (count, embedding dimension, distinct files).
+    """
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+    store = _make_vector_store(cfg)
+
+    if id is not None:
+        chunk = store.get(id)
+        if chunk is None:
+            console.print(f"[red]No chunk with id '{id}'.[/red]")
+            raise typer.Exit(code=1)
+        _print_chunk(chunk)
+        return
+
+    if file is not None:
+        chunks = store.list_chunks(where={"source_file": file})
+        if not chunks:
+            console.print(f"[yellow]No chunks for file '{file}'.[/yellow]")
+            return
+        console.print(f"[bold]{len(chunks)} chunk(s) for {file}:[/bold]")
+        _print_chunk_table(chunks)
+        return
+
+    if sample is not None:
+        # Chroma can't sample server-side; pull a generous slice then random.sample.
+        # Capping at 1000 to keep memory bounded for big stores.
+        candidates = store.list_chunks(limit=min(1000, max(sample * 10, 50)))
+        if not candidates:
+            console.print("[yellow]Store is empty.[/yellow]")
+            return
+        picked = random.sample(candidates, k=min(sample, len(candidates)))
+        console.print(f"[bold]{len(picked)} random chunk(s):[/bold]")
+        for chunk in picked:
+            _print_chunk(chunk)
+        return
+
+    # No flags: summary.
+    s = store.stats()
+    dim = store.peek_embedding_dim()
+    files: dict[str, int] = {}
+    for c in store.list_chunks(limit=10_000):
+        f = str(c.metadata.get("source_file", "?"))
+        files[f] = files.get(f, 0) + 1
+
+    table = Table(title="Vector store inspection", show_header=False, border_style="cyan")
+    table.add_column("key", style="bold")
+    table.add_column("value")
+    table.add_row("Collection", str(s.get("collection_name")))
+    table.add_row("Persist dir", str(s.get("persist_dir")))
+    table.add_row("Chunks indexed", str(s.get("count")))
+    table.add_row("Embedding dimension", str(dim) if dim is not None else "(empty)")
+    table.add_row("Distinct source files", str(len(files)))
+    console.print(table)
+
+    if files:
+        files_table = Table(title="Chunks per source file", border_style="cyan")
+        files_table.add_column("file")
+        files_table.add_column("chunks", justify="right")
+        for fname, n in sorted(files.items(), key=lambda kv: -kv[1]):
+            files_table.add_row(fname, str(n))
+        console.print(files_table)
+
+
+@app.command(name="eval")
+def eval_cmd(
+    file: Path = typer.Option(
+        Path("eval/questions.json"),
+        "--file",
+        "-f",
+        help="Path to a JSON file of gold-standard questions.",
+    ),
+    config: Path = ConfigOption,
+    skip_llm: bool = typer.Option(
+        False,
+        "--skip-llm",
+        help="Only check retrieval (don't call the chat model). "
+        "Faster, cheaper, and useful when you only care about recall.",
+    ),
+) -> None:
+    """Score the system against a gold-standard JSON of questions.
+
+    Schema (one item per question):
+
+        {
+          "question": "...",
+          "expected_sources": ["sample_can_fd.txt"],
+          "expected_contains": ["lose synchronization", "arbitration phase"]
+        }
+
+    Reports retrieval recall@k and keyword presence in the answer.
+    Exits non-zero if any question fails so it can be wired into CI.
+    """
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+    embedding_provider = build_embedding_provider(cfg.embeddings)
+    vector_store = _make_vector_store(cfg)
+    chat_provider = None if skip_llm else build_chat_provider(cfg.chat)
+
+    console.print(
+        Panel.fit(
+            f"[bold]Evaluating[/bold]\n"
+            f"File:       {file}\n"
+            f"Embeddings: {cfg.embeddings.provider} / {cfg.embeddings.model}\n"
+            f"Chat:       {'(skipped)' if skip_llm else f'{cfg.chat.provider} / {cfg.chat.model}'}\n"
+            f"top_k:      {cfg.retrieval.top_k}",
+            title="rag-app eval",
+            border_style="cyan",
+        )
+    )
+
+    report = run_eval_file(
+        path=file,
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        chat_provider=chat_provider,
+        top_k=cfg.retrieval.top_k,
+        score_threshold=cfg.retrieval.score_threshold,
+        chat_temperature=cfg.chat.temperature,
+        chat_max_tokens=cfg.chat.max_tokens,
+        answer_only_from_context=cfg.prompt.answer_only_from_context,
+        include_sources=cfg.prompt.include_sources,
+    )
+    _print_eval_report(report)
+    if not report.all_passed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def stats(config: Path = ConfigOption) -> None:
     """Print collection / provider information."""
 
@@ -244,6 +454,72 @@ def _print_sources(sources) -> None:
             score,
         )
     console.print(table)
+
+
+def _print_chunk(chunk) -> None:
+    meta_lines = "\n".join(f"  {k}: {v}" for k, v in chunk.metadata.items())
+    console.print(
+        Panel(
+            f"[bold]id:[/bold] {chunk.id}\n[bold]metadata:[/bold]\n{meta_lines}\n\n"
+            f"[bold]text:[/bold]\n{chunk.text}",
+            title=chunk.metadata.get("source_file", "chunk"),
+            border_style="cyan",
+        )
+    )
+
+
+def _print_chunk_table(chunks) -> None:
+    table = Table(border_style="cyan")
+    table.add_column("id")
+    table.add_column("chunk", justify="right")
+    table.add_column("preview")
+    for c in chunks:
+        preview = c.text.strip().replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:77] + "..."
+        table.add_row(
+            c.id,
+            str(c.metadata.get("chunk_index", "?")),
+            preview,
+        )
+    console.print(table)
+
+
+def _print_eval_report(report: EvalReport) -> None:
+    table = Table(title="Per-question results", border_style="cyan")
+    table.add_column("#", justify="right")
+    table.add_column("question")
+    table.add_column("recall@k", justify="right")
+    table.add_column("keywords", justify="right")
+    table.add_column("pass")
+    for i, r in enumerate(report.results, start=1):
+        q = r.question.question
+        if len(q) > 60:
+            q = q[:57] + "..."
+        kw = (
+            f"{r.keywords_found}/{r.keywords_expected}"
+            if r.keywords_expected
+            else "n/a"
+        )
+        recall = (
+            f"{r.sources_found}/{r.sources_expected}"
+            if r.sources_expected
+            else "n/a"
+        )
+        passed = "[green]PASS[/green]" if r.passed else "[red]FAIL[/red]"
+        table.add_row(str(i), q, recall, kw, passed)
+    console.print(table)
+
+    console.print(
+        Panel.fit(
+            f"Passed: [green]{report.passed_count}[/green] / {len(report.results)}\n"
+            f"Failed: [red]{report.failed_count}[/red]\n"
+            f"Mean retrieval recall: {report.mean_recall:.2f}\n"
+            f"Mean keyword recall:   {report.mean_keyword_recall:.2f}",
+            title="Summary",
+            border_style="cyan" if report.all_passed else "red",
+        )
+    )
 
 
 def _print_debug(debug: DebugInfo) -> None:

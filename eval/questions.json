@@ -1,0 +1,27 @@
+[
+  {
+    "question": "What happens if NBRP and DBRP are different?",
+    "expected_sources": ["sample_can_fd.txt"],
+    "expected_contains": ["lose synchronization", "arbitration phase", "data phase"]
+  },
+  {
+    "question": "How can you test a CAN controller without an external transceiver?",
+    "expected_sources": ["sample_can_fd.txt"],
+    "expected_contains": ["loopback"]
+  },
+  {
+    "question": "What is SPI slave underrun?",
+    "expected_sources": ["sample_spi_dma.md"],
+    "expected_contains": ["transmit buffer", "underrun"]
+  },
+  {
+    "question": "How can DMA help with SPI transfers in an AUTOSAR driver?",
+    "expected_sources": ["sample_spi_dma.md"],
+    "expected_contains": ["DMA", "CPU"]
+  },
+  {
+    "question": "What technique avoids SPI slave underrun for continuous streaming?",
+    "expected_sources": ["sample_spi_dma.md"],
+    "expected_contains": ["buffering"]
+  }
+]

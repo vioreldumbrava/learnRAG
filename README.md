@@ -8,6 +8,12 @@ a local vector database (ChromaDB), and a local LLM served by **Ollama** or
 The whole RAG flow is written out explicitly in plain Python so it can be read
 top-to-bottom.
 
+> 📚 **Learning RAG with this project?** Read
+> [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md) first — a 10-stage
+> walkthrough mapping each app feature to a RAG concept, with a companion
+> [interview Q&A](docs/02_INTERVIEW_QA.md), [concept reference](docs/01_RAG_CONCEPTS.md),
+> and [glossary](docs/03_GLOSSARY.md).
+
 ---
 
 ## 1. What is RAG?
@@ -277,6 +283,41 @@ Debug mode prints:
 .\run.bat stats
 ```
 
+### Retrieve only (no LLM call)
+
+Lets you check what context retrieval *would* hand to the LLM —
+invaluable for debugging "is retrieval wrong, or is the LLM wrong?"
+
+```powershell
+.\run.bat retrieve "What happens if NBRP and DBRP are different?"
+.\run.bat retrieve "ERR080082" --top-k 10
+```
+
+### Inspect the vector store
+
+Peek at what's actually stored.
+
+```powershell
+.\run.bat inspect                                       # summary + chunks per file
+.\run.bat inspect --sample 2                            # 2 random chunks with full text
+.\run.bat inspect --file sample_can_fd.txt              # all chunks for one document
+.\run.bat inspect --id <chunk_id>                       # full text + metadata
+```
+
+### Evaluate against a gold-standard JSON
+
+Scores retrieval recall@k and (optionally) keyword presence in the answer.
+Exits non-zero on any failure so it can be wired into CI later.
+
+```powershell
+.\run.bat eval --file eval/questions.json               # full eval (needs chat model)
+.\run.bat eval --file eval/questions.json --skip-llm    # retrieval-only, fast
+```
+
+The schema is one JSON object per question with `question`,
+`expected_sources` (filenames that should appear in top-K), and
+`expected_contains` (substrings that should appear in the answer).
+
 ### Clear the store
 
 ```powershell
@@ -294,7 +335,14 @@ RAG_system/
   gui.bat                      # Windows launcher: venv + deps + PySide6 GUI
   pyproject.toml               # package metadata + runtime dependencies
   config.example.yaml          # copied to config.yaml on first run
+  docs/                        # 📚 RAG learning path (start at 00_LEARNING_PATH.md)
+    00_LEARNING_PATH.md        # 10-stage walkthrough mapping features → concepts
+    01_RAG_CONCEPTS.md         # concept-by-concept reference
+    02_INTERVIEW_QA.md         # ~40 mid-level interview questions + answers
+    03_GLOSSARY.md             # one-line vocabulary
   documents/                   # source documents (kept as source of truth)
+  eval/
+    questions.json             # gold-standard Q&A for the `eval` command
   storage/
     chroma/                    # ChromaDB persistent files (ignored by git)
     document_index.json        # hash tracker (ignored by git)
@@ -320,6 +368,9 @@ RAG_system/
       retriever.py             # embed question + search
       prompt_builder.py        # builds system + user messages
       rag_service.py           # full query flow + DebugInfo
+    eval/
+      models.py                # pydantic schema for questions.json
+      runner.py                # recall@k + keyword scoring against fakes or live
     gui/
       app.py                   # MainWindow + dark Fusion palette + entry point
       provider_panel.py        # reusable chat/embedding provider widget
