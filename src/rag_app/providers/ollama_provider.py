@@ -9,6 +9,8 @@ Docs: https://github.com/ollama/ollama/blob/main/docs/api.md
 
 from __future__ import annotations
 
+from typing import Iterator
+
 import httpx
 
 from rag_app.models import ChatMessage
@@ -102,3 +104,45 @@ class OllamaChatProvider(ChatProvider):
                 f"Ollama returned no message content. Response: {data}"
             )
         return content
+
+    def generate_stream(
+        self,
+        messages: list[ChatMessage],
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> Iterator[str]:
+        """Stream tokens from Ollama using its native streaming API (#5)."""
+
+        url = f"{self.base_url}/api/chat"
+        payload = {
+            "model": self.model_name,
+            "messages": [m.model_dump() for m in messages],
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }
+        try:
+            with self._client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    import json
+                    data = json.loads(line)
+                    message = data.get("message") or {}
+                    content = message.get("content", "")
+                    if content:
+                        yield content
+                    if data.get("done"):
+                        break
+        except httpx.ConnectError as exc:
+            raise ProviderError(
+                f"Cannot reach Ollama at {self.base_url}. "
+                "Is `ollama serve` running?"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"Ollama streaming request failed ({exc.response.status_code})"
+            ) from exc

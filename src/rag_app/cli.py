@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import random
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from rag_app.config import AppConfig, load_config
@@ -60,6 +62,69 @@ def _make_vector_store(config: AppConfig) -> ChromaVectorStore:
     )
 
 
+def _make_retriever(
+    cfg: AppConfig,
+    embedding_provider,
+    vector_store,
+    chat_provider=None,
+    where: dict | None = None,
+) -> Retriever:
+    """Build a Retriever with all configured enhancements."""
+
+    return Retriever(
+        embedding_provider=embedding_provider,
+        vector_store=vector_store,
+        top_k=cfg.retrieval.top_k,
+        score_threshold=cfg.retrieval.score_threshold,
+        hybrid=cfg.retrieval.hybrid,
+        hybrid_keyword_weight=cfg.retrieval.hybrid_keyword_weight,
+        use_hyde=cfg.retrieval.use_hyde,
+        chat_provider=chat_provider if cfg.retrieval.use_hyde else None,
+        where=where,
+    )
+
+
+def _make_service(cfg: AppConfig, retriever, chat_provider) -> RagService:
+    """Build a RagService with all configured enhancements."""
+
+    prompt_builder = PromptBuilder(
+        answer_only_from_context=cfg.prompt.answer_only_from_context,
+        include_sources=cfg.prompt.include_sources,
+    )
+
+    reranker_chat = chat_provider if cfg.retrieval.reranker_model else None
+
+    return RagService(
+        retriever=retriever,
+        prompt_builder=prompt_builder,
+        chat_provider=chat_provider,
+        temperature=cfg.chat.temperature,
+        max_tokens=cfg.chat.max_tokens,
+        reranker_chat_provider=reranker_chat,
+        reranker_top_k=cfg.retrieval.top_k,
+    )
+
+
+def _parse_filters(filter_str: str | None) -> dict | None:
+    """Parse 'key=value,key2=value2' into a Chroma where-clause."""
+
+    if not filter_str:
+        return None
+    where: dict = {}
+    for pair in filter_str.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        where[key.strip()] = value.strip()
+    if not where:
+        return None
+    if len(where) == 1:
+        return where
+    # ChromaDB requires $and for multiple conditions.
+    return {"$and": [{k: v} for k, v in where.items()]}
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -92,13 +157,33 @@ def ingest(
             f"Documents dir: {cfg.paths.documents_dir}\n"
             f"Chroma dir:    {cfg.paths.chroma_dir}\n"
             f"Embeddings:    {cfg.embeddings.provider} / {cfg.embeddings.model}\n"
+            f"Strategy:      {cfg.chunking.strategy}\n"
             f"Force:         {force}",
             title="rag-app ingest",
             border_style="cyan",
         )
     )
 
-    summary = service.run(force=force, single_path=str(path) if path else None)
+    # Rich progress bar (#10).
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Ingesting...", total=None)
+
+        def on_progress(current: int, total: int, file_path: str, status: str) -> None:
+            progress.update(
+                task_id,
+                description=f"[{current}/{total}] {status}: {Path(file_path).name}",
+            )
+
+        summary = service.run(
+            force=force,
+            single_path=str(path) if path else None,
+            on_progress=on_progress,
+        )
+
     _print_summary(summary)
 
 
@@ -109,6 +194,12 @@ def query(
     debug: bool = typer.Option(
         False, "--debug", help="Print retrieval details and prompt preview."
     ),
+    stream: bool = typer.Option(
+        False, "--stream", help="Stream tokens as they arrive (#5)."
+    ),
+    filter: Optional[str] = typer.Option(
+        None, "--filter", help="Metadata filter, e.g. 'module=CAN' (#4).",
+    ),
 ) -> None:
     """Ask a question and print the model's answer plus the sources used."""
 
@@ -118,34 +209,118 @@ def query(
     embedding_provider = build_embedding_provider(cfg.embeddings)
     chat_provider = build_chat_provider(cfg.chat)
     vector_store = _make_vector_store(cfg)
+    where = _parse_filters(filter)
 
-    retriever = Retriever(
-        embedding_provider=embedding_provider,
-        vector_store=vector_store,
-        top_k=cfg.retrieval.top_k,
-        score_threshold=cfg.retrieval.score_threshold,
-    )
-    prompt_builder = PromptBuilder(
-        answer_only_from_context=cfg.prompt.answer_only_from_context,
-        include_sources=cfg.prompt.include_sources,
-    )
-    service = RagService(
-        retriever=retriever,
-        prompt_builder=prompt_builder,
-        chat_provider=chat_provider,
-        temperature=cfg.chat.temperature,
-        max_tokens=cfg.chat.max_tokens,
-    )
+    retriever = _make_retriever(cfg, embedding_provider, vector_store, chat_provider, where)
+    service = _make_service(cfg, retriever, chat_provider)
 
-    if debug:
+    if stream:
+        # Streaming mode (#5): print tokens as they arrive.
+        token_iter, sources = service.answer_stream(question)
+        console.print()
+        full_text = ""
+        for token in token_iter:
+            sys.stdout.write(token)
+            sys.stdout.flush()
+            full_text += token
+        sys.stdout.write("\n")
+        console.print()
+        from rag_app.models import RagAnswer
+        answer = RagAnswer(answer=full_text, sources=sources)
+        _print_sources(answer.sources)
+    elif debug:
         answer, debug_info = service.answer_with_debug(question)
         _print_debug(debug_info)
+        console.print()
+        console.print(Panel(answer.answer, title="Answer", border_style="green"))
+        _print_sources(answer.sources)
     else:
         answer = service.answer(question)
+        console.print()
+        console.print(Panel(answer.answer, title="Answer", border_style="green"))
+        _print_sources(answer.sources)
 
-    console.print()
-    console.print(Panel(answer.answer, title="Answer", border_style="green"))
-    _print_sources(answer.sources)
+
+@app.command()
+def chat(
+    config: Path = ConfigOption,
+    stream: bool = typer.Option(
+        True, "--stream/--no-stream", help="Stream tokens as they arrive."
+    ),
+    filter: Optional[str] = typer.Option(
+        None, "--filter", help="Metadata filter, e.g. 'module=CAN'.",
+    ),
+) -> None:
+    """Interactive multi-turn chat session (#1).
+
+    Type your questions, press Enter. Type /clear to reset history, /quit to exit.
+    """
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+
+    embedding_provider = build_embedding_provider(cfg.embeddings)
+    chat_provider = build_chat_provider(cfg.chat)
+    vector_store = _make_vector_store(cfg)
+    where = _parse_filters(filter)
+
+    retriever = _make_retriever(cfg, embedding_provider, vector_store, chat_provider, where)
+    service = _make_service(cfg, retriever, chat_provider)
+
+    from rag_app.models import ChatMessage
+    history: list[ChatMessage] = []
+
+    console.print(
+        Panel.fit(
+            "[bold]Interactive RAG Chat[/bold]\n"
+            "Type your questions. Commands: /clear (reset), /quit (exit).\n"
+            f"Hybrid: {cfg.retrieval.hybrid} | HyDE: {cfg.retrieval.use_hyde} | "
+            f"Reranker: {cfg.retrieval.reranker_model or 'off'}",
+            title="rag-app chat",
+            border_style="green",
+        )
+    )
+
+    while True:
+        try:
+            question = console.input("[bold cyan]You:[/bold cyan] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Bye.[/dim]")
+            break
+
+        if not question:
+            continue
+        if question.lower() in ("/quit", "/exit", "/q"):
+            console.print("[dim]Bye.[/dim]")
+            break
+        if question.lower() == "/clear":
+            history.clear()
+            console.print("[yellow]Conversation cleared.[/yellow]")
+            continue
+
+        if stream:
+            token_iter, sources = service.answer_stream(question, history=history)
+            console.print("[bold green]Assistant:[/bold green] ", end="")
+            full_text = ""
+            for token in token_iter:
+                sys.stdout.write(token)
+                sys.stdout.flush()
+                full_text += token
+            sys.stdout.write("\n\n")
+        else:
+            answer = service.answer(question, history=history)
+            full_text = answer.answer
+            sources = answer.sources
+            console.print(f"[bold green]Assistant:[/bold green] {full_text}\n")
+
+        # Show sources briefly.
+        if sources:
+            source_names = {s.metadata.get("source_file", "?") for s in sources}
+            console.print(f"[dim]Sources: {', '.join(sorted(source_names))}[/dim]\n")
+
+        # Append to history for multi-turn.
+        history.append(ChatMessage(role="user", content=question))
+        history.append(ChatMessage(role="assistant", content=full_text))
 
 
 @app.command()
@@ -157,6 +332,9 @@ def retrieve(
         "--top-k",
         "-k",
         help="Override the top_k from config for this run.",
+    ),
+    filter: Optional[str] = typer.Option(
+        None, "--filter", help="Metadata filter, e.g. 'module=CAN'.",
     ),
 ) -> None:
     """Run retrieval ONLY — no LLM call.
@@ -170,11 +348,15 @@ def retrieve(
 
     embedding_provider = build_embedding_provider(cfg.embeddings)
     vector_store = _make_vector_store(cfg)
+    where = _parse_filters(filter)
+
     retriever = Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         top_k=top_k if top_k is not None else cfg.retrieval.top_k,
         score_threshold=cfg.retrieval.score_threshold,
+        hybrid=cfg.retrieval.hybrid,
+        where=where,
     )
 
     console.print(
@@ -182,6 +364,8 @@ def retrieve(
             f"[bold]Retrieve only[/bold] (no LLM call)\n"
             f"Embeddings: {cfg.embeddings.provider} / {cfg.embeddings.model}\n"
             f"top_k:      {retriever.top_k}\n"
+            f"Hybrid:     {cfg.retrieval.hybrid}\n"
+            f"Filter:     {filter or '(none)'}\n"
             f"Question:   {question}",
             title="rag-app retrieve",
             border_style="cyan",
@@ -377,7 +561,11 @@ def stats(config: Path = ConfigOption) -> None:
     )
     table.add_row("Chat provider", f"{cfg.chat.provider} / {cfg.chat.model}")
     table.add_row("Chunk size / overlap", f"{cfg.chunking.chunk_size} / {cfg.chunking.chunk_overlap}")
+    table.add_row("Chunk strategy", cfg.chunking.strategy)
     table.add_row("top_k", str(cfg.retrieval.top_k))
+    table.add_row("Hybrid search", "on" if cfg.retrieval.hybrid else "off")
+    table.add_row("HyDE", "on" if cfg.retrieval.use_hyde else "off")
+    table.add_row("Reranker", cfg.retrieval.reranker_model or "off")
     console.print(table)
 
 
@@ -411,6 +599,39 @@ def clear(
         index_file.unlink()
         console.print(f"[red]Removed[/red] {index_file}")
     console.print("[green]Cleared.[/green]")
+
+
+@app.command()
+def serve(
+    config: Path = ConfigOption,
+) -> None:
+    """Start the FastAPI REST server (#8)."""
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+
+    import uvicorn
+
+    console.print(
+        Panel.fit(
+            f"[bold]Starting REST API server[/bold]\n"
+            f"Host: {cfg.server.host}:{cfg.server.port}\n"
+            f"Chat: {cfg.chat.provider} / {cfg.chat.model}\n"
+            f"Embeddings: {cfg.embeddings.provider} / {cfg.embeddings.model}",
+            title="rag-app serve",
+            border_style="green",
+        )
+    )
+
+    # Pass the config path as an environment variable to the server module.
+    import os
+    os.environ["RAG_CONFIG_PATH"] = str(config)
+    uvicorn.run(
+        "rag_app.server:app",
+        host=cfg.server.host,
+        port=cfg.server.port,
+        reload=False,
+    )
 
 
 # ---------------------------------------------------------------------------

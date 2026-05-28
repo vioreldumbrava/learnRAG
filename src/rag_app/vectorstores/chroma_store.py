@@ -80,11 +80,15 @@ class ChromaVectorStore(VectorStore):
         self,
         query_embedding: list[float],
         top_k: int,
+        where: dict | None = None,
     ) -> list[RetrievedChunk]:
-        results = self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-        )
+        kwargs: dict = {
+            "query_embeddings": [query_embedding],
+            "n_results": top_k,
+        }
+        if where:
+            kwargs["where"] = where
+        results = self._collection.query(**kwargs)
 
         # Chroma returns lists-of-lists keyed on each query. We sent one
         # query, so we pull index 0 from each.
@@ -172,3 +176,8 @@ class ChromaVectorStore(VectorStore):
         if first is None:
             return None
         return int(len(first))
+
+    def all_chunks(self, limit: int = 50_000) -> list[RetrievedChunk]:
+        """Return every stored chunk (used for BM25 indexing)."""
+
+        return self.list_chunks(limit=limit)

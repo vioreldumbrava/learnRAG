@@ -55,6 +55,15 @@ class FakeChatProvider(ChatProvider):
         self.received.append(list(messages))
         return self.reply
 
+    def generate_stream(
+        self,
+        messages: list[ChatMessage],
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ):
+        self.received.append(list(messages))
+        yield self.reply
+
 
 class FakeVectorStore(VectorStore):
     """Tiny in-memory store. Distance = simple L1 over the fixed dim."""
@@ -76,9 +85,14 @@ class FakeVectorStore(VectorStore):
         self,
         query_embedding: list[float],
         top_k: int,
+        where: dict | None = None,
     ) -> list[RetrievedChunk]:
         scored = []
         for cid, emb in self.embeddings.items():
+            chunk = self.chunks[cid]
+            # Simple metadata filter support.
+            if where and not self._matches_where(chunk.metadata, where):
+                continue
             d = _l1(query_embedding, emb)
             scored.append((d, cid))
         scored.sort(key=lambda t: t[0])
@@ -95,6 +109,18 @@ class FakeVectorStore(VectorStore):
             )
         return out
 
+    @staticmethod
+    def _matches_where(metadata: dict, where: dict) -> bool:
+        for key, value in where.items():
+            if key == "$and":
+                return all(
+                    FakeVectorStore._matches_where(metadata, cond)
+                    for cond in value
+                )
+            if metadata.get(key) != value:
+                return False
+        return True
+
     def delete_by_document_hash(self, document_hash: str) -> None:
         to_drop = [
             cid for cid, c in self.chunks.items()
@@ -110,6 +136,19 @@ class FakeVectorStore(VectorStore):
     def clear(self) -> None:
         self.chunks.clear()
         self.embeddings.clear()
+
+    def all_chunks(self, limit: int = 50_000) -> list[RetrievedChunk]:
+        out: list[RetrievedChunk] = []
+        for cid, c in list(self.chunks.items())[:limit]:
+            out.append(
+                RetrievedChunk(
+                    id=c.id,
+                    text=c.text,
+                    metadata=c.metadata,
+                    score=None,
+                )
+            )
+        return out
 
 
 def _l1(a: Iterable[float], b: Iterable[float]) -> float:

@@ -170,7 +170,7 @@ class IngestTab(QWidget):
 
     def _pick_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Pick file to ingest", "", "Documents (*.txt *.md *.pdf)"
+            self, "Pick file to ingest", "", "Documents (*.txt *.md *.pdf *.docx *.html *.htm *.csv)"
         )
         if path:
             self.path_edit.setText(path)

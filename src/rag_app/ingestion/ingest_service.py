@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Protocol
 
 from rag_app.config import AppConfig
 from rag_app.ingestion.chunker import Chunker
@@ -21,6 +22,33 @@ from rag_app.vectorstores.base import VectorStore
 
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Progress callback protocol (#10)
+# ---------------------------------------------------------------------------
+
+class ProgressCallback(Protocol):
+    """Called during ingestion to report progress.
+
+    Parameters:
+        current: 1-based index of the file being processed.
+        total: total number of files to process.
+        file_path: path of the file being processed.
+        status: short status string, e.g. "indexing", "skipped", "failed".
+    """
+
+    def __call__(
+        self,
+        current: int,
+        total: int,
+        file_path: str,
+        status: str,
+    ) -> None: ...
+
+
+def _noop_progress(current: int, total: int, file_path: str, status: str) -> None:
+    """Default no-op progress callback."""
 
 
 @dataclass
@@ -47,24 +75,43 @@ class IngestService:
         self.chunker = Chunker(
             chunk_size=config.chunking.chunk_size,
             chunk_overlap=config.chunking.chunk_overlap,
+            strategy=config.chunking.strategy,
         )
         self.hash_tracker = HashTracker(config.paths.index_file)
 
-    def run(self, force: bool = False, single_path: str | None = None) -> IngestSummary:
+    def run(
+        self,
+        force: bool = False,
+        single_path: str | None = None,
+        on_progress: Callable[..., None] | None = None,
+    ) -> IngestSummary:
+        """Run the full ingestion pipeline.
+
+        Args:
+            force: re-ingest even if unchanged.
+            single_path: ingest a single file instead of the configured folder.
+            on_progress: optional callback called for each file processed.
+        """
+
+        progress = on_progress or _noop_progress
         documents = self._discover(single_path)
         summary = IngestSummary()
+        total = len(documents)
 
-        for doc in documents:
+        for idx, doc in enumerate(documents, start=1):
             try:
                 indexed = self._ingest_one(doc, force=force, summary=summary)
             except Exception as exc:  # surface, but keep processing others
                 logger.exception("Failed to ingest %s", doc.source_path)
                 summary.failed_files.append((doc.source_path, str(exc)))
+                progress(idx, total, doc.source_path, "failed")
                 continue
             if indexed:
                 summary.indexed_files.append(doc.source_path)
+                progress(idx, total, doc.source_path, "indexed")
             else:
                 summary.skipped_files.append(doc.source_path)
+                progress(idx, total, doc.source_path, "skipped")
 
         self.hash_tracker.save()
         return summary
@@ -108,6 +155,9 @@ class IngestService:
             self.hash_tracker.record(path, current_hash, chunks=0, document_hash=current_hash)
             return False
 
+        # Derive folder-based metadata for filtering (#4).
+        folder_meta = _derive_folder_metadata(doc, self.config.paths.documents_dir)
+
         chunks = [
             DocumentChunk(
                 id=f"{current_hash[:12]}:{i}",
@@ -118,6 +168,7 @@ class IngestService:
                     "chunk_index": i,
                     "document_hash": current_hash,
                     "file_type": doc.file_type,
+                    **folder_meta,
                 },
             )
             for i, chunk_text in enumerate(chunk_texts)
@@ -142,3 +193,23 @@ class IngestService:
         summary.total_chunks += len(chunks)
         logger.info("Indexed %d chunks from %s", len(chunks), path)
         return True
+
+
+def _derive_folder_metadata(doc: LoadedDocument, documents_dir: str) -> dict[str, str]:
+    """Derive metadata from the folder structure for filtering (#4).
+
+    If the file is at ``documents/CAN/spec.pdf``, the ``module`` metadata
+    will be ``CAN``.  Nested folders are joined: ``CAN/timing`` → ``CAN/timing``.
+    """
+
+    try:
+        relative = doc.path.relative_to(Path(documents_dir).resolve())
+    except ValueError:
+        # File is outside the configured documents dir (e.g. absolute path
+        # passed via --path); no folder metadata available.
+        return {}
+
+    parts = relative.parts[:-1]  # everything except the filename
+    if parts:
+        return {"module": "/".join(parts)}
+    return {}

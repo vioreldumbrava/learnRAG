@@ -49,12 +49,23 @@ class PromptBuilder:
         self,
         question: str,
         chunks: list[RetrievedChunk],
+        history: list[ChatMessage] | None = None,
     ) -> list[ChatMessage]:
+        """Build the message list for the LLM.
+
+        If `history` is provided, prior conversation turns are inserted
+        between the system message and the current user message (#1).
+        """
+
         user_prompt = self._build_user_prompt(question, chunks)
-        return [
+        messages: list[ChatMessage] = [
             ChatMessage(role="system", content=self.system_prompt),
-            ChatMessage(role="user", content=user_prompt),
         ]
+        # Insert conversation history before the new user message (#1).
+        if history:
+            messages.extend(history)
+        messages.append(ChatMessage(role="user", content=user_prompt))
+        return messages
 
     # ----- internals -------------------------------------------------------
 

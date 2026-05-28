@@ -1,4 +1,11 @@
-"""Ask tab: question input, debug toggle, answer + sources display."""
+"""Ask tab: question input, debug toggle, answer + sources display.
+
+Features:
+    - Multi-turn conversation with history (#1)
+    - Clear History button to reset the conversation
+    - Metadata filter input (#4)
+    - All retrieval enhancements (hybrid, HyDE, reranker) used from config
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -24,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from rag_app.config import load_config
 from rag_app.gui.workers import run_in_thread
-from rag_app.models import RagAnswer
+from rag_app.models import ChatMessage, RagAnswer
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
 from rag_app.retrieval.prompt_builder import PromptBuilder
 from rag_app.retrieval.rag_service import DebugInfo, RagService
@@ -37,6 +45,7 @@ class AskTab(QWidget):
         super().__init__()
         self._config_path_getter = config_path_getter
         self._thread: QThread | None = None
+        self._history: list[ChatMessage] = []  # conversation history (#1)
 
         layout = QVBoxLayout(self)
 
@@ -49,7 +58,21 @@ class AskTab(QWidget):
         controls = QHBoxLayout()
         self.debug_check = QCheckBox("Debug (show retrieved chunks + final prompt)")
         controls.addWidget(self.debug_check)
+
+        # Metadata filter (#4)
+        controls.addWidget(QLabel("Filter:"))
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("module=CAN")
+        self.filter_edit.setFixedWidth(180)
+        controls.addWidget(self.filter_edit)
+
         controls.addStretch(1)
+
+        # Clear history button (#1)
+        self.clear_btn = QPushButton("Clear History")
+        self.clear_btn.clicked.connect(self._clear_history)
+        controls.addWidget(self.clear_btn)
+
         self.ask_btn = QPushButton("Ask")
         self.ask_btn.clicked.connect(self.run_ask)
         controls.addWidget(self.ask_btn)
@@ -59,6 +82,11 @@ class AskTab(QWidget):
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
+
+        # History indicator
+        self.history_label = QLabel("")
+        self.history_label.setStyleSheet("color: #6a6; font-style: italic;")
+        layout.addWidget(self.history_label)
 
         # Splitter: answer on top, details (sources + debug) on bottom.
         splitter = QSplitter(Qt.Vertical)
@@ -117,6 +145,22 @@ class AskTab(QWidget):
         self.sources_table.setRowCount(0)
         self.debug_edit.clear()
 
+        # Capture history for this query.
+        history = list(self._history) if self._history else None
+
+        # Parse filter.
+        filter_str = self.filter_edit.text().strip()
+        where = None
+        if filter_str and "=" in filter_str:
+            where = {}
+            for pair in filter_str.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    where[k.strip()] = v.strip()
+            if len(where) > 1:
+                where = {"$and": [{k: v} for k, v in where.items()]}
+
         def task():
             cfg = load_config(config_path)
             embedding_provider = build_embedding_provider(cfg.embeddings)
@@ -130,22 +174,30 @@ class AskTab(QWidget):
                 vector_store=store,
                 top_k=cfg.retrieval.top_k,
                 score_threshold=cfg.retrieval.score_threshold,
+                hybrid=cfg.retrieval.hybrid,
+                use_hyde=cfg.retrieval.use_hyde,
+                chat_provider=chat_provider if cfg.retrieval.use_hyde else None,
+                where=where,
             )
             prompt_builder = PromptBuilder(
                 answer_only_from_context=cfg.prompt.answer_only_from_context,
                 include_sources=cfg.prompt.include_sources,
             )
+            reranker_chat = chat_provider if cfg.retrieval.reranker_model else None
             service = RagService(
                 retriever=retriever,
                 prompt_builder=prompt_builder,
                 chat_provider=chat_provider,
                 temperature=cfg.chat.temperature,
                 max_tokens=cfg.chat.max_tokens,
+                reranker_chat_provider=reranker_chat,
+                reranker_top_k=cfg.retrieval.top_k,
             )
             if debug:
-                return service.answer_with_debug(question)
-            return service.answer(question), None
+                return service.answer_with_debug(question, history=history)
+            return service.answer(question, history=history), None
 
+        self._current_question = question
         self._thread, _ = run_in_thread(
             self,
             fn=task,
@@ -162,12 +214,33 @@ class AskTab(QWidget):
         else:
             self.debug_edit.clear()
 
+        # Update conversation history (#1).
+        question = getattr(self, "_current_question", "")
+        if question:
+            self._history.append(ChatMessage(role="user", content=question))
+            self._history.append(ChatMessage(role="assistant", content=answer.answer))
+            self._update_history_label()
+
     def _on_error(self, message: str) -> None:
         self.answer_edit.setPlainText(f"Error:\n{message}")
 
     def _reset_running_state(self) -> None:
         self.ask_btn.setEnabled(True)
         self.progress.setVisible(False)
+
+    def _clear_history(self) -> None:
+        self._history.clear()
+        self._update_history_label()
+        self.answer_edit.clear()
+        self.sources_table.setRowCount(0)
+        self.debug_edit.clear()
+
+    def _update_history_label(self) -> None:
+        turns = len(self._history) // 2
+        if turns:
+            self.history_label.setText(f"Conversation: {turns} turn(s) in memory")
+        else:
+            self.history_label.setText("")
 
     # ----- rendering -------------------------------------------------------
 

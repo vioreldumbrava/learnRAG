@@ -26,8 +26,13 @@ class VectorStore(ABC):
         self,
         query_embedding: list[float],
         top_k: int,
+        where: dict | None = None,
     ) -> list[RetrievedChunk]:
-        """Return the top-k chunks closest to `query_embedding`."""
+        """Return the top-k chunks closest to `query_embedding`.
+
+        If `where` is provided, only chunks whose metadata matches the
+        filter are considered.
+        """
 
     @abstractmethod
     def delete_by_document_hash(self, document_hash: str) -> None:
@@ -39,4 +44,8 @@ class VectorStore(ABC):
 
     def clear(self) -> None:
         """Remove every chunk in the store. Optional override."""
+        raise NotImplementedError
+
+    def all_chunks(self, limit: int = 50_000) -> list[RetrievedChunk]:
+        """Return all stored chunks (for BM25 indexing). Optional override."""
         raise NotImplementedError

@@ -7,6 +7,8 @@ value is required by the SDK but ignored by LM Studio.
 
 from __future__ import annotations
 
+from typing import Iterator
+
 from openai import APIConnectionError, OpenAI, OpenAIError
 
 from rag_app.models import ChatMessage
@@ -84,3 +86,33 @@ class LmStudioChatProvider(ChatProvider):
             )
         content = response.choices[0].message.content or ""
         return content
+
+    def generate_stream(
+        self,
+        messages: list[ChatMessage],
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> Iterator[str]:
+        """Stream tokens from LM Studio using OpenAI SDK streaming (#5)."""
+
+        try:
+            stream = self._client.chat.completions.create(
+                model=self.model_name,
+                messages=[m.model_dump() for m in messages],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+        except APIConnectionError as exc:
+            raise ProviderError(
+                f"Cannot reach LM Studio at {self.base_url}. "
+                "Is the local server running and a chat model loaded?"
+            ) from exc
+        except OpenAIError as exc:
+            raise ProviderError(
+                f"LM Studio streaming request failed: {exc}"
+            ) from exc
+
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content

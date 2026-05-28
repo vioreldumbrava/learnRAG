@@ -8,6 +8,7 @@ and tests use small in-memory fakes.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Iterator
 
 from rag_app.models import ChatMessage
 
@@ -44,6 +45,20 @@ class ChatProvider(ABC):
         max_tokens: int = 800,
     ) -> str:
         """Send `messages` to the model and return the assistant reply."""
+
+    def generate_stream(
+        self,
+        messages: list[ChatMessage],
+        temperature: float = 0.2,
+        max_tokens: int = 800,
+    ) -> Iterator[str]:
+        """Stream tokens one at a time. Default: yield the full response.
+
+        Subclasses should override this with a true streaming implementation
+        for better UX (#5).
+        """
+
+        yield self.generate(messages, temperature, max_tokens)
 
     # The model/provider names are useful for debug output. Subclasses set
     # them in __init__; default values keep this class abstract-friendly.

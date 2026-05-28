@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-SUPPORTED_EXTENSIONS: tuple[str, ...] = (".txt", ".md", ".pdf")
+SUPPORTED_EXTENSIONS: tuple[str, ...] = (
+    ".txt", ".md", ".pdf", ".docx", ".html", ".htm", ".csv",
+)
 
 
 @dataclass(frozen=True)

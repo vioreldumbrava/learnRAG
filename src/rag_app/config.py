@@ -29,9 +29,13 @@ class PathsSection(BaseModel):
     index_file: str = "storage/document_index.json"
 
 
+ChunkingStrategy = Literal["paragraph", "heading", "semantic"]
+
+
 class ChunkingSection(BaseModel):
     chunk_size: int = 900
     chunk_overlap: int = 150
+    strategy: ChunkingStrategy = "paragraph"
 
     @field_validator("chunk_size")
     @classmethod
@@ -70,11 +74,20 @@ class VectorStoreSection(BaseModel):
 class RetrievalSection(BaseModel):
     top_k: int = 5
     score_threshold: float | None = None
+    hybrid: bool = False
+    hybrid_keyword_weight: float = 0.3
+    reranker_model: str | None = None
+    use_hyde: bool = False
 
 
 class PromptSection(BaseModel):
     answer_only_from_context: bool = True
     include_sources: bool = True
+
+
+class ServerSection(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = 8000
 
 
 class AppConfig(BaseModel):
@@ -86,6 +99,7 @@ class AppConfig(BaseModel):
     vector_store: VectorStoreSection = Field(default_factory=VectorStoreSection)
     retrieval: RetrievalSection = Field(default_factory=RetrievalSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
+    server: ServerSection = Field(default_factory=ServerSection)
 
 
 def load_config(path: str | Path) -> AppConfig:
