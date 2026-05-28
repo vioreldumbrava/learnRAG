@@ -1,0 +1,84 @@
+"""End-to-end RAG flow using fake providers and a fake vector store."""
+
+from __future__ import annotations
+
+from rag_app.models import DocumentChunk
+from rag_app.retrieval.prompt_builder import PromptBuilder
+from rag_app.retrieval.rag_service import RagService
+from rag_app.retrieval.retriever import Retriever
+
+
+def test_full_query_flow(
+    fake_embedding_provider, fake_vector_store, fake_chat_provider
+):
+    # Pre-populate the fake store with a couple of chunks.
+    chunks = [
+        DocumentChunk(
+            id="doc1:0",
+            text="NBRP and DBRP should be equal in CAN-FD configuration.",
+            metadata={"source_file": "sample_can_fd.txt", "chunk_index": 0,
+                      "document_hash": "doc1"},
+        ),
+        DocumentChunk(
+            id="doc2:0",
+            text="SPI slave underrun happens when the transmit buffer is empty.",
+            metadata={"source_file": "sample_spi_dma.md", "chunk_index": 0,
+                      "document_hash": "doc2"},
+        ),
+    ]
+    embeddings = fake_embedding_provider.embed_texts([c.text for c in chunks])
+    fake_vector_store.upsert_chunks(chunks, embeddings)
+
+    retriever = Retriever(fake_embedding_provider, fake_vector_store, top_k=2)
+    prompt_builder = PromptBuilder()
+    service = RagService(retriever, prompt_builder, fake_chat_provider)
+
+    answer = service.answer("What happens if NBRP and DBRP are different?")
+
+    assert answer.answer == "FAKE_ANSWER"
+    assert len(answer.sources) == 2
+    files = {s.metadata.get("source_file") for s in answer.sources}
+    assert "sample_can_fd.txt" in files
+
+    # The chat provider should have received a system + user message.
+    received = fake_chat_provider.received[0]
+    assert [m.role for m in received] == ["system", "user"]
+    user_content = received[1].content
+    assert "NBRP" in user_content
+    assert "[Source 1]" in user_content
+
+
+def test_debug_flow_returns_debug_info(
+    fake_embedding_provider, fake_vector_store, fake_chat_provider
+):
+    chunk = DocumentChunk(
+        id="docX:0",
+        text="DMA can transfer SPI data without CPU copying every byte.",
+        metadata={"source_file": "sample_spi_dma.md", "chunk_index": 0,
+                  "document_hash": "docX"},
+    )
+    embeddings = fake_embedding_provider.embed_texts([chunk.text])
+    fake_vector_store.upsert_chunks([chunk], embeddings)
+
+    retriever = Retriever(fake_embedding_provider, fake_vector_store, top_k=1)
+    service = RagService(retriever, PromptBuilder(), fake_chat_provider)
+
+    answer, debug = service.answer_with_debug("What does DMA do for SPI?")
+
+    assert answer.answer == "FAKE_ANSWER"
+    assert debug.embedding_provider == "fake"
+    assert debug.chat_provider == "fake"
+    assert len(debug.retrieved_chunks) == 1
+    assert debug.prompt_char_count > 0
+    assert any(m.role == "user" for m in debug.prompt_messages)
+
+
+def test_empty_question_returns_no_sources(
+    fake_embedding_provider, fake_vector_store, fake_chat_provider
+):
+    retriever = Retriever(fake_embedding_provider, fake_vector_store, top_k=3)
+    service = RagService(retriever, PromptBuilder(), fake_chat_provider)
+    answer = service.answer("   ")
+    assert answer.sources == []
+    # Still calls the chat provider with the (empty) context.
+    assert fake_chat_provider.received

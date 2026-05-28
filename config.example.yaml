@@ -1,0 +1,72 @@
+# local-rag-learning configuration file.
+#
+# Copy this file to `config.yaml` and edit values for your environment.
+# Two example provider setups are shown below — uncomment the one you want
+# to use. The defaults below are configured for LM Studio.
+#
+# IMPORTANT:
+#   The same embedding model MUST be used for ingestion and query, because
+#   embeddings from different models are not comparable. If you change the
+#   embedding model, clear the vector store and re-ingest the documents.
+
+app:
+  name: "local-rag-learning"
+  debug: false
+
+paths:
+  documents_dir: "documents"
+  storage_dir: "storage"
+  chroma_dir: "storage/chroma"
+  index_file: "storage/document_index.json"
+
+chunking:
+  chunk_size: 900       # characters per chunk
+  chunk_overlap: 150    # characters of overlap between neighboring chunks
+
+# ---------------------------------------------------------------------------
+# Default provider setup: LM Studio for both chat and embeddings.
+# Start LM Studio, load a chat model and an embedding model, then enable the
+# "Local Server" tab. The server is OpenAI-compatible.
+# ---------------------------------------------------------------------------
+chat:
+  provider: "lmstudio"            # ollama | lmstudio
+  model: "local-model"            # whatever model id LM Studio shows
+  base_url: "http://localhost:1234/v1"
+  temperature: 0.2
+  max_tokens: 800
+
+embeddings:
+  provider: "lmstudio"            # ollama | lmstudio
+  model: "text-embedding-model"   # whatever embedding model id LM Studio shows
+  base_url: "http://localhost:1234/v1"
+
+# ---------------------------------------------------------------------------
+# Alternative: Ollama for both chat and embeddings.
+# Start Ollama (`ollama serve`), pull a chat model and an embedding model:
+#     ollama pull gemma3:12b
+#     ollama pull embeddinggemma
+#
+# chat:
+#   provider: "ollama"
+#   model: "gemma3:12b"
+#   base_url: "http://localhost:11434"
+#   temperature: 0.2
+#   max_tokens: 800
+#
+# embeddings:
+#   provider: "ollama"
+#   model: "embeddinggemma"
+#   base_url: "http://localhost:11434"
+# ---------------------------------------------------------------------------
+
+vector_store:
+  provider: "chroma"
+  collection_name: "local_rag_docs"
+
+retrieval:
+  top_k: 5
+  score_threshold: null   # set a float to discard chunks above this distance
+
+prompt:
+  answer_only_from_context: true
+  include_sources: true

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+
+# Local configuration (copy of config.example.yaml)
+config.yaml
+
+# Local vector store and ingestion index
+storage/chroma/
+storage/document_index.json
+
+# Editor / OS
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

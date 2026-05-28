@@ -1,0 +1,5 @@
+CAN FD Configuration Notes
+
+In CAN-FD mode, the Nominal Baud Rate Prescaler NBRP and Data Baud Rate Prescaler DBRP should normally be configured with the same value. If NBRP and DBRP are different, the controller may lose synchronization during the switch from arbitration phase to data phase.
+
+Internal loopback mode can be used to test the CAN controller without an external transceiver.
