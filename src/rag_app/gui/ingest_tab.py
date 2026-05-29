@@ -155,7 +155,7 @@ class IngestTab(QWidget):
             if single_path and Path(single_path).is_dir():
                 from rag_app.ingestion.document_loader import scan_folder
 
-                docs = scan_folder(single_path)
+                docs = scan_folder(single_path, include_ocr_types=cfg.ocr.enabled)
                 total = len(docs)
                 combined = IngestSummary()
                 for i, doc in enumerate(docs, start=1):

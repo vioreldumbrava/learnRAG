@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
@@ -22,6 +23,17 @@ from rag_app.vectorstores.base import VectorStore
 
 
 logger = logging.getLogger(__name__)
+
+# Heading pattern — same as in chunker.py so section names match what the
+# chunker recognises as section boundaries.
+_HEADING_RE = re.compile(
+    r"^(?:"
+    r"(?:\d+\.)+\d*\s+"            # 1.2 or 1.2.3
+    r"|(?:section|chapter)\s+\d+"  # Section 4 / Chapter 5
+    r"|#{1,6}\s+"                   # Markdown headings
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +131,10 @@ class IngestService:
     # ----- internals -------------------------------------------------------
 
     def _discover(self, single_path: str | None) -> list[LoadedDocument]:
+        ocr_on = self.config.ocr.enabled
         if single_path:
-            return [load_single(single_path)]
-        return scan_folder(self.config.paths.documents_dir)
+            return [load_single(single_path, include_ocr_types=ocr_on)]
+        return scan_folder(self.config.paths.documents_dir, include_ocr_types=ocr_on)
 
     def _ingest_one(
         self,
@@ -147,7 +160,12 @@ class IngestService:
             # case ids overlap from an earlier identical content state.
             self.vector_store.delete_by_document_hash(current_hash)
 
-        text = extract_text(path)
+        text = extract_text(
+            path,
+            ocr_enabled=self.config.ocr.enabled,
+            ocr_lang=self.config.ocr.lang,
+            ocr_min_chars=self.config.ocr.min_chars_per_page,
+        )
         chunk_texts = self.chunker.split(text)
 
         if not chunk_texts:
@@ -168,6 +186,7 @@ class IngestService:
                     "chunk_index": i,
                     "document_hash": current_hash,
                     "file_type": doc.file_type,
+                    "section": _extract_section(chunk_text),
                     **folder_meta,
                 },
             )
@@ -213,3 +232,21 @@ def _derive_folder_metadata(doc: LoadedDocument, documents_dir: str) -> dict[str
     if parts:
         return {"module": "/".join(parts)}
     return {}
+
+
+def _extract_section(chunk_text: str) -> str:
+    """Return the first heading line found in *chunk_text*, or ``""``.
+
+    Scans the first 10 lines so that chunks that start with a heading (as
+    produced by :class:`HeadingStrategy`) have their section name captured.
+    For chunks that don't start with a heading the function falls back to
+    scanning the whole text once, because paragraph chunks may begin mid-
+    section — in that case an empty string is returned.
+    """
+    lines = chunk_text.strip().splitlines()
+    for line in lines[:10]:
+        stripped = line.strip()
+        if stripped and _HEADING_RE.match(stripped):
+            # Trim very long headings to keep metadata compact.
+            return stripped[:120]
+    return ""

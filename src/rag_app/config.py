@@ -85,6 +85,15 @@ class PromptSection(BaseModel):
     include_sources: bool = True
 
 
+class OcrSection(BaseModel):
+    enabled: bool = False
+    # Pages/images with fewer characters than this after normal extraction
+    # are considered "image-only" and will be OCR'd when enabled=true.
+    min_chars_per_page: int = 50
+    # Tesseract language code(s), e.g. "eng", "eng+deu".
+    lang: str = "eng"
+
+
 class ServerSection(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8000
@@ -99,6 +108,7 @@ class AppConfig(BaseModel):
     vector_store: VectorStoreSection = Field(default_factory=VectorStoreSection)
     retrieval: RetrievalSection = Field(default_factory=RetrievalSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
+    ocr: OcrSection = Field(default_factory=OcrSection)
     server: ServerSection = Field(default_factory=ServerSection)
 
 

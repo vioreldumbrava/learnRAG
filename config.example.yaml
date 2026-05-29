@@ -89,6 +89,27 @@ prompt:
   answer_only_from_context: true
   include_sources: true
 
+# ---------------------------------------------------------------------------
+# OCR — optional, off by default.
+# Enable this to ingest scanned PDFs (image-only pages) and image files
+# (PNG, JPEG, TIFF, BMP, WebP).
+#
+# Requirements:
+#   pip install pdf2image pytesseract Pillow
+#   • Windows: install Tesseract from https://github.com/UB-Mannheim/tesseract/wiki
+#              and add it to PATH (or set pytesseract.pytesseract.tesseract_cmd).
+#   • Linux:   sudo apt install tesseract-ocr
+#   • macOS:   brew install tesseract
+#
+# Performance note:
+#   OCR only runs at INGEST time (never during queries).  It is skipped for
+#   pages/files that already have enough text (>= min_chars_per_page).
+# ---------------------------------------------------------------------------
+ocr:
+  enabled: false
+  min_chars_per_page: 50   # pages with fewer chars trigger OCR fallback
+  lang: "eng"              # Tesseract language code(s), e.g. "eng+deu"
+
 server:
   # Used by `rag-app serve` (FastAPI REST API).
   host: "127.0.0.1"

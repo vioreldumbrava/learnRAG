@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -52,9 +53,10 @@ class SettingsTab(QWidget):
         layout.addWidget(self.chat_panel)
         layout.addWidget(self.embed_panel)
 
-        # chunking / retrieval / vector store
+        # chunking / retrieval / vector store / ocr
         layout.addWidget(self._build_chunking_box())
         layout.addWidget(self._build_retrieval_box())
+        layout.addWidget(self._build_ocr_box())
 
         # save row
         save_row = QHBoxLayout()
@@ -109,6 +111,11 @@ class SettingsTab(QWidget):
                 "answer_only_from_context": True,
                 "include_sources": True,
             },
+            "ocr": {
+                "enabled": self.ocr_enabled_check.isChecked(),
+                "min_chars_per_page": int(self.ocr_min_chars_spin.value()),
+                "lang": self.ocr_lang_edit.text().strip() or "eng",
+            },
         }
 
     def current_config_path(self) -> str:
@@ -145,6 +152,9 @@ class SettingsTab(QWidget):
         self.top_k_spin.setValue(cfg.retrieval.top_k)
         self.score_threshold_spin.setValue(cfg.retrieval.score_threshold or 0.0)
         self.collection_edit.setText(cfg.vector_store.collection_name)
+        self.ocr_enabled_check.setChecked(cfg.ocr.enabled)
+        self.ocr_min_chars_spin.setValue(cfg.ocr.min_chars_per_page)
+        self.ocr_lang_edit.setText(cfg.ocr.lang)
         settings_store.set_last_config_path(path)
         self.status_label.setText(f"Loaded {path}.")
 
@@ -197,6 +207,9 @@ class SettingsTab(QWidget):
         self.top_k_spin.setValue(5)
         self.score_threshold_spin.setValue(0.0)
         self.collection_edit.setText("local_rag_docs")
+        self.ocr_enabled_check.setChecked(False)
+        self.ocr_min_chars_spin.setValue(50)
+        self.ocr_lang_edit.setText("eng")
 
     # ----- secondary group boxes -------------------------------------------
 
@@ -228,4 +241,42 @@ class SettingsTab(QWidget):
         self.collection_edit = QLineEdit()
         self.collection_edit.setPlaceholderText("local_rag_docs")
         form.addRow("Collection name:", self.collection_edit)
+        return box
+
+    def _build_ocr_box(self) -> QGroupBox:
+        box = QGroupBox("OCR  (for scanned PDFs and image files)")
+        form = QFormLayout(box)
+
+        self.ocr_enabled_check = QCheckBox("Enable OCR at ingest time")
+        self.ocr_enabled_check.setToolTip(
+            "When checked, pages with very little extractable text are automatically\n"
+            "OCR'd using Tesseract.  Image files (.png, .jpg, …) are also ingested.\n"
+            "Requires: pip install pdf2image pytesseract Pillow  +  Tesseract on PATH."
+        )
+        form.addRow("", self.ocr_enabled_check)
+
+        self.ocr_min_chars_spin = QSpinBox()
+        self.ocr_min_chars_spin.setRange(0, 2000)
+        self.ocr_min_chars_spin.setSingleStep(10)
+        self.ocr_min_chars_spin.setToolTip(
+            "PDF pages with fewer characters than this trigger the OCR fallback."
+        )
+        form.addRow("Min chars / page:", self.ocr_min_chars_spin)
+
+        self.ocr_lang_edit = QLineEdit()
+        self.ocr_lang_edit.setPlaceholderText("eng")
+        self.ocr_lang_edit.setMaximumWidth(120)
+        self.ocr_lang_edit.setToolTip(
+            "Tesseract language code(s), e.g. \"eng\", \"eng+deu\"."
+        )
+        form.addRow("Tesseract lang:", self.ocr_lang_edit)
+
+        # Dim the spin/lang fields when OCR is disabled.
+        def _toggle(checked: bool) -> None:
+            self.ocr_min_chars_spin.setEnabled(checked)
+            self.ocr_lang_edit.setEnabled(checked)
+
+        self.ocr_enabled_check.toggled.connect(_toggle)
+        _toggle(self.ocr_enabled_check.isChecked())
+
         return box

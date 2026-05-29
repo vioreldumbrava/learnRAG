@@ -12,7 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QThread, Qt
+from PySide6.QtCore import QThread, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -100,13 +101,18 @@ class AskTab(QWidget):
         details_layout = QVBoxLayout(details)
         details_layout.setContentsMargins(0, 0, 0, 0)
 
-        details_layout.addWidget(QLabel("Sources"))
-        self.sources_table = QTableWidget(0, 4)
-        self.sources_table.setHorizontalHeaderLabels(["#", "file", "chunk", "score"])
+        details_layout.addWidget(QLabel("Sources  (double-click a row to open the file)"))
+        self.sources_table = QTableWidget(0, 5)
+        self.sources_table.setHorizontalHeaderLabels(["#", "file", "section", "chunk", "score"])
         self.sources_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch
         )
+        self.sources_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch
+        )
         self.sources_table.verticalHeader().setVisible(False)
+        self.sources_table.setToolTip("Double-click a row to open the source file.")
+        self.sources_table.cellDoubleClicked.connect(self._open_source_file)
         details_layout.addWidget(self.sources_table)
 
         self.debug_label = QLabel("Debug")
@@ -249,18 +255,51 @@ class AskTab(QWidget):
         self.sources_table.setRowCount(len(answer.sources))
         for row, src in enumerate(answer.sources):
             score = f"{src.score:.4f}" if src.score is not None else "n/a"
+            source_path = str(src.metadata.get("source_path", ""))
+            section = str(src.metadata.get("section", ""))
+
             self.sources_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+
+            file_item = QTableWidgetItem(str(src.metadata.get("source_file", "?")))
+            file_item.setData(Qt.UserRole, source_path)
+            if source_path:
+                file_item.setToolTip(f"Double-click to open:\n{source_path}")
+                file_item.setForeground(
+                    self.sources_table.palette().link()
+                )
+            self.sources_table.setItem(row, 1, file_item)
+
+            self.sources_table.setItem(row, 2, QTableWidgetItem(section))
             self.sources_table.setItem(
-                row, 1, QTableWidgetItem(str(src.metadata.get("source_file", "?")))
+                row, 3, QTableWidgetItem(str(src.metadata.get("chunk_index", "?")))
             )
-            self.sources_table.setItem(
-                row, 2, QTableWidgetItem(str(src.metadata.get("chunk_index", "?")))
-            )
-            self.sources_table.setItem(row, 3, QTableWidgetItem(score))
+            self.sources_table.setItem(row, 4, QTableWidgetItem(score))
+
         self.sources_table.resizeColumnsToContents()
         self.sources_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch
         )
+        self.sources_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch
+        )
+
+    def _open_source_file(self, row: int, _col: int) -> None:
+        """Open the source file for the clicked row in the system default app."""
+        file_item = self.sources_table.item(row, 1)
+        if file_item is None:
+            return
+        source_path = file_item.data(Qt.UserRole)
+        if not source_path:
+            return
+        p = Path(source_path)
+        if not p.exists():
+            QMessageBox.warning(
+                self,
+                "File not found",
+                f"Could not open:\n{source_path}\n\nThe file may have been moved or deleted.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
 
     def _render_debug(self, debug: DebugInfo) -> None:
         lines: list[str] = [
