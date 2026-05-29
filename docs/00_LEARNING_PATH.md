@@ -7,8 +7,11 @@ this repo as its lab.
 **Companion docs**
 
 - [01_RAG_CONCEPTS.md](01_RAG_CONCEPTS.md) — concept-by-concept reference.
-- [02_INTERVIEW_QA.md](02_INTERVIEW_QA.md) — ~40 mid-level interview questions.
+- [02_INTERVIEW_QA.md](02_INTERVIEW_QA.md) — ~55 mid-level interview questions.
 - [03_GLOSSARY.md](03_GLOSSARY.md) — one-line definitions.
+- [04_SENIOR_DEEP_DIVE.md](04_SENIOR_DEEP_DIVE.md) — senior-level deep dive:
+  trade-offs, system design, war stories, newer techniques (Contextual
+  Retrieval, ColBERT, prompt caching, …).
 
 **Each stage has the same shape:**
 
@@ -163,24 +166,47 @@ overlap.
 
 ### In this code
 
-The implementation is paragraph-aware-with-overlap, falling back to a
-character window for oversized paragraphs:
-[`Chunker.split`](../src/rag_app/ingestion/chunker.py).
+Three strategies are implemented in
+[`chunker.py`](../src/rag_app/ingestion/chunker.py), selected via
+`chunking.strategy` in `config.yaml`:
+
+| `strategy` | how it splits | best for |
+|---|---|---|
+| `paragraph` | blank-line paragraphs, packed up to `chunk_size`, char-window fallback for oversized paragraphs | general default, prose docs |
+| `heading` | section headings (`1.2 Title`, `## md`, `CHAPTER 5`), then paragraphs within each section | datasheets, structured technical PDFs |
+| `semantic` | recursive: headings → paragraphs → sentences → window — picks the biggest semantic unit that fits | highest quality, slowest |
+
+The `Chunker` class is a thin wrapper; the strategies live as separate
+`ChunkStrategy` classes (`ParagraphStrategy`, `HeadingStrategy`,
+`SemanticStrategy`) in the same file. Adding a fourth strategy is one
+new class + one line in the `_STRATEGIES` registry.
 
 ### Try it
 
-Compare retrieval at different chunk sizes:
+Compare both **chunk size** and **strategy** on the same question:
 
 ```powershell
-# Edit config.yaml: chunking.chunk_size = 300, chunk_overlap = 50
+# (1) Small fixed-size paragraph chunking
+# Edit config.yaml: chunking.chunk_size = 300, chunk_overlap = 50, strategy = "paragraph"
 .\run.bat clear --yes
 .\run.bat ingest
 .\run.bat retrieve "What happens if NBRP and DBRP are different?"
 
-# Now try chunk_size = 1500, chunk_overlap = 250 and repeat. Compare the
-# retrieved previews — small chunks return tight matches; big chunks
-# return a wall of text that may dilute the relevant sentence.
+# (2) Larger, paragraph
+# chunking.chunk_size = 1500, chunk_overlap = 250
+.\run.bat clear --yes; .\run.bat ingest
+.\run.bat retrieve "..."
+
+# (3) Heading strategy — much better recall on datasheets if they have
+# numbered sections like "1.2.3 Bit timing".
+# chunking.strategy = "heading"
+.\run.bat clear --yes; .\run.bat ingest
+.\run.bat retrieve "..."
 ```
+
+Small chunks return tight matches; big chunks return a wall of text that
+may dilute the relevant sentence. The `heading` strategy keeps an entire
+section together when it fits, which usually beats both for technical PDFs.
 
 ### Interview check
 
@@ -219,7 +245,11 @@ What's stored in this codebase, per chunk:
 - `id` — `<document_hash[:12]>:<chunk_index>` (stable across re-ingest)
 - `embedding` — the vector
 - `document` — the chunk text itself (so we can paste it into the prompt later)
-- `metadata` — `{source_file, source_path, chunk_index, document_hash, file_type}`
+- `metadata` — `{source_file, source_path, chunk_index, document_hash, file_type, module}`
+  - **`module` is auto-derived from the sub-folder under `documents/`.** Drop
+    a file at `documents/CAN/spec.pdf` and every chunk from it gets
+    `module: "CAN"`. This becomes the basis for metadata filtering in
+    Stage 5.
 
 Why store the text in the vector DB? You could go back to disk for it, but
 keeping it inline makes search → prompt a single round-trip.
@@ -235,14 +265,20 @@ away and re-derive it from the source files.
 - The abstract base [`VectorStore`](../src/rag_app/vectorstores/base.py)
   is what the rest of the app talks to — swap Chroma for Qdrant by adding
   one new class.
+- Folder-derived metadata happens in
+  [`ingest_service._derive_folder_metadata`](../src/rag_app/ingestion/ingest_service.py).
 
 ### Try it
 
 ```powershell
-.\run.bat inspect                                       # summary
-.\run.bat inspect --sample 1                            # peek at one chunk
+.\run.bat inspect                                       # summary + chunks per file
+.\run.bat inspect --sample 1                            # peek at one chunk (see metadata)
 .\run.bat inspect --file sample_can_fd.txt              # all chunks of one doc
+.\run.bat inspect --id <id-from-above>                  # full text + metadata for one chunk
 ```
+
+If you organise `documents/` into sub-folders, `inspect --sample` will
+show the auto-derived `module` field on each chunk.
 
 ### Interview check
 
@@ -290,23 +326,30 @@ Three knobs:
 **Why dense retrieval can fail:** embeddings encode meaning, not exact
 tokens. A query for `ERR080082` may not retrieve the chunk that contains
 that exact identifier, because the embedding for an opaque ID has weak
-semantic structure. The fix is **hybrid search** (Stage 9): combine dense
-vector search with sparse keyword search (BM25).
+semantic structure. The fix is **hybrid search** (Stage 9 — and it's
+implemented now: flip one config flag and see the difference).
 
 ### In this code
 
 - [`Retriever.retrieve`](../src/rag_app/retrieval/retriever.py) is the
-  whole flow: embed query → search store → optionally filter by threshold.
+  whole flow: embed query → search store → optionally filter by threshold
+  → optionally merge with BM25 → optionally HyDE-expand the query first.
 - The distance is whatever the store reports; lower = closer (Chroma uses
   cosine distance, so 0 = identical, 2 = opposite).
+- Metadata filtering is plumbed end-to-end: `Retriever(where={...})` →
+  `ChromaVectorStore.search(where=...)` → Chroma's native filter.
 
 ### Try it
 
 ```powershell
 # Look at retrieval in isolation, no LLM involved.
 .\run.bat retrieve "What happens if NBRP and DBRP are different?"
-.\run.bat retrieve "ERR080082"           # try a query with an opaque identifier
+.\run.bat retrieve "ERR080082"           # opaque identifier — often misses
 .\run.bat retrieve "totally unrelated quantum mechanics question"
+
+# Narrow to one module (only works if you have sub-folders in documents/).
+.\run.bat retrieve "What is DBRP?" --filter "module=CAN"
+.\run.bat retrieve "..."             --filter "module=CAN,file_type=pdf"
 ```
 
 Watch the distance scores. The first should be low (close). The third
@@ -314,6 +357,11 @@ should be high (far) — but the store will still return something, because
 top-k always returns *the K closest things it has*, even when none are
 relevant. This is why score thresholds and "answer-only-from-context"
 prompts matter.
+
+The `--filter` flag prevents the wrong-module false positive — useful
+when you have a CAN datasheet and an SPI datasheet that share vocabulary
+("clock", "bit timing", "underrun"), and you want to keep their answers
+separate.
 
 ### Interview check
 
@@ -368,13 +416,19 @@ production":
 ### In this code
 
 - [`PromptBuilder.build`](../src/rag_app/retrieval/prompt_builder.py)
-  returns a `list[ChatMessage]` — system + user. The user message has the
-  exact `[Source N]` block format described above.
+  returns a `list[ChatMessage]` — system, then (optionally) prior
+  conversation turns, then the current user message. The user message
+  has the exact `[Source N]` block format described above.
 - The system prompt has two flavours controlled by
   `prompt.answer_only_from_context` in config:
   - `True` → strict "say I don't know if not in context"
   - `False` → loose "prefer context but note when you use general
     knowledge"
+- **Multi-turn:** `PromptBuilder.build(..., history=[...])` inserts past
+  turns between the system message and the new user message. Retrieval
+  always re-runs for the *current* question (so a follow-up can find new
+  sources), but the LLM sees the prior conversation for context. Used
+  by the `chat` CLI command and the **Ask** GUI tab.
 
 ### Try it
 
@@ -384,6 +438,13 @@ production":
 
 # Try an out-of-domain question and watch what the LLM does.
 .\run.bat query "Who won the 2024 Champions League?" --debug
+
+# Multi-turn — the second question is a pronoun-only follow-up that only
+# makes sense if the LLM remembers turn 1.
+.\run.bat chat
+# > You: What happens if NBRP and DBRP are different?
+# > You: What about the arbitration phase specifically?
+# > You: /quit
 ```
 
 ### Interview check
@@ -535,10 +596,10 @@ source file, re-run, see the FAIL row. Then put it back.
 
 ### Concept
 
-Everything above is "naïve" or "vanilla" RAG. Five upgrades you should be
-able to discuss in an interview, in rough order of cost/benefit:
+Everything in Stages 1–8 is "naïve" or "vanilla" RAG. Five upgrades you
+should be able to discuss in an interview, in rough order of cost/benefit:
 
-#### A. Hybrid search (BM25 + dense vector)
+#### A. Hybrid search (BM25 + dense vector) — *implemented*
 
 The headline upgrade. Dense vectors are great at "meaning," weak at exact
 tokens. **BM25** is a 30-year-old sparse keyword-scoring algorithm (a
@@ -551,18 +612,13 @@ Merging strategies:
   tuning α and normalising scores across two scales.
 - **Reciprocal Rank Fusion (RRF)**: `score = Σ 1/(k + rank_i)` across
   retrievers, default `k=60`. No score normalisation needed, robust,
-  parameter-light. **The default modern choice.**
+  parameter-light. **The default modern choice.** This is what this
+  project uses.
 
 Hybrid search fixes the `ERR080082` / `NBRP` / `CHEN0` failure mode — any
 query with rare technical identifiers benefits.
 
-**Where it would slot in this codebase:** add a `KeywordRetriever` next
-to [`Retriever`](../src/rag_app/retrieval/retriever.py) (use `rank_bm25`
-on the in-memory chunk texts), then a `HybridRetriever` that calls both
-and merges with RRF. The `RagService` would take `HybridRetriever`
-instead — no other code changes.
-
-#### B. Reranking with cross-encoders
+#### B. Reranking with cross-encoders — *implemented* (LLM-based variant)
 
 The retriever's job is "fast filter to 50 candidates." A **cross-encoder
 reranker** (e.g. `bge-reranker-v2`, Cohere Rerank) then re-scores those
@@ -571,27 +627,35 @@ reranker** (e.g. `bge-reranker-v2`, Cohere Rerank) then re-scores those
 similarity. Two-stage retrieval is the standard production pattern for
 high-stakes RAG.
 
-#### C. Query transformations
+This project ships a **prompt-based reranker**: instead of running a
+dedicated cross-encoder model locally, it asks the configured chat model
+to score each chunk's relevance to the query on a 0–10 scale. Slower
+than a real cross-encoder per-chunk but cheaper to operate (one less
+model to load), and surprisingly effective for short corpora.
+
+#### C. Query transformations — *HyDE implemented*
 
 Your user's literal question might not be a good search query.
 
 - **HyDE (Hypothetical Document Embeddings)**: ask the LLM to write a
   hypothetical answer, embed *that*, search with the answer's embedding
   instead of the question's. Often beats the literal question because
-  "answers look like answers" in embedding space.
-- **Multi-query**: ask the LLM to rephrase the question 3–5 ways,
-  retrieve for each, dedupe. Trades latency for recall.
-- **Query decomposition**: break "What was X in year Y vs year Z?" into
-  two sub-questions, retrieve for each.
+  "answers look like answers" in embedding space. **Implemented** —
+  see `retrieval.use_hyde` in `config.yaml`.
+- **Multi-query** (not implemented): ask the LLM to rephrase the question
+  3–5 ways, retrieve for each, dedupe. Trades latency for recall.
+- **Query decomposition** (not implemented): break "What was X in year Y
+  vs year Z?" into two sub-questions, retrieve for each.
 
-#### D. MMR (Maximal Marginal Relevance)
+#### D. MMR (Maximal Marginal Relevance) — *not implemented*
 
 Diversifies the top-K so you don't get five near-duplicates of the same
 chunk. Useful when source files have a lot of overlap. Re-ranks the
 candidate set to balance relevance to query against dissimilarity to
-already-picked chunks.
+already-picked chunks. Would slot in next to `reranker.py` as another
+post-retrieval re-ordering step.
 
-#### E. Advanced architectures
+#### E. Advanced architectures — *not implemented*
 
 - **Multi-hop RAG**: the answer needs facts from chunks A and B, but
   neither alone is enough to surface in retrieval. Solution: retrieve →
@@ -604,18 +668,54 @@ already-picked chunks.
 
 ### In this code
 
-Not implemented — this is interview-prep theory. The codebase is set up
-so that adding hybrid search is mostly "drop in a new retriever class
-behind the existing `Retriever` interface."
+Three of the five are **wired in**, each behind a single `config.yaml`
+flag (all default off so the basic flow stays readable):
+
+| upgrade | flag | implementation |
+|---|---|---|
+| Hybrid search | `retrieval.hybrid: true` | [`bm25.py`](../src/rag_app/retrieval/bm25.py) (`BM25Index`, `reciprocal_rank_fusion`) + [`Retriever._bm25_search`](../src/rag_app/retrieval/retriever.py) |
+| HyDE | `retrieval.use_hyde: true` | [`Retriever._hyde_expand`](../src/rag_app/retrieval/retriever.py) (extra LLM call before embedding) |
+| Reranker (LLM-as-judge) | `retrieval.reranker_model: "llm-rerank"` | [`reranker.py`](../src/rag_app/retrieval/reranker.py) + [`RagService._retrieve_and_rerank`](../src/rag_app/retrieval/rag_service.py) |
+
+Combined flow when all three are on:
+
+```text
+question
+  -> HyDE LLM call -> hypothetical answer paragraph
+  -> embed the hypothetical
+  -> vector search top-20  +  BM25 search top-20
+  -> RRF merge -> top-20 fused
+  -> reranker LLM scores each chunk 0-10 -> top-5
+  -> prompt build + answer
+```
 
 ### Try it
 
-Cement the failure mode hybrid search solves:
+Watch each upgrade fix a specific failure:
 
 ```powershell
-# Dense retrieval struggles with opaque identifiers.
-.\run.bat retrieve "NBRP DBRP synchronization"        # works (semantic)
-.\run.bat retrieve "ERR080082"                        # often misses
+# 1) Cement the dense-only failure mode.
+.\run.bat retrieve "ERR080082"     # often misses the chunk with that exact identifier
+
+# 2) Turn on hybrid search.
+#    Edit config.yaml: retrieval.hybrid = true
+.\run.bat retrieve "ERR080082"     # now BM25 finds it even if vector search didn't
+
+# 3) Turn on HyDE (keep hybrid on if you like).
+#    Edit config.yaml: retrieval.use_hyde = true
+.\run.bat retrieve "vague natural-language question about your domain"
+#    The first time will be slower — that's the extra LLM call writing
+#    the hypothetical paragraph.
+
+# 4) Turn on the reranker.
+#    Edit config.yaml: retrieval.reranker_model = "llm-rerank"
+.\run.bat query "..." --debug
+#    Inspect the order of returned sources; the reranker should push the
+#    most-relevant chunk to position 1.
+
+# 5) Check what the system thinks is on:
+.\run.bat stats
+#    The bottom three rows: Hybrid search / HyDE / Reranker.
 ```
 
 ### Interview check
@@ -633,10 +733,22 @@ Cement the failure mode hybrid search solves:
   each separately. Much more accurate at the cost of being too slow for
   the first-stage retriever. Two-stage retrieval (fast filter →
   cross-encoder rerank) is the standard production pattern.
+- **Q: This project's reranker isn't a real cross-encoder — what's the
+  trade-off?**
+  Using the chat LLM as a 0–10 relevance scorer is cheaper to operate
+  (no extra model to load), more flexible (works with any provider),
+  but costs N extra LLM calls per query (one per candidate) and depends
+  on how well the LLM follows the "reply with only a number" instruction.
+  A dedicated `bge-reranker-v2` or `mxbai-rerank` is faster per-chunk
+  and more reliable, at the cost of loading a second model.
 - **Q: What is HyDE?**
   Hypothetical Document Embeddings. Generate a hypothetical answer,
   embed that, search with it. Exploits the fact that answers embed
   closer to answers than questions do.
+- **Q: Cost of HyDE?**
+  One extra LLM call per query before retrieval. Often worth it for
+  vague natural-language questions; rarely worth it for queries that
+  are already keyword-rich.
 
 ---
 
@@ -682,8 +794,20 @@ Things that matter the moment "demo" becomes "service":
 
 - Logging setup: [`utils/logging.py`](../src/rag_app/utils/logging.py).
 - Change detection: [`HashTracker`](../src/rag_app/ingestion/hash_tracker.py).
-- The `--debug` flag on `query` and the `inspect` command are your
-  windows into the system at runtime.
+- The `--debug` flag on `query` and the `inspect` / `retrieve` commands
+  are your windows into the system at runtime.
+- **Streaming** (latency mitigation #1): the chat provider's
+  [`generate_stream`](../src/rag_app/providers/base.py) yields tokens as
+  they arrive. Ollama uses its native streaming API; LM Studio uses the
+  OpenAI SDK's streaming chat completions. Exposed via `query --stream`
+  and `chat`.
+- **REST API** (so this is no longer "just a CLI demo"): see
+  [Stage 11](#stage-11--operating-the-system) below and
+  [`server.py`](../src/rag_app/server.py). The `/api/query` endpoint
+  supports SSE streaming, debug mode, metadata filters and conversation
+  history — all the things the CLI does.
+- **Caching, observability, auth, rate limits**: not implemented. This
+  is where you'd extend the codebase for real production.
 
 ### Try it
 
@@ -694,6 +818,9 @@ Things that matter the moment "demo" becomes "service":
 # Edit a doc, re-ingest — only the changed doc should reprocess.
 notepad documents\sample_can_fd.txt   # add a sentence
 .\run.bat ingest                       # watch the summary: "indexed 1 / skipped 1"
+
+# Streaming reduces perceived latency.
+.\run.bat query "Explain CAN FD bit timing in detail" --stream
 ```
 
 ### Interview check
@@ -717,6 +844,105 @@ notepad documents\sample_can_fd.txt   # add a sentence
 
 ---
 
+## Stage 11 — Operating the system
+
+### Concept
+
+A RAG core (Stages 1–9) is just a function `(question) → (answer,
+sources)`. Production RAG is the *operating layer* around that function:
+
+- **How does a human ask questions?** CLI? Desktop GUI? Web UI?
+- **How does another service ask questions?** HTTP API.
+- **What does "ask a follow-up" mean?** Multi-turn conversation needs
+  history threading.
+- **How do you watch the answer appear?** Streaming.
+- **How do you narrow retrieval to a subset of the corpus?** Metadata
+  filters.
+
+None of these change the RAG flow itself. They're shells around it. But
+in real life they're 80% of the engineering work, and interview
+questions about "how would you serve this?" pop up constantly. This
+project ships all of them so the seams are visible.
+
+### In this code
+
+| operating concern | where |
+|---|---|
+| CLI (one-shot) | [`cli.py` → `query` / `retrieve` / `inspect` / `eval`](../src/rag_app/cli.py) |
+| CLI (interactive multi-turn) | [`cli.py` → `chat`](../src/rag_app/cli.py) — history list, `/clear`, `/quit` |
+| Desktop GUI | [`gui/app.py`](../src/rag_app/gui/app.py) — 4-tab PySide6 window |
+| REST API | [`server.py`](../src/rag_app/server.py) — FastAPI; `POST /api/query`, `POST /api/retrieve`, `POST /api/ingest`, `GET /api/stats`, `DELETE /api/index` |
+| Streaming | `ChatProvider.generate_stream` in [`providers/base.py`](../src/rag_app/providers/base.py); native impls in [`ollama_provider.py`](../src/rag_app/providers/ollama_provider.py) and [`lmstudio_provider.py`](../src/rag_app/providers/lmstudio_provider.py) |
+| Multi-turn history | `history: list[ChatMessage]` threaded through `RagService.answer(...)` → `PromptBuilder.build(history=...)` |
+| Metadata filters | `--filter "key=value,key2=value2"`; folder-derived `module` in [`_derive_folder_metadata`](../src/rag_app/ingestion/ingest_service.py); forwarded to Chroma via `Retriever(where=...)` |
+| URL history (GUI) | [`gui/settings_store.py`](../src/rag_app/gui/settings_store.py) — backed by `QSettings` (Windows registry) |
+
+### Try it
+
+```powershell
+# CLI multi-turn chat with streaming.
+.\run.bat chat
+# > You: What is SPI slave underrun?
+# > You: How does double buffering help?            # uses turn-1 context
+# > You: /quit
+
+# REST server.
+.\run.bat serve
+# In another shell:
+$body = '{"question":"What is SPI slave underrun?"}'
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/query" -Method Post -ContentType 'application/json' -Body $body
+
+# REST with debug + filter + streaming SSE — all together.
+$body = '{"question":"What is DBRP?","debug":true,"filter":{"module":"CAN"},"stream":false}'
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/query" -Method Post -ContentType 'application/json' -Body $body
+
+# REST multi-turn (pass `history` array back on each call).
+$history = @(
+  @{ role = "user"; content = "What is SPI slave underrun?" },
+  @{ role = "assistant"; content = "Underrun happens when..." }
+)
+$body = @{ question = "How does double buffering help?"; history = $history } | ConvertTo-Json -Depth 4
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/query" -Method Post -ContentType 'application/json' -Body $body
+
+# Desktop GUI (PySide6).
+.\gui.bat
+```
+
+### Interview check
+
+- **Q: How does this code support a multi-turn conversation?**
+  `RagService.answer(question, history=[...])` accepts a list of prior
+  `ChatMessage` turns. The retriever re-runs for the *current* question
+  (so follow-ups can find new sources), but the prompt builder inserts
+  the history between the system message and the new user message, so
+  the LLM sees the conversation. The `chat` CLI and the GUI's Ask tab
+  both maintain that list. Each turn is fresh retrieval + conversational
+  generation.
+- **Q: Why does retrieval re-run on every turn?**
+  Because the user's follow-up may be about something *new* — "what
+  about the SPI side?" needs SPI chunks, not the CAN-FD chunks that
+  answered turn 1. Re-retrieving is cheap; over-relying on prior context
+  causes the model to answer from memory instead of the docs.
+- **Q: How would you stream tokens in a RAG system?**
+  The chat provider exposes `generate_stream(messages) -> Iterator[str]`.
+  Behind the scenes, Ollama uses its native `stream: true` mode; LM
+  Studio uses the OpenAI SDK's `stream=True` chat completions. The
+  caller writes each token to stdout / Server-Sent Events / WebSocket
+  as it arrives.
+- **Q: Why expose a REST API on top of the CLI?**
+  Other services can call it without spawning Python processes. Lets a
+  frontend (web, mobile, Slackbot) consume RAG over HTTP. The OpenAPI
+  spec at `/docs` is your contract.
+- **Q: What does `--filter "module=CAN"` actually do?**
+  It builds a Chroma `where={"module": "CAN"}` clause and constrains
+  vector search to chunks whose metadata satisfies it. `module` is
+  derived automatically from the sub-folder under `documents/`, so
+  organising your corpus by topic gives you free filtering. Multi-key
+  filters use Chroma's `$and` operator. This prevents the
+  cross-document false-positive problem when corpora share vocabulary.
+
+---
+
 ## Closing — How to use these docs for interview prep
 
 1. **Day 1:** read this file top to bottom. Run every "Try it" command.
@@ -726,9 +952,17 @@ notepad documents\sample_can_fd.txt   # add a sentence
 3. **Day 3:** explain the codebase out loud, in your own words, to a
    rubber duck. Use [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md) as the
    scaffold.
-4. The day before the interview: skim
+4. **Day 4 (senior interviews only):** read
+   [`04_SENIOR_DEEP_DIVE.md`](04_SENIOR_DEEP_DIVE.md). Focus on the
+   trade-off decision tree (§1), the system-design sketch (§2), and the
+   war stories (§3) — those are where senior interviews live.
+5. The day before the interview: skim
    [`03_GLOSSARY.md`](03_GLOSSARY.md) for vocabulary you might blank on.
 
 When an interviewer asks something like "walk me through how a RAG system
 works end-to-end," the answer is essentially the table of contents of
 this file. Practice giving it in 90 seconds.
+
+For senior-level openers like "design a RAG system for X" or "when
+*wouldn't* you use RAG?" — the playbook is in
+[`04_SENIOR_DEEP_DIVE.md`](04_SENIOR_DEEP_DIVE.md).

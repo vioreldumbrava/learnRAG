@@ -1,6 +1,6 @@
 # RAG Interview Q&A
 
-~40 questions you should be able to answer confidently for a mid-level
+~55 questions you should be able to answer confidently for a mid-level
 engineering interview. Each answer is short by design (≤ 4 sentences) —
 that's how you'd answer in a real interview. File pointers anchor
 answers to this codebase so you can demo / explain on the spot.
@@ -8,6 +8,16 @@ answers to this codebase so you can demo / explain on the spot.
 **How to use this doc:** cover the answer, try to give it out loud, then
 check. Re-read [`00_LEARNING_PATH.md`](00_LEARNING_PATH.md) for any
 section you stumbled on.
+
+**Sections:** Fundamentals · Embeddings · Chunking · Vector stores ·
+Retrieval · Prompt construction · Evaluation · Production · Demo questions
+· Operating the system (multi-turn / streaming / REST / metadata filters).
+
+> 🎯 **Senior interview?** Read
+> [`04_SENIOR_DEEP_DIVE.md`](04_SENIOR_DEEP_DIVE.md) after this. Senior
+> interviews expect mid-level fluency (this file) AND go deeper on
+> trade-offs, system design, war stories, and newer techniques
+> (Contextual Retrieval, ColBERT, prompt caching, …).
 
 ---
 
@@ -383,14 +393,18 @@ swapping Ollama for LM Studio is a config change, and adding a new
 backend is one new file. This is the difference between "we can swap
 LLM vendors in a long weekend" and "we can't."
 
-### 46. How would you add hybrid search to this codebase?
+### 46. Walk me through how hybrid search is wired up in this codebase.
 
-Add a `KeywordRetriever` next to
-[`Retriever`](../src/rag_app/retrieval/retriever.py) using
-`rank_bm25` over the in-memory chunk texts. Add a `HybridRetriever`
-that runs both, merges with RRF, and returns the same `list[RetrievedChunk]`.
-[`RagService`](../src/rag_app/retrieval/rag_service.py) takes it
-unchanged. No other code touches.
+Flip `retrieval.hybrid: true` in `config.yaml`. Inside
+[`Retriever.retrieve`](../src/rag_app/retrieval/retriever.py), two
+searches run: the existing vector search, and
+[`_bm25_search`](../src/rag_app/retrieval/retriever.py) which lazily
+builds a [`BM25Index`](../src/rag_app/retrieval/bm25.py) over all
+chunks pulled from the store. Both fetch `4 × top_k` candidates, then
+[`reciprocal_rank_fusion`](../src/rag_app/retrieval/bm25.py) merges
+them (default RRF `k=60`) and we keep the top `top_k`. `RagService`,
+`PromptBuilder`, and the CLI are unchanged — that's the point of the
+`Retriever` seam.
 
 ### 47. The `inspect` and `retrieve` commands look small — what do they teach?
 
@@ -400,3 +414,88 @@ and metadata look right). `retrieve` runs vector search *without* the
 LLM (so you can tell whether a bad answer was caused by bad retrieval
 or bad generation). In an interview: this maps onto the production
 debugging mindset of "isolate the stage before you change anything."
+
+---
+
+## Operating the system (multi-turn / streaming / REST / filters)
+
+### 48. How does this project support a multi-turn conversation?
+
+[`RagService.answer(question, history=[...])`](../src/rag_app/retrieval/rag_service.py)
+accepts a list of prior `ChatMessage` turns.
+[`PromptBuilder.build(history=...)`](../src/rag_app/retrieval/prompt_builder.py)
+inserts those turns between the system message and the new user
+message. Retrieval re-runs for the *current* question (so a follow-up
+can find new sources), but the LLM sees the conversation. The `chat`
+CLI command and the GUI's Ask tab both maintain the list — `/clear`
+or *Clear History* resets it.
+
+### 49. Why does retrieval re-run on every turn instead of reusing the previous chunks?
+
+Because the user's follow-up may be about something *new*. "What about
+the SPI side?" after a CAN-FD question needs SPI chunks, not the CAN
+chunks that answered turn 1. Re-retrieving is cheap; over-relying on
+prior context causes the model to answer from memory and silently
+ignore the docs.
+
+### 50. How does streaming work in this code?
+
+[`ChatProvider.generate_stream`](../src/rag_app/providers/base.py)
+returns an `Iterator[str]`. Ollama uses its native `stream: true` API
+in [`ollama_provider.py`](../src/rag_app/providers/ollama_provider.py);
+LM Studio uses the OpenAI SDK's streaming chat completions in
+[`lmstudio_provider.py`](../src/rag_app/providers/lmstudio_provider.py).
+The CLI's `query --stream` and `chat` write tokens to stdout as they
+arrive; the REST API's `stream: true` returns a Server-Sent Events
+response. Default fallback for providers that don't override
+`generate_stream` is to yield the whole answer in one chunk.
+
+### 51. What does `--filter "module=CAN"` actually do?
+
+It builds a Chroma `where={"module": "CAN"}` clause and constrains
+the vector search to chunks whose metadata satisfies it. `module` is
+*auto-derived* from the sub-folder under `documents/` during ingest
+(see [`_derive_folder_metadata`](../src/rag_app/ingestion/ingest_service.py)),
+so organising your corpus by topic gives you free filtering. Multi-key
+filters (`module=CAN,file_type=pdf`) use Chroma's `$and`. This prevents
+the false-positive case where two unrelated documents share vocabulary
+like "clock" or "underrun."
+
+### 52. What does the REST API expose, and when would you choose it over the CLI?
+
+Five endpoints in [`server.py`](../src/rag_app/server.py):
+`POST /api/query` (with `stream`, `debug`, `filter`, `history`),
+`POST /api/retrieve`, `POST /api/ingest`, `GET /api/stats`,
+`DELETE /api/index`. Swagger UI at `/docs`. Choose REST when something
+*other than a human* needs to ask questions — a web frontend, a
+Slackbot, a CI job — so they don't have to spawn Python processes per
+query.
+
+### 53. The reranker in this codebase is LLM-based, not a real cross-encoder. What's the trade-off?
+
+[`reranker.py`](../src/rag_app/retrieval/reranker.py) asks the chat
+model to score each candidate 0–10 for relevance. Pros: no extra model
+to load, works with any provider, easy to tune (just change the
+prompt). Cons: N extra LLM calls per query (one per candidate), and
+the score depends on how well the LLM follows the "reply with only a
+number" instruction. A dedicated cross-encoder like `bge-reranker-v2`
+would be faster per-chunk and more reliable — drop it into the same
+`rerank()` signature to swap.
+
+### 54. HyDE — what does enabling it cost, and when is it worth it?
+
+One extra LLM call per query before retrieval. The LLM writes a
+hypothetical 3–5 sentence answer ([`Retriever._hyde_expand`](../src/rag_app/retrieval/retriever.py)),
+we embed *that*, then search. Worth it for vague natural-language
+questions ("how does this whole subsystem work?"). Not worth it for
+queries that are already keyword-rich — you're paying for an LLM call
+that produces something the user already gave you.
+
+### 55. How would you measure whether hybrid/HyDE/reranker actually help?
+
+Curate a gold-standard JSON ([`eval/questions.json`](../eval/questions.json)),
+run `.\run.bat eval --skip-llm` once per config — toggle one feature
+at a time, compare mean recall@k between runs. For end-to-end quality,
+run without `--skip-llm` and watch keyword-recall in the answer.
+Without an eval set, every "I think this is better" is a vibe; vibes
+lie.

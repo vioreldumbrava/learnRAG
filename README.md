@@ -12,10 +12,11 @@ multi-turn chat, streaming, REST API) are layered on the same explicit
 core — each one toggled by a single line in `config.yaml`.
 
 > 📚 **Learning RAG?** Read [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md)
-> first — a 10-stage walkthrough mapping each app feature to a RAG concept,
-> with a companion [interview Q&A](docs/02_INTERVIEW_QA.md),
-> [concept reference](docs/01_RAG_CONCEPTS.md), and
-> [glossary](docs/03_GLOSSARY.md).
+> first — an 11-stage walkthrough mapping each app feature to a RAG concept,
+> with a companion [interview Q&A](docs/02_INTERVIEW_QA.md) (~55 mid-level
+> questions), [senior deep dive](docs/04_SENIOR_DEEP_DIVE.md) (trade-offs,
+> system design, war stories), [concept reference](docs/01_RAG_CONCEPTS.md),
+> and [glossary](docs/03_GLOSSARY.md).
 
 ---
 
@@ -632,10 +633,11 @@ RAG_system/
   requirements.txt             # pinned deps for `pip install -r`
   config.example.yaml          # copied to config.yaml on first run
   docs/                        # 📚 RAG learning path (start here)
-    00_LEARNING_PATH.md        # 10-stage walkthrough mapping features → concepts
+    00_LEARNING_PATH.md        # 11-stage walkthrough mapping features → concepts
     01_RAG_CONCEPTS.md         # concept-by-concept reference
-    02_INTERVIEW_QA.md         # ~47 mid-level interview questions + answers
+    02_INTERVIEW_QA.md         # ~55 mid-level interview questions + answers
     03_GLOSSARY.md             # one-line vocabulary
+    04_SENIOR_DEEP_DIVE.md     # senior-level: trade-offs, system design, war stories, newer techniques
   documents/                   # source documents (kept as source of truth)
     sample_can_fd.txt          # CAN-FD sample (drop your own files anywhere here)
     sample_spi_dma.md          # organise in sub-folders to auto-tag with `module`

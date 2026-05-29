@@ -20,7 +20,9 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 - **Chunk** — A piece of a document, small enough to embed and store as a unit. Typically 200–2000 characters.
 - **Chunk overlap** — Characters/tokens repeated between consecutive chunks; defends against facts split across boundaries.
+- **Chunking strategy** — How the splitter decides where to cut. This project has `paragraph` (blank-line split + window fallback), `heading` (split on `1.2 Title` / `## md` / `CHAPTER N`), and `semantic` (recursive headings → paragraphs → sentences).
 - **Context window** — Maximum tokens the LLM can attend to in a single call (system + user + history + output).
+- **Conversation history** — List of prior `{role, content}` turns threaded into the prompt for multi-turn chat.
 - **Cosine similarity** — `dot(a, b) / (|a| * |b|)`. Range [-1, 1]; bigger = more similar. Default distance metric for text embeddings.
 - **Cosine distance** — `1 - cosine_similarity`. Range [0, 2]; smaller = more similar. What Chroma reports.
 - **Cross-encoder** — Model that scores (query, passage) jointly. Slow but accurate. The reranker in two-stage retrieval.
@@ -51,8 +53,8 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 - **Hallucination** — Confident-sounding statement not supported by the retrieved context (or by reality).
 - **HNSW** — Hierarchical Navigable Small World. Layered proximity graph; the modern default ANN index. Sub-millisecond at 10M+ vectors.
-- **Hybrid search** — Dense (vector) + sparse (BM25) retrieval merged with RRF. Fixes the rare-token failure mode of pure dense.
-- **HyDE** — Hypothetical Document Embeddings. Generate a fake answer, embed it, search with that. Often beats searching with the literal question.
+- **Hybrid search** — Dense (vector) + sparse (BM25) retrieval merged with RRF. Fixes the rare-token failure mode of pure dense. Toggle `retrieval.hybrid: true` to enable in this project.
+- **HyDE** — Hypothetical Document Embeddings. Generate a fake answer, embed it, search with that. Often beats searching with the literal question. Toggle `retrieval.use_hyde: true` to enable.
 
 ## I
 
@@ -75,10 +77,12 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 ## M
 
+- **Metadata filter** — Constrain retrieval to chunks whose metadata satisfies a predicate (`module=CAN`, `file_type=pdf`). Cheaper than running search then post-filtering. This project auto-derives `module` from sub-folder names under `documents/`.
 - **MMR** — Maximal Marginal Relevance. Re-rank top-K to trade off relevance for diversity. Reduces near-duplicates.
 - **MRR** — Mean Reciprocal Rank. Average of `1/rank_of_first_correct`. Rewards putting the right answer at position 1.
 - **Multi-hop RAG** — Some answers need facts from multiple chunks that don't co-occur; retrieve → ask follow-up → retrieve again.
 - **Multi-query** — LLM rephrases the question several ways, retrieve for each, deduplicate.
+- **Multi-turn** — Threading prior conversation turns into the prompt so the LLM can resolve pronouns and follow-ups. Retrieval typically re-runs per turn; only the LLM sees the history.
 
 ## N
 
@@ -103,7 +107,8 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 - **RAG** — Retrieval-Augmented Generation. The architecture this whole project implements.
 - **RAGAS** — Most common open-source RAG eval framework. Computes faithfulness, answer relevance, context relevance with LLM judges.
 - **Recall@k** — Fraction of expected sources that appear in top-K retrieved chunks. First retrieval metric most teams track.
-- **Reranker** — Second-stage model (usually cross-encoder) that re-scores top-50 candidates jointly with the query.
+- **Reranker** — Second-stage model (usually cross-encoder) that re-scores top-50 candidates jointly with the query. This project ships an LLM-as-judge variant — see [`reranker.py`](../src/rag_app/retrieval/reranker.py).
+- **REST API** — HTTP wrapper around the RAG pipeline; lets non-Python clients query the system. This project ships one in [`server.py`](../src/rag_app/server.py) via FastAPI.
 - **Retrieval phase** — See *Query phase*.
 - **RRF** — Reciprocal Rank Fusion. Merge ranked lists by summing `1 / (k + rank)`. Default `k=60`. The modern way to merge dense+sparse.
 
@@ -111,6 +116,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 - **Score threshold** — Drop retrieved chunks farther than X. Lets retrieval honestly return "nothing relevant."
 - **Sparse retrieval** — Retrieval based on exact tokens (BM25, TF-IDF). Complement to dense retrieval.
+- **SSE (Server-Sent Events)** — One-way HTTP streaming protocol: server pushes `data: ...` lines until `[DONE]`. Used by this project's REST API for `stream: true` query responses.
 - **Streaming** — Return tokens to the user as generated, instead of buffering the whole answer. Cuts perceived latency.
 
 ## T

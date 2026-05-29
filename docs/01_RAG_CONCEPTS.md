@@ -3,10 +3,15 @@
 A concept-by-concept lookup organised alphabetically within sections, not
 chronologically like the [learning path](00_LEARNING_PATH.md). Use this
 when you remember the *topic* but want a fast refresh, or when you want a
-fact that doesn't fit neatly into one of the 10 stages.
+fact that doesn't fit neatly into one of the 11 stages.
 
 Every entry: **What it is** → **When it matters** → **Where in this code**
 (file path) → **Read more** (key terms / authors / papers).
+
+> 🎯 **Senior topics** that don't fit this lookup-style reference
+> (trade-off decision trees, system design, production war stories,
+> ColBERT / SPLADE / Contextual Retrieval / RAPTOR / prompt caching)
+> live in [`04_SENIOR_DEEP_DIVE.md`](04_SENIOR_DEEP_DIVE.md).
 
 ---
 
@@ -144,8 +149,18 @@ size + overlap configured in `config.yaml`.
 **When it matters:** Single biggest lever on retrieval quality after
 choosing the embedding model.
 
-**Where in this code:** This project does paragraph-aware + windowed
-fallback in [`chunker.py`](../src/rag_app/ingestion/chunker.py).
+**Where in this code:** Three strategies in
+[`chunker.py`](../src/rag_app/ingestion/chunker.py), selectable via
+`chunking.strategy` in `config.yaml`:
+
+- `paragraph` — `ParagraphStrategy` — blank-line split + window fallback.
+- `heading` — `HeadingStrategy` — splits on `1.2 Title` / `## md` /
+  `CHAPTER N` headings, then paragraph-packs each section.
+- `semantic` — `SemanticStrategy` — recursive: headings → paragraphs →
+  sentences → character window.
+
+Add a fourth by writing a `ChunkStrategy` subclass and registering it in
+`_STRATEGIES`.
 
 ### Chunk overlap
 
@@ -309,6 +324,28 @@ in top-K.
 **When it matters:** Document collections with lots of overlap; chatbots
 that need diverse source citation.
 
+### Metadata filters
+
+**What:** Constrain retrieval to chunks whose metadata satisfies a
+predicate. Vector stores store metadata alongside each chunk; the filter
+is evaluated *before* the nearest-neighbour search so you don't waste
+ANN budget on chunks you'd reject anyway.
+
+**When it matters:** Multi-tenant or multi-project corpora where the
+same vocabulary (e.g. "clock", "underrun") means different things in
+different docs. Filtering by `module` / `project` / `customer` prevents
+cross-doc false positives.
+
+**Where in this code:** `--filter "module=CAN,file_type=pdf"` on the
+CLI →
+[`_parse_filters`](../src/rag_app/cli.py) builds a Chroma `where`
+clause (with `$and` for multi-key filters) →
+[`Retriever(where=...)`](../src/rag_app/retrieval/retriever.py) →
+[`ChromaVectorStore.search(where=...)`](../src/rag_app/vectorstores/chroma_store.py).
+The `module` field is auto-derived from the sub-folder structure under
+`documents/` in
+[`_derive_folder_metadata`](../src/rag_app/ingestion/ingest_service.py).
+
 ### Hybrid search
 
 **What:** Combine dense vector retrieval with sparse keyword retrieval
@@ -317,9 +354,12 @@ that need diverse source citation.
 **When it matters:** Queries with rare or opaque tokens (error codes,
 identifiers, names, numbers) that dense retrieval misses.
 
-**Where in this code:** Not implemented; the seam is the
-[`Retriever`](../src/rag_app/retrieval/retriever.py) interface. See
-Stage 9 of [`00_LEARNING_PATH.md`](00_LEARNING_PATH.md).
+**Where in this code:** **Implemented.** Toggle `retrieval.hybrid: true`
+in `config.yaml`. Vector search runs as before; in parallel,
+[`Retriever._bm25_search`](../src/rag_app/retrieval/retriever.py) lazily
+builds an in-memory `BM25Index` over all chunks in the store; results
+are merged with RRF (see below). Fetch-K is 4× the configured `top_k`
+on each leg before merging, so the fusion has something to work with.
 
 ### BM25 (Best Match 25)
 
@@ -327,7 +367,13 @@ Stage 9 of [`00_LEARNING_PATH.md`](00_LEARNING_PATH.md).
 term occurrences, normalises by document length, weights by term rarity
 across the corpus. ~30 years old, still excellent for exact-token recall.
 
-**When it matters:** Sparse half of hybrid search. Python: `rank_bm25`.
+**When it matters:** Sparse half of hybrid search.
+
+**Where in this code:** This project ships a minimal, dependency-free
+BM25 implementation at [`bm25.py`](../src/rag_app/retrieval/bm25.py)
+(`BM25Index`, defaults `k1=1.5`, `b=0.75`). For larger corpora you'd
+swap in `rank_bm25` or move to a backend that supports sparse vectors
+natively (Qdrant, OpenSearch).
 
 ### RRF (Reciprocal Rank Fusion)
 
@@ -337,6 +383,10 @@ lists; default `k = 60`. No score normalisation needed.
 **When it matters:** The default modern way to combine dense + sparse
 retrievers. Less hyperparameter pain than a weighted sum.
 
+**Where in this code:**
+[`reciprocal_rank_fusion`](../src/rag_app/retrieval/bm25.py) — called
+from `Retriever.retrieve` when `hybrid=True`.
+
 ### Cross-encoder reranker
 
 **What:** A model that takes (query, passage) jointly and outputs a
@@ -345,6 +395,16 @@ retrieval. Examples: `bge-reranker-v2`, `mxbai-rerank`, Cohere Rerank.
 
 **When it matters:** When you can afford 50–500 ms extra latency and
 need accuracy. The cost-effective accuracy upgrade in production RAG.
+
+**Where in this code:** Implemented as an **LLM-as-judge reranker** in
+[`reranker.py`](../src/rag_app/retrieval/reranker.py): each candidate
+chunk is shown to the chat model, which scores it 0–10 for relevance.
+Enabled by setting `retrieval.reranker_model` to any non-empty string
+in `config.yaml`. Trade-off vs a dedicated cross-encoder: cheaper to
+operate (no second model to load), but spends N extra LLM calls per
+query (one per candidate). A real `bge-reranker-v2` would be faster
+per-chunk and more reliable — drop it into the same `rerank()`
+function signature to swap.
 
 ---
 
@@ -471,6 +531,47 @@ waiting for the full answer.
 **When it matters:** Perceived latency. Cuts time-to-first-token from
 "the whole answer time" to "first token after retrieval."
 
+**Where in this code:**
+[`ChatProvider.generate_stream`](../src/rag_app/providers/base.py)
+returns an `Iterator[str]`. Ollama uses its native `stream: true` API
+in [`ollama_provider.py`](../src/rag_app/providers/ollama_provider.py);
+LM Studio uses the OpenAI SDK's streaming chat completions in
+[`lmstudio_provider.py`](../src/rag_app/providers/lmstudio_provider.py).
+Exposed via `query --stream`, `chat` (default), and the REST API's
+`stream: true` body field (SSE response).
+
+### Conversation history (multi-turn)
+
+**What:** Threading prior user/assistant turns into the prompt so the
+model can resolve pronouns ("how does *that* compare?") and follow
+hand-offs. Retrieval typically re-runs for each new turn — the LLM
+sees history, but the corpus search uses only the current question.
+
+**When it matters:** Any interactive UX. Single-shot RAG can't handle
+follow-ups gracefully.
+
+**Where in this code:**
+[`PromptBuilder.build(question, chunks, history=[...])`](../src/rag_app/retrieval/prompt_builder.py)
+inserts `history` between the system message and the new user message.
+`RagService.answer / answer_with_debug / answer_stream` all accept
+`history=`. The `chat` CLI command maintains the list and supports
+`/clear` to reset; the GUI's Ask tab does the same with a *Clear
+History* button. The REST API accepts `history` as a JSON array.
+
+### REST API
+
+**What:** HTTP wrapper around the RAG pipeline so other services /
+frontends can consume it without spawning Python processes. SSE for
+streaming, JSON for everything else, OpenAPI for the contract.
+
+**When it matters:** Once the system is more than a personal CLI demo.
+
+**Where in this code:** [`server.py`](../src/rag_app/server.py) — a
+FastAPI app started by `python -m rag_app serve`. Endpoints:
+`POST /api/query` (with optional `stream`/`debug`/`filter`/`history`),
+`POST /api/retrieve`, `POST /api/ingest`, `GET /api/stats`,
+`DELETE /api/index`. OpenAPI/Swagger UI at `/docs`.
+
 ### Caching layers
 
 **What:**
@@ -495,7 +596,7 @@ interactively.
 
 ---
 
-## Advanced patterns (theory)
+## Advanced patterns
 
 ### HyDE (Hypothetical Document Embeddings)
 
@@ -505,7 +606,16 @@ embedding. Answers embed closer to answers than questions do.
 
 **Trade-off:** Extra LLM call before retrieval; adds latency.
 
-### Multi-query retrieval
+**Where in this code:** **Implemented.** Toggle `retrieval.use_hyde: true`
+in `config.yaml`.
+[`Retriever._hyde_expand`](../src/rag_app/retrieval/retriever.py) sends
+a fixed system prompt ("write a 3–5 sentence technical paragraph that
+would answer this") to the configured chat provider, then embeds the
+returned hypothetical instead of the raw question. On failure (any
+exception) it falls back to embedding the raw question, so HyDE never
+breaks the query path.
+
+### Multi-query retrieval *(theory only — not implemented)*
 
 **What:** LLM rephrases the question several ways, retrieve for each,
 deduplicate.
@@ -513,23 +623,23 @@ deduplicate.
 **Trade-off:** N × retrieval cost, but better recall on ambiguous
 phrasing.
 
-### Query decomposition
+### Query decomposition *(theory only — not implemented)*
 
 **What:** "What was X in year Y vs year Z?" → two sub-questions, two
 retrievals, then synthesise.
 
-### Multi-hop RAG
+### Multi-hop RAG *(theory only — not implemented)*
 
 **What:** Some answers need facts spread across documents that don't
 co-occur in any single chunk. Solution: retrieve → let the LLM ask a
 follow-up question → retrieve again → answer.
 
-### Agentic RAG
+### Agentic RAG *(theory only — not implemented)*
 
 **What:** Wrap retrieval in a tool that the LLM calls when it decides
 it needs more info. Generalises multi-hop. Token-hungry but flexible.
 
-### GraphRAG
+### GraphRAG *(theory only — not implemented)*
 
 **What:** Build a knowledge graph from the corpus during ingestion;
 retrieve sub-graphs of entities/relationships instead of raw text
