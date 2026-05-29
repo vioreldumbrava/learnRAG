@@ -8,6 +8,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+
+# Force stdout/stderr to UTF-8 with replacement so Unicode characters in
+# logs / streamed tokens never crash on Windows' legacy code pages.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -16,6 +26,7 @@ from rich.table import Table
 
 from rag_app.config import AppConfig, load_config
 from rag_app.eval.runner import EvalReport, run_eval_file
+from rag_app.ingestion.hash_tracker import HashTracker
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
 from rag_app.retrieval.prompt_builder import PromptBuilder
@@ -164,18 +175,46 @@ def ingest(
         )
     )
 
-    # Rich progress bar (#10).
+    # Rich progress bar with a scrolling per-file log (#10).
+    # The spinner shows "currently working on X"; the log scrollback gives
+    # the user a permanent file-by-file history they can inspect after the
+    # run completes.
+    from rich.progress import BarColumn, MofNCompleteColumn, TimeElapsedColumn
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task_id = progress.add_task("Ingesting...", total=None)
+        task_id = progress.add_task("Discovering files...", total=None)
+        seen_total: list[int] = [0]  # mutable cell for the closure
 
         def on_progress(current: int, total: int, file_path: str, status: str) -> None:
+            # On the first callback we learn the total count; set it on the bar.
+            if seen_total[0] == 0 and total > 0:
+                progress.update(task_id, total=total)
+                seen_total[0] = total
+
+            # Scrolling log line per file — `progress.console.log` writes
+            # ABOVE the spinner so the spinner stays in place.
+            colour = {
+                "indexed": "green",
+                "skipped": "yellow",
+                "failed": "red",
+            }.get(status, "white")
+            progress.console.log(
+                f"[{colour}]{status:>8}[/{colour}]  "
+                f"[{current:>3}/{total}] {file_path}"
+            )
+
+            # Spinner caption shows the *next* file we're about to work on.
             progress.update(
                 task_id,
-                description=f"[{current}/{total}] {status}: {Path(file_path).name}",
+                advance=1,
+                description=f"Last: [{colour}]{status}[/{colour}] {Path(file_path).name}",
             )
 
         summary = service.run(
@@ -216,15 +255,43 @@ def query(
 
     if stream:
         # Streaming mode (#5): print tokens as they arrive.
+        # Note: there is usually a 1-15s gap before the first token while the
+        # LLM processes the prompt. That's the model, not buffering. The
+        # markers below make this gap visible so it doesn't look like a hang.
+        import time
         token_iter, sources = service.answer_stream(question)
         console.print()
+        console.print(
+            "[dim]Waiting for first token "
+            "(model is processing the prompt — this is normal)...[/dim]"
+        )
         full_text = ""
+        t0 = time.time()
+        first_token_at: float | None = None
+        token_count = 0
         for token in token_iter:
+            if first_token_at is None:
+                first_token_at = time.time()
+                # Header line announcing TTFT — printed via rich so the
+                # markup renders in any terminal (no raw ANSI).
+                console.print(
+                    f"[green]>>> streaming (first token in "
+                    f"{(first_token_at - t0)*1000:.0f}ms) <<<[/green]"
+                )
             sys.stdout.write(token)
             sys.stdout.flush()
             full_text += token
+            token_count += 1
+        elapsed = time.time() - t0
         sys.stdout.write("\n")
-        console.print()
+        if first_token_at is not None and token_count > 1:
+            stream_secs = elapsed - (first_token_at - t0)
+            console.print(
+                f"[dim]({token_count} chunks total; "
+                f"{(first_token_at - t0)*1000:.0f}ms to first token, "
+                f"{stream_secs*1000:.0f}ms streaming "
+                f"≈ {token_count/max(stream_secs, 0.001):.0f} chunks/s)[/dim]"
+            )
         from rag_app.models import RagAnswer
         answer = RagAnswer(answer=full_text, sources=sources)
         _print_sources(answer.sources)
@@ -299,14 +366,26 @@ def chat(
             continue
 
         if stream:
+            import time
             token_iter, sources = service.answer_stream(question, history=history)
-            console.print("[bold green]Assistant:[/bold green] ", end="")
+            console.print("[dim]thinking...[/dim]")
             full_text = ""
+            t0 = time.time()
+            first_token_at: float | None = None
             for token in token_iter:
+                if first_token_at is None:
+                    first_token_at = time.time()
+                    console.print(
+                        f"[bold green]Assistant[/bold green] "
+                        f"[dim](first token in "
+                        f"{(first_token_at - t0)*1000:.0f}ms)[/dim]:"
+                    )
                 sys.stdout.write(token)
                 sys.stdout.flush()
                 full_text += token
-            sys.stdout.write("\n\n")
+            elapsed = time.time() - t0
+            sys.stdout.write("\n")
+            console.print(f"[dim]({elapsed:.1f}s total)[/dim]\n")
         else:
             answer = service.answer(question, history=history)
             full_text = answer.answer
@@ -567,6 +646,145 @@ def stats(config: Path = ConfigOption) -> None:
     table.add_row("HyDE", "on" if cfg.retrieval.use_hyde else "off")
     table.add_row("Reranker", cfg.retrieval.reranker_model or "off")
     console.print(table)
+
+
+@app.command(name="list")
+def list_cmd(config: Path = ConfigOption) -> None:
+    """List every document currently in the ingestion index.
+
+    Shows: source path, document hash, chunk count. The same info lives in
+    `storage/document_index.json` if you want a machine-readable view.
+    """
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+    tracker = HashTracker(cfg.paths.index_file)
+    entries = tracker.all_entries()
+
+    if not entries:
+        console.print("[yellow]No documents have been ingested yet.[/yellow]")
+        console.print(f"[dim]Index file: {cfg.paths.index_file}[/dim]")
+        return
+
+    table = Table(
+        title=f"Ingested documents ({len(entries)})",
+        border_style="cyan",
+    )
+    table.add_column("source_file")
+    table.add_column("path")
+    table.add_column("chunks", justify="right")
+    table.add_column("document_hash[:12]")
+
+    for path, entry in sorted(entries.items()):
+        table.add_row(
+            str(entry.get("source_file", Path(path).name)),
+            path,
+            str(entry.get("chunks", "?")),
+            str(entry.get("document_hash", "?"))[:12],
+        )
+    console.print(table)
+    console.print(f"[dim]Index file: {cfg.paths.index_file}[/dim]")
+
+
+@app.command()
+def forget(
+    config: Path = ConfigOption,
+    file: Optional[str] = typer.Option(
+        None,
+        "--file",
+        help="Source filename to forget, e.g. 'sample_can_fd.txt'.",
+    ),
+    path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        help="Full source path to forget (use when filename is ambiguous).",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the confirmation prompt."
+    ),
+) -> None:
+    """Remove ONE document from the vector store and the ingestion index.
+
+    Looks the file up in the index, deletes all of its chunks from Chroma
+    via the document_hash, then removes the entry from the index file.
+    The original file on disk is left untouched.
+
+    Examples:
+
+        forget --file sample_can_fd.txt
+        forget --path documents/CAN/spec.pdf
+    """
+
+    if not file and not path:
+        console.print("[red]Provide either --file or --path.[/red]")
+        raise typer.Exit(code=2)
+
+    cfg = _load(config)
+    setup_logging(cfg.app.debug)
+    tracker = HashTracker(cfg.paths.index_file)
+    entries = tracker.all_entries()
+
+    # Find matching entries.
+    matches: list[tuple[str, dict]] = []
+    if path:
+        if path in entries:
+            matches = [(path, entries[path])]
+    elif file:
+        matches = [
+            (p, e) for p, e in entries.items()
+            if e.get("source_file") == file or Path(p).name == file
+        ]
+
+    if not matches:
+        console.print(
+            f"[yellow]No matching document in the index.[/yellow]\n"
+            f"Run [bold]rag-app list[/bold] to see what's been ingested."
+        )
+        raise typer.Exit(code=1)
+
+    if len(matches) > 1 and not path:
+        console.print(
+            f"[yellow]Filename '{file}' is ambiguous — {len(matches)} matches:[/yellow]"
+        )
+        for p, _ in matches:
+            console.print(f"  - {p}")
+        console.print(
+            "Use [bold]--path <full_path>[/bold] to disambiguate, or pass "
+            "[bold]--yes[/bold] to forget all of them."
+        )
+        if not yes:
+            raise typer.Exit(code=1)
+
+    # Confirm.
+    if not yes:
+        n = len(matches)
+        plural = "" if n == 1 else "s"
+        total_chunks = sum(int(e.get("chunks", 0)) for _, e in matches)
+        confirm = typer.confirm(
+            f"Forget {n} document{plural} ({total_chunks} chunk{'' if total_chunks == 1 else 's'})?"
+        )
+        if not confirm:
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(code=1)
+
+    vector_store = _make_vector_store(cfg)
+    removed = 0
+    for p, entry in matches:
+        document_hash = entry.get("document_hash") or entry.get("hash")
+        if document_hash:
+            try:
+                vector_store.delete_by_document_hash(str(document_hash))
+            except Exception as exc:
+                console.print(f"[red]Failed to delete chunks for {p}: {exc}[/red]")
+                continue
+        tracker.remove(p)
+        removed += 1
+        console.print(f"[red]forgot[/red]  {p}")
+
+    tracker.save()
+    console.print(
+        f"\n[green]Removed {removed} document(s) from the store and the index.[/green]"
+    )
 
 
 @app.command()

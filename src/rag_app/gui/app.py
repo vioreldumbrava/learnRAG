@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from rag_app.gui.ask_tab import AskTab
 from rag_app.gui.ingest_tab import IngestTab
+from rag_app.gui.memory_tab import MemoryTab
 from rag_app.gui.settings_tab import SettingsTab
 from rag_app.gui.stats_tab import StatsTab
 
@@ -36,6 +37,9 @@ class MainWindow(QMainWindow):
         self.ask_tab = AskTab(
             config_path_getter=self.settings_tab.current_config_path
         )
+        self.memory_tab = MemoryTab(
+            config_path_getter=self.settings_tab.current_config_path
+        )
         self.stats_tab = StatsTab(
             config_path_getter=self.settings_tab.current_config_path
         )
@@ -43,11 +47,28 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.settings_tab, "Settings")
         tabs.addTab(self.ingest_tab, "Ingest")
         tabs.addTab(self.ask_tab, "Ask")
+        tabs.addTab(self.memory_tab, "Memory")
         tabs.addTab(self.stats_tab, "Stats")
 
-        # When the user saves settings, refresh the stats tab so it picks up
-        # the new config path / providers.
-        self.settings_tab.config_saved.connect(lambda _path: self.stats_tab.refresh())
+        # When the user saves settings, refresh the stats + memory tabs so
+        # they pick up the new config path / providers.
+        self.settings_tab.config_saved.connect(
+            lambda _path: (self.stats_tab.refresh(), self.memory_tab.refresh())
+        )
+        # After an ingest finishes, refresh memory so the new docs show up.
+        self.ingest_tab.file_progress.connect(
+            lambda _c, _t, _p, _s: None  # no-op; we refresh below on the worker finish
+        )
+        # Hook the ingest tab's "done" reset to also refresh memory + stats.
+        _orig_reset = self.ingest_tab._reset_running_state
+        def _reset_and_refresh():
+            _orig_reset()
+            try:
+                self.memory_tab.refresh()
+                self.stats_tab.refresh()
+            except Exception:
+                pass
+        self.ingest_tab._reset_running_state = _reset_and_refresh
 
         # Status bar
         self.setStatusBar(QStatusBar())

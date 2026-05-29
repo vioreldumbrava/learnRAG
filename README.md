@@ -135,14 +135,15 @@ to see the query flow as a handful of lines.
 
 On first run it creates `.venv\`, installs every dependency (including
 PySide6, cryptography, FastAPI, …), bootstraps `config.yaml` from the
-example, and opens a four-tab window:
+example, and opens a **five-tab** window:
 
 | Tab | What it does |
 |---|---|
 | **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunking strategy / `top_k`, then *Save to config.yaml*. URLs you've used before are remembered between sessions. |
-| **Ingest** | Index the configured documents folder, a single file, or any folder you pick. Force re-ingest is a checkbox. |
+| **Ingest** | Index the configured documents folder, a single file, or any folder you pick. **Per-file scrolling log** with colour-coded status (indexed/skipped/failed) + a determinate progress bar. Force re-ingest is a checkbox. |
 | **Ask** | Multi-turn chat: type a question, tick *Debug* to see retrieved chunks + the literal prompt, type a `--filter` like `module=CAN`, click **Clear History** to reset the conversation. |
-| **Stats** | Inspect the vector store, refresh on demand, clear it. |
+| **Memory** | The GUI version of `list` + `forget` + `inspect`: table of every ingested document, multi-select + *Forget Selected* to evict chunks, *Show N random chunks* / *Show chunks for selected doc*, plus an *Open storage folder* shortcut. |
+| **Stats** | Collection + chunk count + providers + chunking + retrieval-feature toggles. Includes a *Clear vector store* button (the GUI equivalent of `rag-app clear`). |
 
 ### Quick start — CLI
 
@@ -209,6 +210,24 @@ All commands accept `--config <path>` (default `config.yaml`). Examples
 use `.\run.bat`; substitute `python -m rag_app` if you set up the
 environment manually.
 
+**All 11 commands at a glance:**
+
+| command | role | what it does |
+|---|---|---|
+| `ingest` | write | Scan + chunk + embed + store. Skips unchanged files via SHA-256. |
+| `query` | read | One-shot Q&A. Supports `--debug`, `--stream`, `--filter`. |
+| `chat` | read | Interactive multi-turn session with conversation history. |
+| `retrieve` | read | Search-only — vector + BM25 (if hybrid). **No LLM call.** |
+| `inspect` | read | Peek at stored chunks (summary / by id / by file / random sample). |
+| `list` | read | Table of every ingested document with chunk count + hash. |
+| `eval` | read | Score recall@k + answer keywords against a gold-standard JSON. |
+| `stats` | read | Collection + provider + retrieval-feature summary. |
+| `forget` | write | Remove ONE document's chunks from the store + index. |
+| `clear` | write | Wipe the entire store + index. Originals on disk stay put. |
+| `serve` | service | Start the FastAPI REST API (see [section 9](#9-rest-api-server)). |
+
+`--help` is available on every command (e.g. `.\run.bat ingest --help`).
+
 ### `ingest` — index documents
 
 ```powershell
@@ -272,6 +291,16 @@ tool for debugging "is retrieval wrong, or is the LLM wrong?"
 .\run.bat inspect --id <chunk_id>                       # full text + metadata
 ```
 
+### `list` — every ingested document
+
+```powershell
+.\run.bat list
+```
+
+Table of every file in `storage/document_index.json` — source filename,
+full path, chunk count, document hash. The same info lives in the JSON
+index if you want a machine-readable view; this is the human one.
+
 ### `eval` — gold-standard scoring
 
 ```powershell
@@ -302,7 +331,20 @@ Schema for `questions.json` (one object per question):
 Shows collection name, chunk count, vector DB path, providers, chunk
 size/overlap, **strategy**, **hybrid on/off**, **HyDE on/off**, **reranker**.
 
-### `clear` — wipe the store
+### `forget` — remove ONE document
+
+```powershell
+.\run.bat forget --file sample_can_fd.txt               # by source filename
+.\run.bat forget --path "documents/CAN/spec.pdf"        # by full path (disambiguate)
+.\run.bat forget --file foo.pdf --yes                   # skip confirmation
+```
+
+Looks the file up in the index, deletes all its chunks from Chroma
+via `document_hash`, then drops the entry from the index file. The
+original file on disk is **not** touched. If a filename matches multiple
+paths, the command lists them and asks you to use `--path` to disambiguate.
+
+### `clear` — wipe the whole store
 
 ```powershell
 .\run.bat clear           # prompts for confirmation
@@ -310,7 +352,8 @@ size/overlap, **strategy**, **hybrid on/off**, **HyDE on/off**, **reranker**.
 ```
 
 Deletes `storage/chroma/` and `storage/document_index.json`. Originals
-in `documents/` stay put.
+in `documents/` stay put. Use `forget` when you only want to remove
+one or two docs.
 
 ### `serve` — REST API server
 
@@ -679,8 +722,9 @@ RAG_system/
       app.py                   # MainWindow + dark Fusion palette + entry point
       provider_panel.py        # reusable chat/embedding provider widget with model auto-discovery
       settings_tab.py          # provider + chunking + retrieval config
-      ingest_tab.py            # ingestion runner with progress + summary
+      ingest_tab.py            # ingestion runner with per-file coloured log + progress bar
       ask_tab.py               # multi-turn chat with history, filter, debug
+      memory_tab.py            # ingested-doc table + Forget Selected + sample chunks
       stats_tab.py             # vector store stats + clear
       workers.py               # QThread helper for background ops
       settings_store.py        # QSettings-backed URL history
