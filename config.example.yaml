@@ -22,6 +22,11 @@ paths:
 chunking:
   chunk_size: 900       # characters per chunk
   chunk_overlap: 150    # characters of overlap between neighboring chunks
+  # Strategy used to split documents:
+  #   paragraph - split on blank lines, pack into chunks (good general default)
+  #   heading   - split on section headings (good for datasheets / structured docs)
+  #   semantic  - recursive: headings -> paragraphs -> sentences (highest quality)
+  strategy: "paragraph"
 
 # ---------------------------------------------------------------------------
 # Default provider setup: LM Studio for both chat and embeddings.
@@ -65,8 +70,26 @@ vector_store:
 
 retrieval:
   top_k: 5
-  score_threshold: null   # set a float to discard chunks above this distance
+  score_threshold: null     # set a float to discard chunks above this distance
+  # Hybrid search: combine dense vector retrieval with BM25 keyword search,
+  # merge results with Reciprocal Rank Fusion. Fixes the "rare-token miss"
+  # failure mode of pure vector search (error codes, identifiers, names).
+  hybrid: false
+  hybrid_keyword_weight: 0.3
+  # HyDE: ask the LLM to write a hypothetical answer, embed THAT, then search.
+  # Often improves recall for vague or natural-language questions. Adds one
+  # extra LLM call per query.
+  use_hyde: false
+  # Reranker: re-score the top retrieved chunks by asking the chat model to
+  # rate each one's relevance (0-10). Slower but much more accurate top-k.
+  # Set to any non-empty string to enable (the value is informational).
+  reranker_model: null
 
 prompt:
   answer_only_from_context: true
   include_sources: true
+
+server:
+  # Used by `rag-app serve` (FastAPI REST API).
+  host: "127.0.0.1"
+  port: 8000
