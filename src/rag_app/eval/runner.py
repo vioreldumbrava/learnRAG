@@ -7,6 +7,12 @@ What we measure for each question:
   at all?" — not graded by rank. Mid-level interview rubric: this is the
   most-asked retrieval metric in real RAG eval.
 
+- **MRR (Mean Reciprocal Rank)**: 1/rank of the *first* expected source in
+  the ranked retrieval list, averaged over all questions. Recall@k only asks
+  "did we find it at all?" — MRR also rewards finding it *early*. A system
+  that always puts the right chunk first scores 1.0; one that buries it at
+  rank 5 scores 0.2.
+
 - **Keyword recall in the answer** (only when an LLM is configured): how many
   of the `expected_contains` substrings appeared in the model's answer. This
   is a cheap stand-in for *faithfulness*: did the model actually mention the
@@ -43,6 +49,9 @@ class EvalResult:
     keywords_found: int
     keywords_expected: int
     passed: bool
+    # 1-based rank of the first retrieved chunk that belongs to an expected
+    # source, or None when no expected source appeared (or none was asserted).
+    first_relevant_rank: int | None = None
 
     @property
     def retrieval_recall(self) -> float | None:
@@ -55,6 +64,15 @@ class EvalResult:
         if self.keywords_expected == 0:
             return None
         return self.keywords_found / self.keywords_expected
+
+    @property
+    def reciprocal_rank(self) -> float | None:
+        """1/rank of the first relevant chunk; 0.0 when nothing relevant was found."""
+        if self.sources_expected == 0:
+            return None
+        if self.first_relevant_rank is None:
+            return 0.0
+        return 1.0 / self.first_relevant_rank
 
 
 @dataclass
@@ -83,6 +101,11 @@ class EvalReport:
         scored = [r.keyword_recall for r in self.results if r.keyword_recall is not None]
         return sum(scored) / len(scored) if scored else 0.0
 
+    @property
+    def mean_reciprocal_rank(self) -> float:
+        scored = [r.reciprocal_rank for r in self.results if r.reciprocal_rank is not None]
+        return sum(scored) / len(scored) if scored else 0.0
+
 
 def load_questions(path: str | Path) -> list[EvalQuestion]:
     p = Path(path)
@@ -108,6 +131,14 @@ def score_question(
     expected = list(question.expected_sources)
     sources_found = sum(1 for f in expected if f in files_in_topk)
 
+    # MRR: rank (1-based) of the first retrieved chunk from an expected source.
+    first_relevant_rank: int | None = None
+    if expected:
+        for rank, chunk in enumerate(retrieved, start=1):
+            if str(chunk.metadata.get("source_file", "")) in expected:
+                first_relevant_rank = rank
+                break
+
     keywords_expected = list(question.expected_contains)
     haystack = (answer or "").lower()
     keywords_found = sum(1 for kw in keywords_expected if kw.lower() in haystack)
@@ -129,6 +160,7 @@ def score_question(
         keywords_found=keywords_found,
         keywords_expected=len(keywords_expected) if answer is not None else 0,
         passed=sources_pass and keywords_pass,
+        first_relevant_rank=first_relevant_rank,
     )
 
 

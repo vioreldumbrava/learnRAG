@@ -37,6 +37,8 @@ class StatsTab(QWidget):
         self.embed_label = QLabel("-")
         self.chunk_label = QLabel("-")
         self.topk_label = QLabel("-")
+        self.features_label = QLabel("-")
+        self.features_label.setWordWrap(True)
         for label, widget in (
             ("Collection:", self.collection_label),
             ("Chunks indexed:", self.count_label),
@@ -45,6 +47,7 @@ class StatsTab(QWidget):
             ("Chat provider:", self.chat_label),
             ("Chunk size / overlap:", self.chunk_label),
             ("top_k:", self.topk_label),
+            ("Retrieval features:", self.features_label),
         ):
             form.addRow(label, widget)
         layout.addWidget(box)
@@ -92,6 +95,14 @@ class StatsTab(QWidget):
             f"{cfg.chunking.chunk_size} / {cfg.chunking.chunk_overlap}"
         )
         self.topk_label.setText(str(cfg.retrieval.top_k))
+        r = cfg.retrieval
+        self.features_label.setText(
+            f"hybrid: {'on' if r.hybrid else 'off'} | "
+            f"HyDE: {'on' if r.use_hyde else 'off'} | "
+            f"reranker: {r.reranker_model or 'off'} | "
+            f"multi-query: {r.multi_query or 'off'} | "
+            f"neighbors: ±{r.neighbor_radius}"
+        )
         self.status_label.setText("")
 
     def clear_store(self) -> None:

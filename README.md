@@ -7,9 +7,10 @@ disk, a local vector database (ChromaDB), and a local LLM served by
 **Ollama** or **LM Studio**. No cloud APIs, no LangChain, no LlamaIndex.
 
 The whole RAG flow is written out explicitly in plain Python so it can be
-read top-to-bottom. Advanced features (hybrid search, HyDE, reranker,
-multi-turn chat, streaming, REST API) are layered on the same explicit
-core — each one toggled by a single line in `config.yaml`.
+read top-to-bottom. Advanced features (hybrid search, HyDE, multi-query,
+neighbor expansion, reranker, multi-turn chat, streaming, REST API) are
+layered on the same explicit core — each one toggled by a single line in
+`config.yaml`.
 
 > 📚 **Learning RAG?** Read [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md)
 > first — an 11-stage walkthrough mapping each app feature to a RAG concept,
@@ -94,11 +95,13 @@ file hash          -> HashTracker (skip unchanged files next time)
 ### Query (runs every time you ask a question)
 
 ```text
-question           -> [optional: HyDE expansion via LLM]
-                  -> EmbeddingProvider.embed_query
-query vector       -> ChromaVectorStore.search (top_k, optional metadata where=)
+question           -> [optional: multi-query rephrasings via LLM]
+                  -> [optional: HyDE expansion via LLM]
+                  -> EmbeddingProvider.embed_query (per variant)
+query vector(s)    -> ChromaVectorStore.search (top_k, optional metadata where=)
                   -> [optional: + BM25 keyword search merged via RRF (hybrid)]
                   -> [optional: cross-encoder rerank via LLM]
+                  -> [optional: stitch ±N neighbor chunks around each hit]
 retrieved chunks   -> PromptBuilder.build (system + history + user)
 messages           -> ChatProvider.generate  (or generate_stream for tokens)
                   <- answer + sources
@@ -139,7 +142,7 @@ example, and opens a **five-tab** window:
 
 | Tab | What it does |
 |---|---|
-| **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunking strategy / `top_k`, then *Save to config.yaml*. URLs you've used before are remembered between sessions. |
+| **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunking strategy / `top_k`, toggle the advanced retrieval features (hybrid, HyDE, reranker, multi-query, neighbor radius), then *Save to config.yaml*. Saving preserves any keys the GUI doesn't manage. URLs you've used before are remembered between sessions, and a *Clear vector DB* button lives next to Save. |
 | **Ingest** | Index the configured documents folder, a single file, or any folder you pick. **Per-file scrolling log** with colour-coded status (indexed/skipped/failed) + a determinate progress bar. Force re-ingest is a checkbox. |
 | **Ask** | Multi-turn chat: type a question, tick *Debug* to see retrieved chunks + the literal prompt, type a `--filter` like `module=CAN`, click **Clear History** to reset the conversation. |
 | **Memory** | The GUI version of `list` + `forget` + `inspect`: table of every ingested document, multi-select + *Forget Selected* to evict chunks, *Show N random chunks* / *Show chunks for selected doc*, plus an *Open storage folder* shortcut. |
@@ -308,8 +311,10 @@ index if you want a machine-readable view; this is the human one.
 .\run.bat eval --file eval/questions.json --skip-llm    # retrieval-only, fast
 ```
 
-Scores retrieval recall@k and (optionally) keyword presence in the
-answer. Per-question pass/fail table + summary. Exits non-zero on any
+Scores retrieval recall@k, **MRR** (rank of the first relevant chunk),
+and (optionally) keyword presence in the answer. Per-question pass/fail
+table — the `1st rank` column shows where the first expected source
+landed — plus a summary with mean recall and MRR. Exits non-zero on any
 failure so you can wire it into CI.
 
 Schema for `questions.json` (one object per question):
@@ -329,7 +334,8 @@ Schema for `questions.json` (one object per question):
 ```
 
 Shows collection name, chunk count, vector DB path, providers, chunk
-size/overlap, **strategy**, **hybrid on/off**, **HyDE on/off**, **reranker**.
+size/overlap, **strategy**, **hybrid on/off**, **HyDE on/off**,
+**reranker**, **multi-query**, **neighbor expansion**.
 
 ### `forget` — remove ONE document
 
@@ -417,8 +423,8 @@ registry). Type once, pick from dropdown forever after.
 ## 7. Advanced RAG features
 
 Each one is **off by default** (so the basic flow stays readable) and
-toggled by one or two lines in `config.yaml`. They stack — turn on all
-three for a "production-grade" retrieval pipeline.
+toggled by one or two lines in `config.yaml`. They stack — turn them
+all on for a "production-grade" retrieval pipeline.
 
 ### Chunking strategies
 
@@ -489,6 +495,45 @@ for vague natural-language queries.
 Cost: one extra LLM call per query. Implementation:
 [`Retriever._hyde_expand`](src/rag_app/retrieval/retriever.py).
 
+### Multi-query retrieval
+
+```yaml
+retrieval:
+  multi_query: 3        # number of LLM rephrasings (0 = off)
+```
+
+Before searching, the LLM rewrites the question N different ways
+("how fast can the bus go" → "what is the maximum baud rate"). The
+original plus every rephrasing is embedded and searched, and all ranked
+lists are merged with the same RRF used by hybrid search. Fixes
+*vocabulary mismatch* — when your words aren't the document's words,
+one of the rephrasings usually is. If the LLM call fails, the original
+question is searched alone, so the query path never breaks.
+
+Cost: one extra LLM call + N extra embedding/search rounds per query.
+Implementation:
+[`Retriever._multi_query_variants`](src/rag_app/retrieval/retriever.py).
+
+### Neighbor chunk expansion (sentence-window retrieval)
+
+```yaml
+retrieval:
+  neighbor_radius: 1    # stitch ±N adjacent chunks per hit (0 = off)
+```
+
+After ranking, each retrieved chunk is widened with the chunks
+immediately before and after it in the same document. Small chunks make
+retrieval *precise*; their neighbors give the LLM the surrounding
+sentence/table/paragraph so generation stays *grounded*. Match small,
+read wide.
+
+Works because chunk ids are deterministic `<document_hash>:<index>` —
+the neighbors of `abc:7` are just `abc:6` and `abc:8`. Expanded chunks
+carry a `neighbor_expanded: true` metadata flag in `--debug` output.
+
+Cost: zero extra LLM calls — the prompt just gets wider. Implementation:
+[`Retriever._expand_neighbors`](src/rag_app/retrieval/retriever.py).
+
 ### Cross-encoder-style reranker
 
 ```yaml
@@ -508,13 +553,15 @@ plumbed via `RagService(reranker_chat_provider=...)`.
 
 ### Combining them
 
-A "production" pipeline turns on all three:
+A "production" pipeline turns everything on:
 
 ```yaml
 retrieval:
   top_k: 5
   hybrid: true
   use_hyde: true
+  multi_query: 3
+  neighbor_radius: 1
   reranker_model: "llm-rerank"
 ```
 
@@ -522,11 +569,13 @@ Flow becomes:
 
 ```text
 question
-  -> HyDE LLM call -> hypothetical paragraph
-  -> embed hypothetical
-  -> [vector top-20] + [BM25 top-20]
+  -> multi-query LLM call -> 3 rephrasings
+  -> HyDE LLM call -> hypothetical paragraph (for the original question)
+  -> embed hypothetical + each rephrasing
+  -> [vector top-20 per variant] + [BM25 top-20 per variant]
   -> RRF merge -> top-20 fused
   -> reranker LLM (×20 calls) -> top-5
+  -> stitch ±1 neighbors around each survivor
   -> prompt build + answer
 ```
 
@@ -606,6 +655,8 @@ retrieval:
   hybrid_keyword_weight: 0.3
   use_hyde: false                  # hypothetical-document expansion
   reranker_model: null             # any non-empty string enables reranker
+  multi_query: 0                   # N LLM rephrasings searched + RRF-merged (0 = off)
+  neighbor_radius: 0               # stitch ±N adjacent chunks per hit (0 = off)
 ```
 
 ### `prompt`
@@ -710,7 +761,7 @@ RAG_system/
       base.py                  # VectorStore ABC + all_chunks() for BM25
       chroma_store.py          # ChromaDB PersistentClient + inspection helpers
     retrieval/
-      retriever.py             # vector + hybrid + HyDE + metadata filter
+      retriever.py             # vector + hybrid + HyDE + multi-query + neighbor expansion + metadata filter
       bm25.py                  # BM25Index + reciprocal_rank_fusion
       reranker.py              # LLM-as-cross-encoder reranker
       prompt_builder.py        # system + history + user message assembly
@@ -736,7 +787,8 @@ RAG_system/
     test_hash_tracker.py
     test_prompt_builder.py
     test_rag_service.py
-    test_eval_runner.py
+    test_retriever_features.py # multi-query + neighbor expansion
+    test_eval_runner.py        # incl. MRR scoring
 ```
 
 ---

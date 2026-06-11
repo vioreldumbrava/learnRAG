@@ -79,14 +79,15 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 - **Metadata filter** — Constrain retrieval to chunks whose metadata satisfies a predicate (`module=CAN`, `file_type=pdf`). Cheaper than running search then post-filtering. This project auto-derives `module` from sub-folder names under `documents/`.
 - **MMR** — Maximal Marginal Relevance. Re-rank top-K to trade off relevance for diversity. Reduces near-duplicates.
-- **MRR** — Mean Reciprocal Rank. Average of `1/rank_of_first_correct`. Rewards putting the right answer at position 1.
+- **MRR** — Mean Reciprocal Rank. Average of `1/rank_of_first_correct`. Rewards putting the right answer at position 1. Reported by this project's `eval` command alongside recall@k.
 - **Multi-hop RAG** — Some answers need facts from multiple chunks that don't co-occur; retrieve → ask follow-up → retrieve again.
-- **Multi-query** — LLM rephrases the question several ways, retrieve for each, deduplicate.
+- **Multi-query** — LLM rephrases the question several ways, retrieve for each, merge with RRF. Fixes vocabulary mismatch between question and document. Toggle `retrieval.multi_query: 3` to enable in this project.
 - **Multi-turn** — Threading prior conversation turns into the prompt so the LLM can resolve pronouns and follow-ups. Retrieval typically re-runs per turn; only the LLM sees the history.
 
 ## N
 
 - **NDCG** — Normalised Discounted Cumulative Gain. Standard IR ranking metric with log-scale rank discount.
+- **Neighbor expansion** — After ranking, stitch the ±N adjacent chunks of each hit into its text so the LLM sees the surrounding context. Match small, read wide. Toggle `retrieval.neighbor_radius: 1` in this project. Also called *sentence-window retrieval*.
 
 ## O
 

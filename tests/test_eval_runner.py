@@ -75,6 +75,54 @@ def test_score_question_skips_keywords_when_llm_disabled():
     assert result.keywords_expected == 0
 
 
+def test_mrr_rank_of_first_relevant_chunk():
+    q = EvalQuestion(question="?", expected_sources=["b.txt"])
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+        RetrievedChunk(id="2", text="y", metadata={"source_file": "b.txt"}),
+        RetrievedChunk(id="3", text="z", metadata={"source_file": "b.txt"}),
+    ]
+    result = score_question(q, retrieved, answer=None)
+    # First b.txt chunk sits at rank 2 → reciprocal rank 1/2.
+    assert result.first_relevant_rank == 2
+    assert result.reciprocal_rank == 0.5
+
+
+def test_mrr_zero_when_expected_source_never_retrieved():
+    q = EvalQuestion(question="?", expected_sources=["missing.txt"])
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+    ]
+    result = score_question(q, retrieved, answer=None)
+    assert result.first_relevant_rank is None
+    assert result.reciprocal_rank == 0.0
+
+
+def test_mrr_not_asserted_without_expected_sources():
+    q = EvalQuestion(question="?", expected_contains=["alpha"])
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+    ]
+    result = score_question(q, retrieved, answer="alpha")
+    assert result.reciprocal_rank is None
+
+
+def test_report_mean_reciprocal_rank_averages_only_asserted_questions():
+    q_ranked = EvalQuestion(question="?", expected_sources=["a.txt"])
+    q_missed = EvalQuestion(question="?", expected_sources=["b.txt"])
+    q_unasserted = EvalQuestion(question="?")
+    hit_a = [RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"})]
+
+    report = EvalReport(
+        results=[
+            score_question(q_ranked, hit_a, answer=None),      # rr = 1.0
+            score_question(q_missed, hit_a, answer=None),      # rr = 0.0
+            score_question(q_unasserted, hit_a, answer=None),  # rr = None
+        ]
+    )
+    assert report.mean_reciprocal_rank == 0.5
+
+
 def test_run_eval_with_fakes_no_llm(
     fake_embedding_provider, fake_vector_store
 ):

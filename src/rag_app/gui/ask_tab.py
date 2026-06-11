@@ -175,6 +175,7 @@ class AskTab(QWidget):
                 persist_dir=cfg.paths.chroma_dir,
                 collection_name=cfg.vector_store.collection_name,
             )
+            needs_llm = cfg.retrieval.use_hyde or cfg.retrieval.multi_query > 0
             retriever = Retriever(
                 embedding_provider=embedding_provider,
                 vector_store=store,
@@ -182,7 +183,9 @@ class AskTab(QWidget):
                 score_threshold=cfg.retrieval.score_threshold,
                 hybrid=cfg.retrieval.hybrid,
                 use_hyde=cfg.retrieval.use_hyde,
-                chat_provider=chat_provider if cfg.retrieval.use_hyde else None,
+                multi_query=cfg.retrieval.multi_query,
+                neighbor_radius=cfg.retrieval.neighbor_radius,
+                chat_provider=chat_provider if needs_llm else None,
                 where=where,
             )
             prompt_builder = PromptBuilder(

@@ -554,8 +554,10 @@ actually mention the fact?").
 ### In this code
 
 - [`src/rag_app/eval/runner.py`](../src/rag_app/eval/runner.py) —
-  `run_eval()` runs a list of questions and scores recall@k + keyword
-  presence.
+  `run_eval()` runs a list of questions and scores recall@k, **MRR**
+  (1/rank of the first relevant chunk, averaged), and keyword presence.
+  The CLI report shows each question's first-relevant rank in the
+  `1st rank` column and the aggregate MRR in the summary panel.
 - [`eval/questions.json`](../eval/questions.json) — starter set covering
   the sample docs. Schema is in
   [`eval/models.py`](../src/rag_app/eval/models.py).
@@ -596,7 +598,7 @@ source file, re-run, see the FAIL row. Then put it back.
 
 ### Concept
 
-Everything in Stages 1–8 is "naïve" or "vanilla" RAG. Five upgrades you
+Everything in Stages 1–8 is "naïve" or "vanilla" RAG. Six upgrades you
 should be able to discuss in an interview, in rough order of cost/benefit:
 
 #### A. Hybrid search (BM25 + dense vector) — *implemented*
@@ -642,12 +644,30 @@ Your user's literal question might not be a good search query.
   instead of the question's. Often beats the literal question because
   "answers look like answers" in embedding space. **Implemented** —
   see `retrieval.use_hyde` in `config.yaml`.
-- **Multi-query** (not implemented): ask the LLM to rephrase the question
-  3–5 ways, retrieve for each, dedupe. Trades latency for recall.
+- **Multi-query**: ask the LLM to rephrase the question 3–5 ways,
+  retrieve for each, merge the ranked lists with RRF. Trades latency
+  for recall — it fixes *vocabulary mismatch* (you ask about "speed",
+  the doc says "baud rate"). **Implemented** — set
+  `retrieval.multi_query: 3` in `config.yaml`.
 - **Query decomposition** (not implemented): break "What was X in year Y
   vs year Z?" into two sub-questions, retrieve for each.
 
-#### D. MMR (Maximal Marginal Relevance) — *not implemented*
+#### D. Context expansion (neighbor / sentence-window) — *implemented*
+
+Embed *small* chunks (precise matching) but hand the LLM *bigger* text.
+After ranking, fetch the chunks immediately before and after each hit
+from the same document and stitch them together. The hit found the
+needle; its neighbors supply the sentence the needle started, the rest
+of the table, the surrounding paragraph. LlamaIndex calls this
+**sentence-window retrieval**; the related **parent-document retrieval**
+swaps the chunk for its whole parent section.
+
+Cheap — zero extra LLM calls, the prompt just gets wider. Set
+`retrieval.neighbor_radius: 1` in `config.yaml`. It works here because
+chunk ids are deterministic `<document_hash>:<index>`, so "the chunk
+after `abc:7`" is simply `abc:8`.
+
+#### E. MMR (Maximal Marginal Relevance) — *not implemented*
 
 Diversifies the top-K so you don't get five near-duplicates of the same
 chunk. Useful when source files have a lot of overlap. Re-ranks the
@@ -655,7 +675,7 @@ candidate set to balance relevance to query against dissimilarity to
 already-picked chunks. Would slot in next to `reranker.py` as another
 post-retrieval re-ordering step.
 
-#### E. Advanced architectures — *not implemented*
+#### F. Advanced architectures — *not implemented*
 
 - **Multi-hop RAG**: the answer needs facts from chunks A and B, but
   neither alone is enough to surface in retrieval. Solution: retrieve →
@@ -668,24 +688,28 @@ post-retrieval re-ordering step.
 
 ### In this code
 
-Three of the five are **wired in**, each behind a single `config.yaml`
+Five of the six are **wired in**, each behind a single `config.yaml`
 flag (all default off so the basic flow stays readable):
 
 | upgrade | flag | implementation |
 |---|---|---|
 | Hybrid search | `retrieval.hybrid: true` | [`bm25.py`](../src/rag_app/retrieval/bm25.py) (`BM25Index`, `reciprocal_rank_fusion`) + [`Retriever._bm25_search`](../src/rag_app/retrieval/retriever.py) |
 | HyDE | `retrieval.use_hyde: true` | [`Retriever._hyde_expand`](../src/rag_app/retrieval/retriever.py) (extra LLM call before embedding) |
+| Multi-query | `retrieval.multi_query: 3` | [`Retriever._multi_query_variants`](../src/rag_app/retrieval/retriever.py) (LLM rephrasings, each searched, RRF-merged) |
+| Neighbor expansion | `retrieval.neighbor_radius: 1` | [`Retriever._expand_neighbors`](../src/rag_app/retrieval/retriever.py) (stitch ±N adjacent chunks by id) |
 | Reranker (LLM-as-judge) | `retrieval.reranker_model: "llm-rerank"` | [`reranker.py`](../src/rag_app/retrieval/reranker.py) + [`RagService._retrieve_and_rerank`](../src/rag_app/retrieval/rag_service.py) |
 
-Combined flow when all three are on:
+Combined flow when everything is on:
 
 ```text
 question
-  -> HyDE LLM call -> hypothetical answer paragraph
-  -> embed the hypothetical
-  -> vector search top-20  +  BM25 search top-20
+  -> multi-query LLM call -> N rephrasings
+  -> HyDE LLM call -> hypothetical answer paragraph (original question only)
+  -> embed hypothetical + each rephrasing
+  -> vector search top-20 per variant  +  BM25 search top-20 per variant
   -> RRF merge -> top-20 fused
   -> reranker LLM scores each chunk 0-10 -> top-5
+  -> stitch ±1 neighbor chunks around each survivor
   -> prompt build + answer
 ```
 
@@ -707,15 +731,29 @@ Watch each upgrade fix a specific failure:
 #    The first time will be slower — that's the extra LLM call writing
 #    the hypothetical paragraph.
 
-# 4) Turn on the reranker.
+# 4) Turn on multi-query.
+#    Edit config.yaml: retrieval.multi_query = 3
+.\run.bat query "how fast can the bus go" --debug
+#    Ask using vocabulary that does NOT appear in the document. The log
+#    shows the LLM's rephrasings; one of them usually lands on the
+#    document's own wording ("baud rate", "bit timing") and retrieves it.
+
+# 5) Turn on neighbor expansion.
+#    Edit config.yaml: retrieval.neighbor_radius = 1
+.\run.bat query "..." --debug
+#    Same hits — but each retrieved chunk in the debug output is now
+#    visibly longer because its neighbors were stitched in.
+
+# 6) Turn on the reranker.
 #    Edit config.yaml: retrieval.reranker_model = "llm-rerank"
 .\run.bat query "..." --debug
 #    Inspect the order of returned sources; the reranker should push the
 #    most-relevant chunk to position 1.
 
-# 5) Check what the system thinks is on:
+# 7) Check what the system thinks is on:
 .\run.bat stats
-#    The bottom three rows: Hybrid search / HyDE / Reranker.
+#    The bottom rows: Hybrid search / HyDE / Reranker / Multi-query /
+#    Neighbor expansion.
 ```
 
 ### Interview check
@@ -749,6 +787,19 @@ Watch each upgrade fix a specific failure:
   One extra LLM call per query before retrieval. Often worth it for
   vague natural-language questions; rarely worth it for queries that
   are already keyword-rich.
+- **Q: Multi-query vs HyDE — when would you pick which?**
+  Both are query transformations that cost one extra LLM call. HyDE
+  helps when *answers* embed differently from *questions* (vague,
+  open-ended asks). Multi-query helps when the user's *vocabulary*
+  differs from the document's — each rephrasing is another chance to
+  hit the document's own terms, and RRF rewards chunks that several
+  phrasings agree on.
+- **Q: Why embed small chunks but give the LLM big ones?**
+  Small chunks make retrieval precise (one idea per vector); big
+  contexts make generation grounded (the LLM sees the whole thought).
+  Sentence-window / neighbor expansion decouples the two: match small,
+  read wide. The decoupling is free here because chunk ids encode their
+  position in the document.
 
 ---
 

@@ -945,6 +945,7 @@ def _print_eval_report(report: EvalReport) -> None:
     table.add_column("#", justify="right")
     table.add_column("question")
     table.add_column("recall@k", justify="right")
+    table.add_column("1st rank", justify="right")
     table.add_column("keywords", justify="right")
     table.add_column("pass")
     for i, r in enumerate(report.results, start=1):
@@ -961,8 +962,14 @@ def _print_eval_report(report: EvalReport) -> None:
             if r.sources_expected
             else "n/a"
         )
+        if not r.sources_expected:
+            rank = "n/a"
+        elif r.first_relevant_rank is None:
+            rank = "[red]miss[/red]"
+        else:
+            rank = str(r.first_relevant_rank)
         passed = "[green]PASS[/green]" if r.passed else "[red]FAIL[/red]"
-        table.add_row(str(i), q, recall, kw, passed)
+        table.add_row(str(i), q, recall, rank, kw, passed)
     console.print(table)
 
     console.print(
@@ -970,6 +977,7 @@ def _print_eval_report(report: EvalReport) -> None:
             f"Passed: [green]{report.passed_count}[/green] / {len(report.results)}\n"
             f"Failed: [red]{report.failed_count}[/red]\n"
             f"Mean retrieval recall: {report.mean_recall:.2f}\n"
+            f"MRR (reciprocal rank): {report.mean_reciprocal_rank:.2f}\n"
             f"Mean keyword recall:   {report.mean_keyword_recall:.2f}",
             title="Summary",
             border_style="cyan" if report.all_passed else "red",

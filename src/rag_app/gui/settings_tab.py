@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import shutil
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import yaml
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -33,6 +35,13 @@ class SettingsTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        # Raw dict of the last successfully loaded config. Used as the base
+        # when saving so keys the GUI doesn't control (paths, server, prompt,
+        # …) survive a load → save round-trip instead of being reset.
+        self._base_config: dict | None = None
+        # Remember a custom reranker_model string so toggling the checkbox
+        # off and on doesn't replace it with the default name.
+        self._reranker_name: str | None = None
         layout = QVBoxLayout(self)
 
         # config file path row
@@ -91,44 +100,60 @@ class SettingsTab(QWidget):
     # ----- public API ------------------------------------------------------
 
     def values_as_config_dict(self) -> dict:
-        chat = self.chat_panel.values()
-        embed = self.embed_panel.values()
-        return {
-            "app": {"name": "local-rag-learning", "debug": False},
-            "paths": {
-                "documents_dir": "documents",
-                "storage_dir": "storage",
-                "chroma_dir": "storage/chroma",
-                "index_file": "storage/document_index.json",
-            },
-            "chunking": {
-                "chunk_size": int(self.chunk_size_spin.value()),
-                "chunk_overlap": int(self.chunk_overlap_spin.value()),
-            },
-            "chat": chat,
-            "embeddings": embed,
-            "vector_store": {
-                "provider": "chroma",
-                "collection_name": self.collection_edit.text() or "local_rag_docs",
-            },
-            "retrieval": {
-                "top_k": int(self.top_k_spin.value()),
-                "score_threshold": (
-                    float(self.score_threshold_spin.value())
-                    if self.score_threshold_spin.value() > 0
-                    else None
-                ),
-            },
-            "prompt": {
-                "answer_only_from_context": True,
-                "include_sources": True,
-            },
-            "ocr": {
-                "enabled": self.ocr_enabled_check.isChecked(),
-                "min_chars_per_page": int(self.ocr_min_chars_spin.value()),
-                "lang": self.ocr_lang_edit.text().strip() or "eng",
-            },
+        # Start from the loaded config (if any) so unmanaged keys survive.
+        if self._base_config is not None:
+            data = copy.deepcopy(self._base_config)
+        else:
+            data = {
+                "app": {"name": "local-rag-learning", "debug": False},
+                "paths": {
+                    "documents_dir": "documents",
+                    "storage_dir": "storage",
+                    "chroma_dir": "storage/chroma",
+                    "index_file": "storage/document_index.json",
+                },
+                "prompt": {
+                    "answer_only_from_context": True,
+                    "include_sources": True,
+                },
+            }
+
+        data["chat"] = self.chat_panel.values()
+        data["embeddings"] = self.embed_panel.values()
+
+        chunking = data.setdefault("chunking", {})
+        chunking["chunk_size"] = int(self.chunk_size_spin.value())
+        chunking["chunk_overlap"] = int(self.chunk_overlap_spin.value())
+        chunking["strategy"] = self.strategy_combo.currentText()
+
+        data["vector_store"] = {
+            "provider": "chroma",
+            "collection_name": self.collection_edit.text() or "local_rag_docs",
         }
+
+        retrieval = data.setdefault("retrieval", {})
+        retrieval["top_k"] = int(self.top_k_spin.value())
+        retrieval["score_threshold"] = (
+            float(self.score_threshold_spin.value())
+            if self.score_threshold_spin.value() > 0
+            else None
+        )
+        retrieval["hybrid"] = self.hybrid_check.isChecked()
+        retrieval["use_hyde"] = self.hyde_check.isChecked()
+        retrieval["reranker_model"] = (
+            (self._reranker_name or "llm-rerank")
+            if self.reranker_check.isChecked()
+            else None
+        )
+        retrieval["multi_query"] = int(self.multi_query_spin.value())
+        retrieval["neighbor_radius"] = int(self.neighbor_spin.value())
+
+        data["ocr"] = {
+            "enabled": self.ocr_enabled_check.isChecked(),
+            "min_chars_per_page": int(self.ocr_min_chars_spin.value()),
+            "lang": self.ocr_lang_edit.text().strip() or "eng",
+        }
+        return data
 
     def current_config_path(self) -> str:
         return self.config_path_edit.text().strip() or "config.yaml"
@@ -161,12 +186,20 @@ class SettingsTab(QWidget):
         )
         self.chunk_size_spin.setValue(cfg.chunking.chunk_size)
         self.chunk_overlap_spin.setValue(cfg.chunking.chunk_overlap)
+        self.strategy_combo.setCurrentText(cfg.chunking.strategy)
         self.top_k_spin.setValue(cfg.retrieval.top_k)
         self.score_threshold_spin.setValue(cfg.retrieval.score_threshold or 0.0)
+        self.hybrid_check.setChecked(cfg.retrieval.hybrid)
+        self.hyde_check.setChecked(cfg.retrieval.use_hyde)
+        self.reranker_check.setChecked(bool(cfg.retrieval.reranker_model))
+        self._reranker_name = cfg.retrieval.reranker_model
+        self.multi_query_spin.setValue(cfg.retrieval.multi_query)
+        self.neighbor_spin.setValue(cfg.retrieval.neighbor_radius)
         self.collection_edit.setText(cfg.vector_store.collection_name)
         self.ocr_enabled_check.setChecked(cfg.ocr.enabled)
         self.ocr_min_chars_spin.setValue(cfg.ocr.min_chars_per_page)
         self.ocr_lang_edit.setText(cfg.ocr.lang)
+        self._base_config = cfg.model_dump(mode="json")
         settings_store.set_last_config_path(path)
         self.status_label.setText(f"Loaded {path}.")
 
@@ -268,8 +301,14 @@ class SettingsTab(QWidget):
         )
         self.chunk_size_spin.setValue(900)
         self.chunk_overlap_spin.setValue(150)
+        self.strategy_combo.setCurrentText("paragraph")
         self.top_k_spin.setValue(5)
         self.score_threshold_spin.setValue(0.0)
+        self.hybrid_check.setChecked(False)
+        self.hyde_check.setChecked(False)
+        self.reranker_check.setChecked(False)
+        self.multi_query_spin.setValue(0)
+        self.neighbor_spin.setValue(0)
         self.collection_edit.setText("local_rag_docs")
         self.ocr_enabled_check.setChecked(False)
         self.ocr_min_chars_spin.setValue(50)
@@ -288,6 +327,15 @@ class SettingsTab(QWidget):
         self.chunk_overlap_spin.setRange(0, 4000)
         self.chunk_overlap_spin.setSingleStep(10)
         form.addRow("Chunk overlap (chars):", self.chunk_overlap_spin)
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["paragraph", "heading", "semantic"])
+        self.strategy_combo.setToolTip(
+            "paragraph: blank-line paragraphs packed up to chunk size (default)\n"
+            "heading:   split on section headings first (datasheets, manuals)\n"
+            "semantic:  recursive headings → paragraphs → sentences (slowest, best)\n"
+            "Changing this requires clear + re-ingest to take effect."
+        )
+        form.addRow("Strategy:", self.strategy_combo)
         return box
 
     def _build_retrieval_box(self) -> QGroupBox:
@@ -302,6 +350,49 @@ class SettingsTab(QWidget):
         self.score_threshold_spin.setDecimals(3)
         self.score_threshold_spin.setSpecialValueText("(no threshold)")
         form.addRow("Score threshold:", self.score_threshold_spin)
+
+        self.hybrid_check = QCheckBox("Hybrid search (BM25 + vector, RRF merge)")
+        self.hybrid_check.setToolTip(
+            "Also run a BM25 keyword search and merge both result lists.\n"
+            "Catches exact tokens (error codes, register names) that\n"
+            "embeddings smear. No extra LLM calls."
+        )
+        form.addRow("", self.hybrid_check)
+
+        self.hyde_check = QCheckBox("HyDE query expansion")
+        self.hyde_check.setToolTip(
+            "Ask the LLM to write a hypothetical answer paragraph and search\n"
+            "with that instead of the raw question. +1 LLM call per query."
+        )
+        form.addRow("", self.hyde_check)
+
+        self.reranker_check = QCheckBox("LLM reranker")
+        self.reranker_check.setToolTip(
+            "After retrieval, ask the chat model to score each candidate\n"
+            "chunk 0-10 and keep the best. +N LLM calls per query."
+        )
+        form.addRow("", self.reranker_check)
+
+        self.multi_query_spin = QSpinBox()
+        self.multi_query_spin.setRange(0, 10)
+        self.multi_query_spin.setSpecialValueText("(off)")
+        self.multi_query_spin.setToolTip(
+            "Ask the LLM for N alternative phrasings of the question, search\n"
+            "each one, and merge the result lists with RRF.\n"
+            "+1 LLM call per query, N+1 embedding/search rounds."
+        )
+        form.addRow("Multi-query rephrasings:", self.multi_query_spin)
+
+        self.neighbor_spin = QSpinBox()
+        self.neighbor_spin.setRange(0, 5)
+        self.neighbor_spin.setSpecialValueText("(off)")
+        self.neighbor_spin.setToolTip(
+            "After ranking, stitch the ±N adjacent chunks of each hit into\n"
+            "the context so the LLM sees the surrounding text.\n"
+            "No extra LLM calls — just a wider prompt."
+        )
+        form.addRow("Neighbor radius:", self.neighbor_spin)
+
         self.collection_edit = QLineEdit()
         self.collection_edit.setPlaceholderText("local_rag_docs")
         form.addRow("Collection name:", self.collection_edit)

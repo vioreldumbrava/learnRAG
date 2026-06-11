@@ -307,6 +307,12 @@ Range (0, 1]; higher is better.
 **When it matters:** When *rank* matters (you care that the right chunk
 is at position 1, not just somewhere in top-K).
 
+**Where in this code:** Computed by the `eval` command alongside
+recall@k — [`score_question`](../src/rag_app/eval/runner.py) records the
+rank of the first chunk from an expected source; the report averages the
+reciprocal ranks. Shown as the `1st rank` column and the `MRR` summary
+line.
+
 ### NDCG (Normalised Discounted Cumulative Gain)
 
 **What:** Standard IR ranking metric. Discounts gains at lower ranks
@@ -615,13 +621,44 @@ returned hypothetical instead of the raw question. On failure (any
 exception) it falls back to embedding the raw question, so HyDE never
 breaks the query path.
 
-### Multi-query retrieval *(theory only — not implemented)*
+### Multi-query retrieval
 
 **What:** LLM rephrases the question several ways, retrieve for each,
-deduplicate.
+merge the ranked lists (RRF here). Fixes *vocabulary mismatch*: the
+user says "speed", the document says "baud rate" — one of the
+rephrasings usually lands on the document's own terms.
 
-**Trade-off:** N × retrieval cost, but better recall on ambiguous
-phrasing.
+**Trade-off:** One extra LLM call plus N × retrieval cost, but better
+recall on ambiguous or differently-worded questions.
+
+**Where in this code:** **Implemented.** Set `retrieval.multi_query: 3`
+in `config.yaml`.
+[`Retriever._multi_query_variants`](../src/rag_app/retrieval/retriever.py)
+asks the chat model for N alternative phrasings (one per line), searches
+the original plus every variant, and merges all ranked lists with the
+same `reciprocal_rank_fusion` used by hybrid search. If the LLM call
+fails, the original question is searched alone — the query path never
+breaks.
+
+### Neighbor expansion (sentence-window retrieval)
+
+**What:** Embed and match *small* chunks, but hand the LLM each hit
+*plus the chunks immediately around it* from the same document. The
+small chunk finds the needle; its neighbors restore the sentence,
+table, or paragraph the needle was part of. LlamaIndex's
+"sentence-window retrieval" and "parent-document retrieval" are the
+same idea at different granularities.
+
+**Trade-off:** Zero extra LLM calls — the prompt just gets wider
+(roughly (2N+1)× the context tokens per hit).
+
+**Where in this code:** **Implemented.** Set
+`retrieval.neighbor_radius: 1` in `config.yaml`.
+[`Retriever._expand_neighbors`](../src/rag_app/retrieval/retriever.py)
+exploits the deterministic chunk ids (`<document_hash>:<index>`): the
+neighbors of `abc:7` at radius 1 are simply `abc:6` and `abc:8`,
+fetched by id and stitched in document order. Expanded chunks carry a
+`neighbor_expanded: true` metadata flag visible in `--debug` output.
 
 ### Query decomposition *(theory only — not implemented)*
 
@@ -657,6 +694,8 @@ A few common interview "what would you reach for?" scenarios:
 | Symptom | First thing to try |
 |---|---|
 | Right answer isn't being retrieved | Lower the chunk size, raise `top_k`, add hybrid search |
+| User's wording differs from the document's | Multi-query (`retrieval.multi_query`) or HyDE |
+| Retrieved chunk is cut off mid-thought / missing surrounding context | Neighbor expansion (`retrieval.neighbor_radius`) |
 | Hallucinated answer | Stricter system prompt, score threshold, lower temperature |
 | Retrieval gets the wrong chunk for an exact identifier (error code, name) | Hybrid search (BM25) |
 | 5 retrieved chunks are duplicates of each other | MMR |

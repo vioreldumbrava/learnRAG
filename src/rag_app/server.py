@@ -121,6 +121,7 @@ def _make_retriever(
     where: dict | None = None,
     top_k: int | None = None,
 ) -> Retriever:
+    needs_llm = cfg.retrieval.use_hyde or cfg.retrieval.multi_query > 0
     return Retriever(
         embedding_provider=_state.embedding_provider,
         vector_store=_state.vector_store,
@@ -128,7 +129,9 @@ def _make_retriever(
         score_threshold=cfg.retrieval.score_threshold,
         hybrid=cfg.retrieval.hybrid,
         use_hyde=cfg.retrieval.use_hyde,
-        chat_provider=_state.chat_provider if cfg.retrieval.use_hyde else None,
+        multi_query=cfg.retrieval.multi_query,
+        neighbor_radius=cfg.retrieval.neighbor_radius,
+        chat_provider=_state.chat_provider if needs_llm else None,
         where=where,
     )
 

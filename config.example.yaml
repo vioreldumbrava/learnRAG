@@ -84,6 +84,16 @@ retrieval:
   # rate each one's relevance (0-10). Slower but much more accurate top-k.
   # Set to any non-empty string to enable (the value is informational).
   reranker_model: null
+  # Multi-query: ask the LLM for N alternative phrasings of the question,
+  # search with each one, and merge all result lists with RRF. Catches
+  # vocabulary-mismatch misses (you say "speed", the doc says "baud rate").
+  # Adds one LLM call + N extra embedding/search rounds per query. 0 = off.
+  multi_query: 0
+  # Neighbor expansion: after ranking, stitch the ±N adjacent chunks of each
+  # hit into its text so the LLM sees the surrounding context (the chunk
+  # before and after usually finish the sentence/table the hit started).
+  # No extra LLM calls — the prompt just gets wider. 0 = off.
+  neighbor_radius: 0
 
 prompt:
   answer_only_from_context: true
