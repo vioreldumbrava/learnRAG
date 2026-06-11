@@ -82,6 +82,7 @@ def _make_retriever(
 ) -> Retriever:
     """Build a Retriever with all configured enhancements."""
 
+    needs_llm = cfg.retrieval.use_hyde or cfg.retrieval.multi_query > 0
     return Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
@@ -90,7 +91,9 @@ def _make_retriever(
         hybrid=cfg.retrieval.hybrid,
         hybrid_keyword_weight=cfg.retrieval.hybrid_keyword_weight,
         use_hyde=cfg.retrieval.use_hyde,
-        chat_provider=chat_provider if cfg.retrieval.use_hyde else None,
+        multi_query=cfg.retrieval.multi_query,
+        neighbor_radius=cfg.retrieval.neighbor_radius,
+        chat_provider=chat_provider if needs_llm else None,
         where=where,
     )
 
@@ -342,7 +345,9 @@ def chat(
             "[bold]Interactive RAG Chat[/bold]\n"
             "Type your questions. Commands: /clear (reset), /quit (exit).\n"
             f"Hybrid: {cfg.retrieval.hybrid} | HyDE: {cfg.retrieval.use_hyde} | "
-            f"Reranker: {cfg.retrieval.reranker_model or 'off'}",
+            f"Reranker: {cfg.retrieval.reranker_model or 'off'} | "
+            f"Multi-query: {cfg.retrieval.multi_query or 'off'} | "
+            f"Neighbors: ±{cfg.retrieval.neighbor_radius}",
             title="rag-app chat",
             border_style="green",
         )
@@ -429,12 +434,15 @@ def retrieve(
     vector_store = _make_vector_store(cfg)
     where = _parse_filters(filter)
 
+    # No chat provider here on purpose: `retrieve` never calls the LLM, so
+    # HyDE / multi-query are skipped even if enabled in the config.
     retriever = Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         top_k=top_k if top_k is not None else cfg.retrieval.top_k,
         score_threshold=cfg.retrieval.score_threshold,
         hybrid=cfg.retrieval.hybrid,
+        neighbor_radius=cfg.retrieval.neighbor_radius,
         where=where,
     )
 
@@ -645,6 +653,14 @@ def stats(config: Path = ConfigOption) -> None:
     table.add_row("Hybrid search", "on" if cfg.retrieval.hybrid else "off")
     table.add_row("HyDE", "on" if cfg.retrieval.use_hyde else "off")
     table.add_row("Reranker", cfg.retrieval.reranker_model or "off")
+    table.add_row(
+        "Multi-query",
+        f"on ({cfg.retrieval.multi_query} rephrasings)" if cfg.retrieval.multi_query else "off",
+    )
+    table.add_row(
+        "Neighbor expansion",
+        f"on (radius {cfg.retrieval.neighbor_radius})" if cfg.retrieval.neighbor_radius else "off",
+    )
     console.print(table)
 
 

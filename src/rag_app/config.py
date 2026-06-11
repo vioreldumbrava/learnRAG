@@ -78,6 +78,12 @@ class RetrievalSection(BaseModel):
     hybrid_keyword_weight: float = 0.3
     reranker_model: str | None = None
     use_hyde: bool = False
+    # Number of LLM-generated rephrasings to search with IN ADDITION to the
+    # original question (0 = off). Results are merged via RRF.
+    multi_query: int = Field(default=0, ge=0, le=10)
+    # After ranking, stitch in the ±N adjacent chunks of each hit so the LLM
+    # sees the surrounding context (0 = off).
+    neighbor_radius: int = Field(default=0, ge=0, le=5)
 
 
 class PromptSection(BaseModel):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import yaml
@@ -58,8 +59,19 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_retrieval_box())
         layout.addWidget(self._build_ocr_box())
 
-        # save row
+        # save row + danger zone
         save_row = QHBoxLayout()
+        self.clear_db_btn = QPushButton("🗑  Clear vector DB…")
+        self.clear_db_btn.setToolTip(
+            "Delete the Chroma vector store and the ingestion index file.\n"
+            "All ingested documents will be forgotten — you must re-ingest afterwards."
+        )
+        self.clear_db_btn.setStyleSheet(
+            "QPushButton { color: #c0392b; font-weight: bold; }"
+            "QPushButton:hover { background: #fdecea; }"
+        )
+        self.clear_db_btn.clicked.connect(self._clear_vector_db)
+        save_row.addWidget(self.clear_db_btn)
         save_row.addStretch(1)
         self.save_btn = QPushButton("Save to config.yaml")
         self.save_btn.clicked.connect(self.save_to_file)
@@ -175,6 +187,58 @@ class SettingsTab(QWidget):
         settings_store.set_last_config_path(path)
         self.status_label.setText(f"Saved {path}.")
         self.config_saved.emit(path)
+
+    def _clear_vector_db(self) -> None:
+        """Wipe the Chroma store and index file after confirmation."""
+        path = self.current_config_path()
+        try:
+            cfg: AppConfig = load_config(path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Cannot load config",
+                f"Save (or reload) the config first.\n\n{exc}",
+            )
+            return
+
+        chroma_dir = Path(cfg.paths.chroma_dir)
+        index_file = Path(cfg.paths.index_file)
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Clear vector DB — are you sure?")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText(
+            "<b>This will permanently delete:</b><br>"
+            f"&nbsp;&nbsp;• Vector store: <tt>{chroma_dir}</tt><br>"
+            f"&nbsp;&nbsp;• Ingestion index: <tt>{index_file}</tt><br><br>"
+            "All ingested document embeddings will be lost.<br>"
+            "<b>You must re-ingest your documents afterwards.</b>"
+        )
+        msg.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
+        msg.button(QMessageBox.Ok).setText("Yes, clear everything")
+        msg.setDefaultButton(QMessageBox.Cancel)
+        if msg.exec() != QMessageBox.Ok:
+            return
+
+        errors: list[str] = []
+        if chroma_dir.exists():
+            try:
+                shutil.rmtree(chroma_dir)
+            except OSError as exc:
+                errors.append(f"Vector store: {exc}")
+        if index_file.exists():
+            try:
+                index_file.unlink()
+            except OSError as exc:
+                errors.append(f"Index file: {exc}")
+
+        if errors:
+            QMessageBox.critical(
+                self, "Partial failure",
+                "Some items could not be deleted:\n" + "\n".join(errors),
+            )
+        else:
+            self.status_label.setStyleSheet("color: #c0392b;")
+            self.status_label.setText("Vector DB cleared. Re-ingest your documents.")
 
     def _browse_config(self) -> None:
         start_dir = str(Path(self.current_config_path()).parent or ".")

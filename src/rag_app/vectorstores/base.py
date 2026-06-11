@@ -49,3 +49,11 @@ class VectorStore(ABC):
     def all_chunks(self, limit: int = 50_000) -> list[RetrievedChunk]:
         """Return all stored chunks (for BM25 indexing). Optional override."""
         raise NotImplementedError
+
+    def get(self, chunk_id: str) -> RetrievedChunk | None:
+        """Fetch one chunk by id, or None. Optional override.
+
+        Used by neighbor expansion, which addresses adjacent chunks
+        directly via the deterministic `<document_hash[:12]>:<index>` ids.
+        """
+        raise NotImplementedError

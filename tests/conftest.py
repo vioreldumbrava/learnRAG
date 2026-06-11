@@ -150,6 +150,12 @@ class FakeVectorStore(VectorStore):
             )
         return out
 
+    def get(self, chunk_id: str) -> RetrievedChunk | None:
+        c = self.chunks.get(chunk_id)
+        if c is None:
+            return None
+        return RetrievedChunk(id=c.id, text=c.text, metadata=c.metadata, score=None)
+
 
 def _l1(a: Iterable[float], b: Iterable[float]) -> float:
     return sum(abs(x - y) for x, y in zip(a, b))
