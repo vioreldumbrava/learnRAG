@@ -336,8 +336,10 @@ that need diverse source citation.
 
 **Where in this code:** **Implemented.** Set `retrieval.use_mmr: true`
 and tune `retrieval.mmr_lambda`. [`mmr.py`](../src/rag_app/retrieval/mmr.py)
-embeds the candidate chunks, selects a diverse final top-k, and preserves
-the original retrieval score while adding MMR metadata.
+selects a diverse final top-k and preserves the original retrieval score
+while adding MMR metadata. The candidate vectors are read back from the
+vector store (`embeddings_for_ids`) and the query vector is reused from
+the search step, so MMR adds **zero** embedding or LLM calls.
 
 ### Metadata filters
 
@@ -393,14 +395,19 @@ natively (Qdrant, OpenSearch).
 ### RRF (Reciprocal Rank Fusion)
 
 **What:** Merge multiple ranked lists by summing `1 / (k + rank)` across
-lists; default `k = 60`. No score normalisation needed.
+lists; default `k = 60`. No score normalisation needed. An optional
+per-list weight (`weight / (k + rank)`) lets one retriever count for
+more without reintroducing score-scale problems.
 
 **When it matters:** The default modern way to combine dense + sparse
-retrievers. Less hyperparameter pain than a weighted sum.
+retrievers. Less hyperparameter pain than a weighted sum of raw scores.
 
 **Where in this code:**
 [`reciprocal_rank_fusion`](../src/rag_app/retrieval/bm25.py) — called
-from `Retriever.retrieve` when `hybrid=True`.
+from `Retriever.retrieve` when `hybrid=True` (BM25 lists weighted by
+`retrieval.hybrid_keyword_weight`, vector lists by `1 - weight`) and
+whenever multi-query / decomposition produce several ranked lists
+(unweighted there).
 
 ### Cross-encoder reranker
 

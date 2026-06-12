@@ -78,6 +78,8 @@ retrieval:
   # merge results with Reciprocal Rank Fusion. Fixes the "rare-token miss"
   # failure mode of pure vector search (error codes, identifiers, names).
   hybrid: false
+  # BM25's share of the RRF merge: BM25 contributions are multiplied by this
+  # weight, vector contributions by (1 - weight). 0.5 treats both equally.
   hybrid_keyword_weight: 0.3
   # HyDE: ask the LLM to write a hypothetical answer, embed THAT, then search.
   # Often improves recall for vague or natural-language questions. Adds one

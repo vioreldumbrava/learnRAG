@@ -138,3 +138,62 @@ def test_mmr_runs_before_reranker(
     assert all(source.metadata.get("mmr_selected") is True for source in answer.sources)
     # MMR narrowed candidate_k=4 to top_k=2 before reranking scored them.
     assert len(reranker_chat.received) == 2
+
+
+def test_reranker_gets_candidate_pool_then_neighbors_expand(
+    fake_embedding_provider, fake_vector_store, fake_chat_provider
+):
+    chunks = [
+        DocumentChunk(
+            id=f"abcdef123456:{i}",
+            text=text,
+            metadata={"source_file": "doc.txt", "chunk_index": i},
+        )
+        for i, text in enumerate(["zero", "one", "two", "three"])
+    ]
+    embeddings = fake_embedding_provider.embed_texts([c.text for c in chunks])
+    fake_vector_store.upsert_chunks(chunks, embeddings)
+
+    class CountingRerankerChat:
+        provider_name = "fake"
+        model_name = "reranker"
+
+        def __init__(self) -> None:
+            self.received = []
+
+        def generate(self, messages, temperature=0.2, max_tokens=800):
+            self.received.append(list(messages))
+            return "7"
+
+    reranker_chat = CountingRerankerChat()
+    retriever = Retriever(
+        fake_embedding_provider,
+        fake_vector_store,
+        top_k=2,
+        candidate_k=4,
+        return_candidates=True,
+        neighbor_radius=1,
+    )
+    service = RagService(
+        retriever,
+        PromptBuilder(),
+        fake_chat_provider,
+        reranker_chat_provider=reranker_chat,
+        reranker_top_k=2,
+        reranker_model="llm-rerank",
+    )
+
+    answer = service.answer("one")
+
+    # The reranker scored the whole candidate pool (4), not just top_k...
+    assert len(reranker_chat.received) == 4
+    # ...the original (unstitched) chunk texts were what it scored...
+    scored_passages = [
+        m[-1].content.split("Passage:\n", 1)[1].rsplit("\n\nRelevance", 1)[0]
+        for m in reranker_chat.received
+    ]
+    assert sorted(scored_passages) == ["one", "three", "two", "zero"]
+    # ...and only the two survivors were neighbor-expanded afterwards.
+    assert len(answer.sources) == 2
+    assert all(s.metadata.get("neighbor_expanded") is True for s in answer.sources)
+    assert all("\n\n" in s.text for s in answer.sources)

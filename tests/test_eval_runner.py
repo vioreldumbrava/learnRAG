@@ -259,3 +259,19 @@ def test_run_eval_with_fakes_and_chat(
     )
     assert report.passed_count == 1
     assert report.failed_count == 1
+
+
+def test_zero_gain_relevance_sources_are_not_required_for_recall():
+    q = EvalQuestion(
+        question="?",
+        expected_relevance={"a.txt": 1.0, "irrelevant.txt": 0.0},
+    )
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+    ]
+    result = score_question(q, retrieved, answer=None)
+    # Only the positive-gain source is required; the 0.0-graded one is
+    # "explicitly irrelevant" and must not fail recall/MRR.
+    assert result.sources_expected == 1
+    assert result.passed
+    assert result.reciprocal_rank == 1.0

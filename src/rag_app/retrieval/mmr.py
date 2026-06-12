@@ -15,12 +15,19 @@ def maximal_marginal_relevance(
     *,
     top_k: int,
     lambda_mult: float = 0.5,
+    query_embedding: list[float] | None = None,
+    chunk_embeddings: list[list[float] | None] | None = None,
 ) -> list[RetrievedChunk]:
     """Select relevant but non-duplicative chunks using MMR.
 
     ``lambda_mult`` trades relevance against novelty:
     1.0 behaves like pure relevance ranking, 0.0 strongly prefers chunks
     dissimilar to what has already been selected.
+
+    ``query_embedding`` / ``chunk_embeddings`` are optional precomputed
+    vectors (e.g. the search query vector and the embeddings already stored
+    in the vector store). Anything missing — including individual `None`
+    entries in ``chunk_embeddings`` — is embedded here in one batch.
     """
 
     if not chunks or top_k <= 0:
@@ -32,10 +39,9 @@ def maximal_marginal_relevance(
         ]
 
     lambda_mult = min(max(lambda_mult, 0.0), 1.0)
-    texts = [query] + [chunk.text for chunk in chunks]
-    vectors = embedding_provider.embed_texts(texts)
-    query_embedding = vectors[0]
-    chunk_embeddings = vectors[1:]
+    query_embedding, chunk_embeddings = _fill_missing_embeddings(
+        query, chunks, embedding_provider, query_embedding, chunk_embeddings,
+    )
 
     relevance = [
         _cosine_similarity(query_embedding, chunk_embedding)
@@ -77,6 +83,40 @@ def maximal_marginal_relevance(
         )
         for rank, idx in enumerate(selected, start=1)
     ]
+
+
+def _fill_missing_embeddings(
+    query: str,
+    chunks: list[RetrievedChunk],
+    embedding_provider: EmbeddingProvider,
+    query_embedding: list[float] | None,
+    chunk_embeddings: list[list[float] | None] | None,
+) -> tuple[list[float], list[list[float]]]:
+    """Embed only what wasn't supplied, in a single batched call."""
+
+    if chunk_embeddings is None:
+        chunk_embeddings = [None] * len(chunks)
+    else:
+        chunk_embeddings = list(chunk_embeddings)
+    if len(chunk_embeddings) != len(chunks):
+        raise ValueError(
+            f"Got {len(chunks)} chunks but {len(chunk_embeddings)} embeddings."
+        )
+
+    missing_chunk_idx = [i for i, e in enumerate(chunk_embeddings) if e is None]
+    texts_to_embed: list[str] = []
+    if query_embedding is None:
+        texts_to_embed.append(query)
+    texts_to_embed += [chunks[i].text for i in missing_chunk_idx]
+
+    if texts_to_embed:
+        vectors = embedding_provider.embed_texts(texts_to_embed)
+        if query_embedding is None:
+            query_embedding = vectors.pop(0)
+        for i, vector in zip(missing_chunk_idx, vectors):
+            chunk_embeddings[i] = vector
+
+    return query_embedding, chunk_embeddings  # type: ignore[return-value]
 
 
 def _with_mmr_metadata(

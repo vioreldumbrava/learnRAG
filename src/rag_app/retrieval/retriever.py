@@ -119,13 +119,17 @@ class Retriever:
 
         # --- Vector search, one ranked list per query variant ---
         result_lists: list[list[RetrievedChunk]] = []
+        primary_query_embedding: list[float] | None = None
         for text in embed_texts:
             query_embedding = self.embedding_provider.embed_query(text)
+            if primary_query_embedding is None:
+                primary_query_embedding = query_embedding
             result_lists.append(
                 self.vector_store.search(
                     query_embedding, top_k=fetch_k, where=self.where,
                 )
             )
+        n_vector_lists = len(result_lists)
 
         # --- Hybrid: add a BM25 list per variant (#2) ---
         if self.hybrid:
@@ -136,7 +140,16 @@ class Retriever:
 
         # --- Merge (RRF) when there is more than one list ---
         if len(result_lists) > 1:
-            results = reciprocal_rank_fusion(*result_lists)
+            # When hybrid, `hybrid_keyword_weight` sets how much the BM25
+            # lists count for relative to the vector lists.
+            weights = None
+            if self.hybrid and len(result_lists) > n_vector_lists:
+                w = min(max(self.hybrid_keyword_weight, 0.0), 1.0)
+                weights = (
+                    [1.0 - w] * n_vector_lists
+                    + [w] * (len(result_lists) - n_vector_lists)
+                )
+            results = reciprocal_rank_fusion(*result_lists, weights=weights)
             results = results[:target_k]
         else:
             results = result_lists[0][:target_k]
@@ -156,13 +169,18 @@ class Retriever:
                 self.embedding_provider,
                 top_k=self.top_k,
                 lambda_mult=self.mmr_lambda,
+                query_embedding=primary_query_embedding,
+                chunk_embeddings=self._stored_embeddings(results),
             )
         elif not self.return_candidates:
             results = results[: self.top_k]
 
         # --- Neighbor expansion: widen each hit with its surroundings (#12) ---
-        if self.neighbor_radius > 0:
-            results = [self._expand_neighbors(r) for r in results]
+        # When we're handing a candidate pool to a reranker, expansion is
+        # deferred — the caller expands the survivors via expand_neighbors()
+        # so we don't stitch text for chunks the reranker will discard.
+        if self.neighbor_radius > 0 and not self.return_candidates:
+            results = self.expand_neighbors(results)
 
         return results
 
@@ -290,7 +308,39 @@ class Retriever:
             return max(self.top_k, self.candidate_k or self.top_k * 4)
         return self.top_k
 
+    # ----- MMR helpers -------------------------------------------------------
+
+    def _stored_embeddings(
+        self, chunks: list[RetrievedChunk],
+    ) -> list[list[float] | None] | None:
+        """Look up the candidates' embeddings already stored in the vector store.
+
+        Returns one (possibly None) vector per chunk, or None when the store
+        doesn't support the lookup — MMR then embeds the texts itself.
+        """
+
+        try:
+            by_id = self.vector_store.embeddings_for_ids([c.id for c in chunks])
+        except NotImplementedError:
+            return None
+        return [by_id.get(c.id) for c in chunks]
+
     # ----- Neighbor expansion (#12) ------------------------------------------
+
+    def expand_neighbors(self, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Widen each chunk with its ±neighbor_radius surroundings.
+
+        Safe to call on already-expanded chunks (they're skipped via the
+        `neighbor_expanded` metadata flag), so RagService can run this after
+        reranking regardless of whether retrieve() already expanded.
+        """
+
+        if self.neighbor_radius <= 0:
+            return chunks
+        return [
+            c if c.metadata.get("neighbor_expanded") else self._expand_neighbors(c)
+            for c in chunks
+        ]
 
     def _expand_neighbors(self, chunk: RetrievedChunk) -> RetrievedChunk:
         """Stitch the chunks around `chunk` into one wider passage.

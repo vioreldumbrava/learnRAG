@@ -65,3 +65,32 @@ class TestReciprocalRankFusion:
         chunks = [_chunk("c1", "a"), _chunk("c2", "b")]
         merged = reciprocal_rank_fusion(chunks)
         assert len(merged) == 2
+
+    def test_weights_let_one_list_dominate(self):
+        # The two lists rank the same chunks in opposite orders. Unweighted
+        # (or equally weighted) RRF ties them; a heavier weight on one list
+        # makes that list's order win.
+        list_a = [_chunk("c1", "a"), _chunk("c2", "b")]
+        list_b = [_chunk("c2", "b"), _chunk("c1", "a")]
+
+        a_wins = reciprocal_rank_fusion(list_a, list_b, weights=[0.9, 0.1])
+        assert [c.id for c in a_wins] == ["c1", "c2"]
+
+        b_wins = reciprocal_rank_fusion(list_a, list_b, weights=[0.1, 0.9])
+        assert [c.id for c in b_wins] == ["c2", "c1"]
+
+    def test_equal_weights_match_unweighted_ranking(self):
+        list_a = [_chunk("c1", "a"), _chunk("c2", "b"), _chunk("c3", "c")]
+        list_b = [_chunk("c3", "c"), _chunk("c1", "a"), _chunk("c4", "d")]
+        unweighted = [c.id for c in reciprocal_rank_fusion(list_a, list_b)]
+        halved = [
+            c.id
+            for c in reciprocal_rank_fusion(list_a, list_b, weights=[0.5, 0.5])
+        ]
+        assert unweighted == halved
+
+    def test_mismatched_weights_raise(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            reciprocal_rank_fusion([_chunk("c1", "a")], weights=[0.5, 0.5])

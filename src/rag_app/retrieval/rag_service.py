@@ -152,4 +152,7 @@ class RagService:
                 model_name=self._reranker_model,
             )
 
-        return chunks
+        # Neighbor expansion runs on the post-rerank survivors. When the
+        # retriever already expanded (no candidate pool in play), the flag
+        # on each chunk makes this a no-op.
+        return self.retriever.expand_neighbors(chunks)

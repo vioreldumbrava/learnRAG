@@ -117,21 +117,33 @@ class BM25Index:
 def reciprocal_rank_fusion(
     *result_lists: list[RetrievedChunk],
     k: int = 60,
+    weights: list[float] | None = None,
 ) -> list[RetrievedChunk]:
     """Merge multiple ranked result lists using Reciprocal Rank Fusion.
 
-    Each chunk gets a score of sum(1 / (k + rank)) across all lists it
-    appears in.  Higher RRF score = better.
+    Each chunk gets a score of sum(weight_i / (k + rank)) across all lists
+    it appears in.  Higher RRF score = better.
+
+    `weights` has one entry per result list (default: all 1.0). Equal
+    weights leave the ranking identical to unweighted RRF; unequal weights
+    let one retriever count for more (e.g. `hybrid_keyword_weight`).
 
     Returns chunks sorted by descending RRF score.
     """
 
+    if weights is None:
+        weights = [1.0] * len(result_lists)
+    if len(weights) != len(result_lists):
+        raise ValueError(
+            f"Got {len(result_lists)} result lists but {len(weights)} weights."
+        )
+
     rrf_scores: dict[str, float] = {}
     chunk_map: dict[str, RetrievedChunk] = {}
 
-    for results in result_lists:
+    for weight, results in zip(weights, result_lists):
         for rank, chunk in enumerate(results, start=1):
-            rrf_scores[chunk.id] = rrf_scores.get(chunk.id, 0.0) + 1.0 / (k + rank)
+            rrf_scores[chunk.id] = rrf_scores.get(chunk.id, 0.0) + weight / (k + rank)
             if chunk.id not in chunk_map:
                 chunk_map[chunk.id] = chunk
 

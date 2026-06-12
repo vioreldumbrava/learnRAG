@@ -615,7 +615,9 @@ Merging strategies:
 - **Reciprocal Rank Fusion (RRF)**: `score = Σ 1/(k + rank_i)` across
   retrievers, default `k=60`. No score normalisation needed, robust,
   parameter-light. **The default modern choice.** This is what this
-  project uses.
+  project uses — with `hybrid_keyword_weight` as an optional per-list
+  weight (`w/(k+rank)` for BM25, `(1-w)/(k+rank)` for vector), which
+  biases the merge without touching raw score scales.
 
 Hybrid search fixes the `ERR080082` / `NBRP` / `CHEN0` failure mode — any
 query with rare technical identifiers benefits.

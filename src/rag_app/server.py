@@ -120,13 +120,23 @@ def _make_retriever(
     cfg: AppConfig,
     where: dict | None = None,
     top_k: int | None = None,
+    return_candidates: bool | None = None,
 ) -> Retriever:
+    """Build a Retriever from config.
+
+    `return_candidates=None` means "auto": hand the reranker an oversized
+    candidate pool when one is configured. Callers that never rerank
+    (e.g. /api/retrieve) must pass False so they get exactly top_k back.
+    """
+
     needs_llm = (
         cfg.retrieval.use_hyde
         or cfg.retrieval.multi_query > 0
         or cfg.retrieval.query_decomposition
     )
     reranker_enabled = bool(cfg.retrieval.reranker_model)
+    if return_candidates is None:
+        return_candidates = reranker_enabled and not cfg.retrieval.use_mmr
     return Retriever(
         embedding_provider=_state.embedding_provider,
         vector_store=_state.vector_store,
@@ -142,7 +152,7 @@ def _make_retriever(
         ),
         use_mmr=cfg.retrieval.use_mmr,
         mmr_lambda=cfg.retrieval.mmr_lambda,
-        return_candidates=reranker_enabled and not cfg.retrieval.use_mmr,
+        return_candidates=return_candidates,
         neighbor_radius=cfg.retrieval.neighbor_radius,
         chat_provider=_state.chat_provider if needs_llm else None,
         where=where,
@@ -243,7 +253,11 @@ async def api_retrieve(req: RetrieveRequest):
     """Retrieve chunks without calling the LLM."""
 
     cfg = _state.cfg
-    retriever = _make_retriever(cfg, where=req.filter, top_k=req.top_k)
+    # No reranker runs on this endpoint, so never return the raw candidate
+    # pool — the caller asked for top_k chunks, give them exactly that.
+    retriever = _make_retriever(
+        cfg, where=req.filter, top_k=req.top_k, return_candidates=False,
+    )
     chunks = retriever.retrieve(req.question)
     return {
         "question": req.question,

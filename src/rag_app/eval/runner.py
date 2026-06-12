@@ -137,7 +137,13 @@ def score_question(
     }
     expected = list(question.expected_sources)
     if not expected and question.expected_relevance:
-        expected = list(question.expected_relevance)
+        # A source graded 0.0 means "explicitly irrelevant" — it counts for
+        # nDCG bookkeeping but must not become a recall/MRR requirement.
+        expected = [
+            source
+            for source, gain in question.expected_relevance.items()
+            if float(gain) > 0.0
+        ]
     sources_found = sum(1 for f in expected if f in files_in_topk)
 
     # MRR: rank (1-based) of the first retrieved chunk from an expected source.

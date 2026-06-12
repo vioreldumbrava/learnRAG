@@ -181,3 +181,21 @@ class ChromaVectorStore(VectorStore):
         """Return every stored chunk (used for BM25 indexing)."""
 
         return self.list_chunks(limit=limit)
+
+    def embeddings_for_ids(self, ids: list[str]) -> dict[str, list[float]]:
+        """Return stored embeddings keyed by chunk id (used by MMR)."""
+
+        if not ids:
+            return {}
+        result = self._collection.get(ids=ids, include=["embeddings"])
+        found_ids = result.get("ids") or []
+        embeddings = result.get("embeddings")
+        if embeddings is None:
+            return {}
+        out: dict[str, list[float]] = {}
+        for i, cid in enumerate(found_ids):
+            vector = embeddings[i] if i < len(embeddings) else None
+            if vector is not None:
+                # Chroma returns numpy arrays; normalise to plain lists.
+                out[cid] = [float(x) for x in vector]
+        return out

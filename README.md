@@ -328,6 +328,18 @@ Schema for `questions.json` (one object per question):
 }
 ```
 
+For **graded relevance** (used by nDCG), replace `expected_sources` with
+`expected_relevance` — a map of source file to gain (higher = more
+relevant). Sources graded `0` are "explicitly irrelevant": they earn no
+nDCG gain and are not required for recall/MRR:
+
+```json
+{
+  "question": "...",
+  "expected_relevance": {"can_fd_spec.pdf": 2.0, "can_overview.md": 1.0, "lin_spec.pdf": 0.0}
+}
+```
+
 ### `stats` — quick info
 
 ```powershell
@@ -469,6 +481,9 @@ retrieval:
 
 Runs both **dense vector search** and **BM25 sparse keyword search**,
 then merges the result lists with **Reciprocal Rank Fusion** (k=60).
+`hybrid_keyword_weight` sets how much the BM25 list counts for in the
+merge: BM25 contributions are multiplied by the weight, vector
+contributions by `1 - weight` (0.5 = both equal, 0.3 = vector-leaning).
 
 Why: dense embeddings smear rare/opaque tokens (error codes, model
 numbers, identifiers like `NBRP`, `ERR080082`, `CHEN0`). BM25 nails
@@ -548,6 +563,9 @@ read wide.
 Works because chunk ids are deterministic `<document_hash>:<index>` —
 the neighbors of `abc:7` are just `abc:6` and `abc:8`. Expanded chunks
 carry a `neighbor_expanded: true` metadata flag in `--debug` output.
+When a reranker is enabled, expansion runs *after* it, on the surviving
+top-k only — candidates the reranker discards are never stitched, and
+the reranker scores the original (unstitched) chunk text.
 
 Cost: zero extra LLM calls — the prompt just gets wider. Implementation:
 [`Retriever._expand_neighbors`](src/rag_app/retrieval/retriever.py).
@@ -567,6 +585,8 @@ to chunks already selected. It reduces "five versions of the same
 paragraph" source lists without needing another model.
 
 Lower `mmr_lambda` favors diversity; higher values favor pure relevance.
+The candidate vectors are read back from the vector store rather than
+re-embedded, so MMR costs no extra embedding or LLM calls.
 Implementation: [`mmr.py`](src/rag_app/retrieval/mmr.py), called from
 [`Retriever.retrieve`](src/rag_app/retrieval/retriever.py).
 
@@ -712,7 +732,7 @@ retrieval:
   candidate_k: null                 # candidate pool for MMR/rerankers (null = auto)
   score_threshold: null            # float to drop chunks farther than X
   hybrid: false                    # BM25 + vector via RRF
-  hybrid_keyword_weight: 0.3
+  hybrid_keyword_weight: 0.3       # BM25 share of the RRF merge (vector gets 1 - w)
   use_hyde: false                  # hypothetical-document expansion
   query_decomposition: false       # split compound questions into sub-questions
   query_decomposition_max_subquestions: 3

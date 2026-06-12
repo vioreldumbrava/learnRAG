@@ -60,6 +60,57 @@ def test_mmr_lambda_one_behaves_like_relevance():
     assert [chunk.id for chunk in selected] == ["near", "duplicate"]
 
 
+class CountingEmbeddingProvider(MapEmbeddingProvider):
+    def __init__(self, vectors: dict[str, list[float]]) -> None:
+        super().__init__(vectors)
+        self.calls: list[list[str]] = []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return super().embed_texts(texts)
+
+
+def test_mmr_precomputed_embeddings_skip_the_provider():
+    embedder = CountingEmbeddingProvider({})  # would KeyError if ever called
+    selected = maximal_marginal_relevance(
+        "q",
+        [
+            _chunk("a", "a", score=0.1),
+            _chunk("b", "b", score=0.2),
+            _chunk("c", "c", score=0.3),
+        ],
+        embedder,
+        top_k=2,
+        lambda_mult=1.0,
+        query_embedding=[1.0, 0.0],
+        chunk_embeddings=[[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]],
+    )
+
+    assert embedder.calls == []
+    assert [chunk.id for chunk in selected] == ["a", "b"]
+
+
+def test_mmr_embeds_only_the_missing_entries():
+    embedder = CountingEmbeddingProvider({"b": [0.9, 0.1]})
+    selected = maximal_marginal_relevance(
+        "q",
+        [
+            _chunk("a", "a", score=0.1),
+            _chunk("b", "b", score=0.2),
+            _chunk("c", "c", score=0.3),
+        ],
+        embedder,
+        top_k=2,
+        lambda_mult=1.0,
+        query_embedding=[1.0, 0.0],
+        chunk_embeddings=[[1.0, 0.0], None, [0.0, 1.0]],
+    )
+
+    # One batched call containing only the missing chunk's text.
+    assert embedder.calls == [["b"]]
+    assert [chunk.id for chunk in selected] == ["a", "b"]
+
+
 def test_mmr_low_lambda_prefers_diversity_after_first_pick():
     embedder = MapEmbeddingProvider(
         {

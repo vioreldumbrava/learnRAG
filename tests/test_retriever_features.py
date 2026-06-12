@@ -286,3 +286,79 @@ def test_neighbor_expansion_applies_to_retrieve_results():
     # Whatever ranked first, its neighbors are stitched in.
     assert results[0].metadata.get("neighbor_expanded") is True
     assert "\n\n" in results[0].text
+
+
+def test_mmr_reuses_stored_embeddings_instead_of_reembedding():
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(embedder, ["alpha", "beta", "gamma", "delta"])
+    embedder.calls.clear()
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=2,
+        use_mmr=True,
+    )
+    results = retriever.retrieve("alpha")
+
+    assert len(results) == 2
+    assert all(r.metadata.get("mmr_selected") is True for r in results)
+    # Only the query variant was embedded — candidate vectors came from the
+    # store via embeddings_for_ids, and the query vector from the search step.
+    assert embedder.calls == [["alpha"]]
+
+
+def test_neighbor_expansion_deferred_when_returning_candidates():
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(embedder, ["zero", "one", "two"])
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=1,
+        candidate_k=3,
+        return_candidates=True,
+        neighbor_radius=1,
+    )
+    candidates = retriever.retrieve("one")
+
+    # The candidate pool is handed over un-stitched...
+    assert len(candidates) == 3
+    assert not any(c.metadata.get("neighbor_expanded") for c in candidates)
+
+    # ...and the caller expands the survivors afterwards. Already-expanded
+    # chunks are skipped, so calling it twice does not double-stitch.
+    expanded = retriever.expand_neighbors(candidates[:1])
+    assert expanded[0].metadata.get("neighbor_expanded") is True
+    again = retriever.expand_neighbors(expanded)
+    assert again[0].text == expanded[0].text
+
+
+def test_hybrid_passes_keyword_weights_to_rrf(monkeypatch):
+    import rag_app.retrieval.retriever as retriever_module
+
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(embedder, ["alpha text", "beta text"])
+
+    captured: dict = {}
+    real_rrf = retriever_module.reciprocal_rank_fusion
+
+    def spying_rrf(*lists, weights=None, **kwargs):
+        captured["weights"] = weights
+        captured["n_lists"] = len(lists)
+        return real_rrf(*lists, weights=weights, **kwargs)
+
+    monkeypatch.setattr(retriever_module, "reciprocal_rank_fusion", spying_rrf)
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=2,
+        hybrid=True,
+        hybrid_keyword_weight=0.3,
+    )
+    retriever.retrieve("alpha text")
+
+    # One vector list + one BM25 list: vector weighted 0.7, BM25 0.3.
+    assert captured["n_lists"] == 2
+    assert captured["weights"] == [0.7, 0.3]

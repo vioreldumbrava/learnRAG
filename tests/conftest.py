@@ -156,6 +156,9 @@ class FakeVectorStore(VectorStore):
             return None
         return RetrievedChunk(id=c.id, text=c.text, metadata=c.metadata, score=None)
 
+    def embeddings_for_ids(self, ids: list[str]) -> dict[str, list[float]]:
+        return {cid: list(self.embeddings[cid]) for cid in ids if cid in self.embeddings}
+
 
 def _l1(a: Iterable[float], b: Iterable[float]) -> float:
     return sum(abs(x - y) for x, y in zip(a, b))

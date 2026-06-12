@@ -57,3 +57,11 @@ class VectorStore(ABC):
         directly via the deterministic `<document_hash[:12]>:<index>` ids.
         """
         raise NotImplementedError
+
+    def embeddings_for_ids(self, ids: list[str]) -> dict[str, list[float]]:
+        """Return the stored embedding vectors for the given ids.
+
+        Optional override. Ids that aren't found are simply absent from the
+        result. Used by MMR so candidates don't have to be re-embedded.
+        """
+        raise NotImplementedError
