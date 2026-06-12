@@ -6,6 +6,8 @@ Supports:
     - Metadata filters: pass a `where` dict to constrain results (#4)
     - HyDE (Hypothetical Document Embeddings): expand query via LLM (#7)
     - Multi-query retrieval: LLM rephrasings merged via RRF (#11)
+    - Query decomposition: sub-questions merged via RRF
+    - MMR diversity selection: de-duplicate the final top-k
     - Neighbor expansion: stitch in the chunks around each hit (#12)
 """
 
@@ -17,6 +19,7 @@ import re
 from rag_app.models import ChatMessage, RetrievedChunk
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
 from rag_app.retrieval.bm25 import BM25Index, reciprocal_rank_fusion
+from rag_app.retrieval.mmr import maximal_marginal_relevance
 from rag_app.vectorstores.base import VectorStore
 
 
@@ -38,6 +41,13 @@ _MULTI_QUERY_SYSTEM = (
     "no extra text."
 )
 
+_DECOMPOSE_SYSTEM = (
+    "You decompose compound retrieval questions. Given a user question, "
+    "write up to {n} smaller standalone sub-questions that should be "
+    "searched separately to gather the needed evidence. Output ONLY the "
+    "sub-questions, one per line, no numbering, no explanations."
+)
+
 
 class Retriever:
     def __init__(
@@ -49,8 +59,14 @@ class Retriever:
         *,
         hybrid: bool = False,
         hybrid_keyword_weight: float = 0.3,
+        candidate_k: int | None = None,
         use_hyde: bool = False,
         multi_query: int = 0,
+        query_decomposition: bool = False,
+        query_decomposition_max_subquestions: int = 3,
+        use_mmr: bool = False,
+        mmr_lambda: float = 0.5,
+        return_candidates: bool = False,
         neighbor_radius: int = 0,
         chat_provider: ChatProvider | None = None,
         where: dict | None = None,
@@ -61,8 +77,14 @@ class Retriever:
         self.score_threshold = score_threshold
         self.hybrid = hybrid
         self.hybrid_keyword_weight = hybrid_keyword_weight
+        self.candidate_k = candidate_k
         self.use_hyde = use_hyde
         self.multi_query = multi_query
+        self.query_decomposition = query_decomposition
+        self.query_decomposition_max_subquestions = query_decomposition_max_subquestions
+        self.use_mmr = use_mmr
+        self.mmr_lambda = mmr_lambda
+        self.return_candidates = return_candidates
         self.neighbor_radius = neighbor_radius
         self.chat_provider = chat_provider
         self.where = where
@@ -74,10 +96,13 @@ class Retriever:
         if not question or not question.strip():
             return []
 
-        # --- Multi-query: LLM rephrasings, each searched separately (#11) ---
+        # --- Query variants: original + optional decomposition/multi-query ---
         variants = [question]
+        if self.query_decomposition and self.chat_provider is not None:
+            variants += self._decompose_question(question)
         if self.multi_query > 0 and self.chat_provider is not None:
             variants += self._multi_query_variants(question)
+        variants = self._dedupe_variants(variants)
 
         # --- HyDE: expand each variant before embedding (#7) ---
         # (Applied to the original question only — stacking HyDE on every
@@ -87,9 +112,10 @@ class Retriever:
             embed_texts[0] = self._hyde_expand(question)
             logger.info("HyDE expanded query: %s", embed_texts[0][:200])
 
+        target_k = self._target_k()
         # How many to fetch from each source for merging.
         merging = self.hybrid or len(variants) > 1
-        fetch_k = self.top_k * 4 if merging else self.top_k
+        fetch_k = max(target_k, self.top_k * 4) if merging else target_k
 
         # --- Vector search, one ranked list per query variant ---
         result_lists: list[list[RetrievedChunk]] = []
@@ -111,9 +137,9 @@ class Retriever:
         # --- Merge (RRF) when there is more than one list ---
         if len(result_lists) > 1:
             results = reciprocal_rank_fusion(*result_lists)
-            results = results[: self.top_k]
+            results = results[:target_k]
         else:
-            results = result_lists[0]
+            results = result_lists[0][:target_k]
 
         # --- Score threshold filter (raw distances only, not RRF scores) ---
         if self.score_threshold is not None and not merging:
@@ -121,6 +147,18 @@ class Retriever:
                 r for r in results
                 if r.score is None or r.score <= self.score_threshold
             ]
+
+        # --- MMR: select a diverse final top-k from the candidate pool ---
+        if self.use_mmr:
+            results = maximal_marginal_relevance(
+                question,
+                results,
+                self.embedding_provider,
+                top_k=self.top_k,
+                lambda_mult=self.mmr_lambda,
+            )
+        elif not self.return_candidates:
+            results = results[: self.top_k]
 
         # --- Neighbor expansion: widen each hit with its surroundings (#12) ---
         if self.neighbor_radius > 0:
@@ -189,16 +227,68 @@ class Retriever:
             logger.warning("Multi-query generation failed — searching original only")
             return []
 
-        variants: list[str] = []
-        for line in raw.splitlines():
-            line = line.strip().strip("-*•").strip()
-            # Tolerate models that number their output ("1. ...") anyway.
-            line = re.sub(r"^\d+\s*[.)]\s+", "", line)
-            if line and line.lower() != question.lower():
-                variants.append(line)
+        variants = self._parse_generated_lines(raw, question)
         if variants:
             logger.info("Multi-query variants: %s", variants)
         return variants[: self.multi_query]
+
+    # ----- Query decomposition ----------------------------------------------
+
+    def _decompose_question(self, question: str) -> list[str]:
+        """Ask the LLM for focused sub-questions to retrieve separately."""
+
+        assert self.chat_provider is not None
+        max_items = self.query_decomposition_max_subquestions
+        messages = [
+            ChatMessage(
+                role="system",
+                content=_DECOMPOSE_SYSTEM.format(n=max_items),
+            ),
+            ChatMessage(role="user", content=question),
+        ]
+        try:
+            raw = self.chat_provider.generate(
+                messages, temperature=0.2, max_tokens=300,
+            )
+        except Exception:
+            logger.warning("Query decomposition failed - searching original only")
+            return []
+
+        subquestions = self._parse_generated_lines(raw, question)[:max_items]
+        if subquestions:
+            logger.info("Query decomposition sub-questions: %s", subquestions)
+        return subquestions
+
+    @staticmethod
+    def _parse_generated_lines(raw: str, original_question: str) -> list[str]:
+        """Parse one-item-per-line LLM output and tolerate bullets/numbering."""
+
+        lines: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip().strip("-*•").strip()
+            line = re.sub(r"^\d+\s*[.)]\s+", "", line)
+            if line and line.lower() != original_question.lower():
+                lines.append(line)
+        return lines
+
+    @staticmethod
+    def _dedupe_variants(variants: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for variant in variants:
+            key = " ".join(variant.lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(variant)
+        return deduped
+
+    def _target_k(self) -> int:
+        """Number of chunks needed from candidate generation."""
+
+        if self.use_mmr or self.return_candidates:
+            return max(self.top_k, self.candidate_k or self.top_k * 4)
+        return self.top_k
 
     # ----- Neighbor expansion (#12) ------------------------------------------
 

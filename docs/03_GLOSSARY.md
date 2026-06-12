@@ -108,7 +108,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 - **RAG** — Retrieval-Augmented Generation. The architecture this whole project implements.
 - **RAGAS** — Most common open-source RAG eval framework. Computes faithfulness, answer relevance, context relevance with LLM judges.
 - **Recall@k** — Fraction of expected sources that appear in top-K retrieved chunks. First retrieval metric most teams track.
-- **Reranker** — Second-stage model (usually cross-encoder) that re-scores top-50 candidates jointly with the query. This project ships an LLM-as-judge variant — see [`reranker.py`](../src/rag_app/retrieval/reranker.py).
+- **Reranker** — Second-stage model that re-scores a candidate pool jointly with the query. This project supports an LLM scorer and an optional `sentence-transformers` CrossEncoder backend — see [`reranker.py`](../src/rag_app/retrieval/reranker.py).
 - **REST API** — HTTP wrapper around the RAG pipeline; lets non-Python clients query the system. This project ships one in [`server.py`](../src/rag_app/server.py) via FastAPI.
 - **Retrieval phase** — See *Query phase*.
 - **RRF** — Reciprocal Rank Fusion. Merge ranked lists by summing `1 / (k + rank)`. Default `k=60`. The modern way to merge dense+sparse.

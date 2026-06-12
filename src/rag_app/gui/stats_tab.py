@@ -99,7 +99,10 @@ class StatsTab(QWidget):
         self.features_label.setText(
             f"hybrid: {'on' if r.hybrid else 'off'} | "
             f"HyDE: {'on' if r.use_hyde else 'off'} | "
-            f"reranker: {r.reranker_model or 'off'} | "
+            f"decompose: {'on' if r.query_decomposition else 'off'} | "
+            f"MMR: {'on' if r.use_mmr else 'off'} | "
+            f"reranker: "
+            f"{r.reranker_backend + ':' + r.reranker_model if r.reranker_model else 'off'} | "
             f"multi-query: {r.multi_query or 'off'} | "
             f"neighbors: ±{r.neighbor_radius}"
         )

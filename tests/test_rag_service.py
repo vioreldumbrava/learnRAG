@@ -82,3 +82,59 @@ def test_empty_question_returns_no_sources(
     assert answer.sources == []
     # Still calls the chat provider with the (empty) context.
     assert fake_chat_provider.received
+
+
+def test_mmr_runs_before_reranker(
+    fake_embedding_provider, fake_vector_store, fake_chat_provider
+):
+    chunks = [
+        DocumentChunk(
+            id=f"doc{i}:0",
+            text=text,
+            metadata={"source_file": f"{text}.txt", "chunk_index": 0},
+        )
+        for i, text in enumerate(["alpha", "alpha near", "beta", "gamma"])
+    ]
+    embeddings = fake_embedding_provider.embed_texts([c.text for c in chunks])
+    fake_vector_store.upsert_chunks(chunks, embeddings)
+
+    class CountingRerankerChat:
+        provider_name = "fake"
+        model_name = "reranker"
+
+        def __init__(self) -> None:
+            self.received = []
+
+        def generate(self, messages, temperature=0.2, max_tokens=800):
+            self.received.append(list(messages))
+            content = messages[-1].content
+            if "gamma" in content:
+                return "10"
+            if "beta" in content:
+                return "8"
+            return "1"
+
+    reranker_chat = CountingRerankerChat()
+    retriever = Retriever(
+        fake_embedding_provider,
+        fake_vector_store,
+        top_k=2,
+        candidate_k=4,
+        use_mmr=True,
+        mmr_lambda=0.2,
+    )
+    service = RagService(
+        retriever,
+        PromptBuilder(),
+        fake_chat_provider,
+        reranker_chat_provider=reranker_chat,
+        reranker_top_k=2,
+        reranker_model="llm-rerank",
+    )
+
+    answer = service.answer("alpha")
+
+    assert len(answer.sources) == 2
+    assert all(source.metadata.get("mmr_selected") is True for source in answer.sources)
+    # MMR narrowed candidate_k=4 to top_k=2 before reranking scored them.
+    assert len(reranker_chat.received) == 2

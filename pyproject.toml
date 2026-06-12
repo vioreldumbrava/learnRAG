@@ -31,6 +31,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+reranker = [
+    "sentence-transformers>=3.0",
+]
 
 [project.scripts]
 rag-app = "rag_app.cli:app"

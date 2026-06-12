@@ -76,8 +76,15 @@ class RetrievalSection(BaseModel):
     score_threshold: float | None = None
     hybrid: bool = False
     hybrid_keyword_weight: float = 0.3
+    # Optional candidate pool size used by MMR/rerankers before final top_k.
+    candidate_k: int | None = Field(default=None, ge=1)
     reranker_model: str | None = None
+    reranker_backend: Literal["llm", "sentence-transformers"] = "llm"
     use_hyde: bool = False
+    query_decomposition: bool = False
+    query_decomposition_max_subquestions: int = Field(default=3, ge=1, le=10)
+    use_mmr: bool = False
+    mmr_lambda: float = Field(default=0.5, ge=0.0, le=1.0)
     # Number of LLM-generated rephrasings to search with IN ADDITION to the
     # original question (0 = off). Results are merged via RRF.
     multi_query: int = Field(default=0, ge=0, le=10)

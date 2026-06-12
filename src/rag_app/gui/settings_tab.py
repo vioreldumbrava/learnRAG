@@ -133,6 +133,11 @@ class SettingsTab(QWidget):
 
         retrieval = data.setdefault("retrieval", {})
         retrieval["top_k"] = int(self.top_k_spin.value())
+        retrieval["candidate_k"] = (
+            int(self.candidate_k_spin.value())
+            if self.candidate_k_spin.value() > 0
+            else None
+        )
         retrieval["score_threshold"] = (
             float(self.score_threshold_spin.value())
             if self.score_threshold_spin.value() > 0
@@ -140,8 +145,23 @@ class SettingsTab(QWidget):
         )
         retrieval["hybrid"] = self.hybrid_check.isChecked()
         retrieval["use_hyde"] = self.hyde_check.isChecked()
+        retrieval["query_decomposition"] = self.decompose_check.isChecked()
+        retrieval["query_decomposition_max_subquestions"] = int(
+            self.decompose_max_spin.value()
+        )
+        retrieval["use_mmr"] = self.mmr_check.isChecked()
+        retrieval["mmr_lambda"] = float(self.mmr_lambda_spin.value())
+        retrieval["reranker_backend"] = self.reranker_backend_combo.currentText()
         retrieval["reranker_model"] = (
-            (self._reranker_name or "llm-rerank")
+            (
+                self.reranker_model_edit.text().strip()
+                or (
+                    "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                    if self.reranker_backend_combo.currentText()
+                    == "sentence-transformers"
+                    else "llm-rerank"
+                )
+            )
             if self.reranker_check.isChecked()
             else None
         )
@@ -188,10 +208,19 @@ class SettingsTab(QWidget):
         self.chunk_overlap_spin.setValue(cfg.chunking.chunk_overlap)
         self.strategy_combo.setCurrentText(cfg.chunking.strategy)
         self.top_k_spin.setValue(cfg.retrieval.top_k)
+        self.candidate_k_spin.setValue(cfg.retrieval.candidate_k or 0)
         self.score_threshold_spin.setValue(cfg.retrieval.score_threshold or 0.0)
         self.hybrid_check.setChecked(cfg.retrieval.hybrid)
         self.hyde_check.setChecked(cfg.retrieval.use_hyde)
+        self.decompose_check.setChecked(cfg.retrieval.query_decomposition)
+        self.decompose_max_spin.setValue(
+            cfg.retrieval.query_decomposition_max_subquestions
+        )
+        self.mmr_check.setChecked(cfg.retrieval.use_mmr)
+        self.mmr_lambda_spin.setValue(cfg.retrieval.mmr_lambda)
+        self.reranker_backend_combo.setCurrentText(cfg.retrieval.reranker_backend)
         self.reranker_check.setChecked(bool(cfg.retrieval.reranker_model))
+        self.reranker_model_edit.setText(cfg.retrieval.reranker_model or "")
         self._reranker_name = cfg.retrieval.reranker_model
         self.multi_query_spin.setValue(cfg.retrieval.multi_query)
         self.neighbor_spin.setValue(cfg.retrieval.neighbor_radius)
@@ -303,10 +332,17 @@ class SettingsTab(QWidget):
         self.chunk_overlap_spin.setValue(150)
         self.strategy_combo.setCurrentText("paragraph")
         self.top_k_spin.setValue(5)
+        self.candidate_k_spin.setValue(0)
         self.score_threshold_spin.setValue(0.0)
         self.hybrid_check.setChecked(False)
         self.hyde_check.setChecked(False)
+        self.decompose_check.setChecked(False)
+        self.decompose_max_spin.setValue(3)
+        self.mmr_check.setChecked(False)
+        self.mmr_lambda_spin.setValue(0.5)
+        self.reranker_backend_combo.setCurrentText("llm")
         self.reranker_check.setChecked(False)
+        self.reranker_model_edit.setText("")
         self.multi_query_spin.setValue(0)
         self.neighbor_spin.setValue(0)
         self.collection_edit.setText("local_rag_docs")
@@ -344,6 +380,14 @@ class SettingsTab(QWidget):
         self.top_k_spin = QSpinBox()
         self.top_k_spin.setRange(1, 50)
         form.addRow("top_k:", self.top_k_spin)
+        self.candidate_k_spin = QSpinBox()
+        self.candidate_k_spin.setRange(0, 200)
+        self.candidate_k_spin.setSpecialValueText("(auto)")
+        self.candidate_k_spin.setToolTip(
+            "Candidate pool for MMR/rerankers before final top_k.\n"
+            "Auto uses top_k * 4 when MMR or a reranker is enabled."
+        )
+        form.addRow("candidate_k:", self.candidate_k_spin)
         self.score_threshold_spin = QDoubleSpinBox()
         self.score_threshold_spin.setRange(0.0, 5.0)
         self.score_threshold_spin.setSingleStep(0.05)
@@ -366,12 +410,48 @@ class SettingsTab(QWidget):
         )
         form.addRow("", self.hyde_check)
 
+        self.decompose_check = QCheckBox("Query decomposition")
+        self.decompose_check.setToolTip(
+            "Ask the LLM to split compound questions into focused\n"
+            "sub-questions, search each one, and merge with RRF."
+        )
+        form.addRow("", self.decompose_check)
+
+        self.decompose_max_spin = QSpinBox()
+        self.decompose_max_spin.setRange(1, 10)
+        form.addRow("Max sub-questions:", self.decompose_max_spin)
+
+        self.mmr_check = QCheckBox("MMR diversity reranking")
+        self.mmr_check.setToolTip(
+            "Select final chunks by balancing query relevance against\n"
+            "similarity to chunks already selected. No extra LLM calls."
+        )
+        form.addRow("", self.mmr_check)
+
+        self.mmr_lambda_spin = QDoubleSpinBox()
+        self.mmr_lambda_spin.setRange(0.0, 1.0)
+        self.mmr_lambda_spin.setSingleStep(0.05)
+        self.mmr_lambda_spin.setDecimals(2)
+        form.addRow("MMR lambda:", self.mmr_lambda_spin)
+
         self.reranker_check = QCheckBox("LLM reranker")
         self.reranker_check.setToolTip(
-            "After retrieval, ask the chat model to score each candidate\n"
-            "chunk 0-10 and keep the best. +N LLM calls per query."
+            "After retrieval, score each candidate chunk and keep the best.\n"
+            "The backend below chooses LLM scoring or a local CrossEncoder."
         )
         form.addRow("", self.reranker_check)
+
+        self.reranker_backend_combo = QComboBox()
+        self.reranker_backend_combo.addItems(["llm", "sentence-transformers"])
+        form.addRow("Reranker backend:", self.reranker_backend_combo)
+
+        self.reranker_model_edit = QLineEdit()
+        self.reranker_model_edit.setPlaceholderText("llm-rerank")
+        self.reranker_model_edit.setToolTip(
+            "For llm, this is an informational name.\n"
+            "For sentence-transformers, use a CrossEncoder model id."
+        )
+        form.addRow("Reranker model:", self.reranker_model_edit)
 
         self.multi_query_spin = QSpinBox()
         self.multi_query_spin.setRange(0, 10)

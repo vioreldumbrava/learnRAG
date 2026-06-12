@@ -8,9 +8,9 @@ disk, a local vector database (ChromaDB), and a local LLM served by
 
 The whole RAG flow is written out explicitly in plain Python so it can be
 read top-to-bottom. Advanced features (hybrid search, HyDE, multi-query,
-neighbor expansion, reranker, multi-turn chat, streaming, REST API) are
-layered on the same explicit core — each one toggled by a single line in
-`config.yaml`.
+query decomposition, MMR, reranker, neighbor expansion, multi-turn chat,
+streaming, REST API) are layered on the same explicit core — each one
+toggled by a single line in `config.yaml`.
 
 > 📚 **Learning RAG?** Read [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md)
 > first — an 11-stage walkthrough mapping each app feature to a RAG concept,
@@ -95,12 +95,13 @@ file hash          -> HashTracker (skip unchanged files next time)
 ### Query (runs every time you ask a question)
 
 ```text
-question           -> [optional: multi-query rephrasings via LLM]
+question           -> [optional: query decomposition + multi-query via LLM]
                   -> [optional: HyDE expansion via LLM]
                   -> EmbeddingProvider.embed_query (per variant)
-query vector(s)    -> ChromaVectorStore.search (top_k, optional metadata where=)
+query vector(s)    -> ChromaVectorStore.search (candidate_k, optional metadata where=)
                   -> [optional: + BM25 keyword search merged via RRF (hybrid)]
-                  -> [optional: cross-encoder rerank via LLM]
+                  -> [optional: MMR diversity selection]
+                  -> [optional: rerank via LLM or sentence-transformers]
                   -> [optional: stitch ±N neighbor chunks around each hit]
 retrieved chunks   -> PromptBuilder.build (system + history + user)
 messages           -> ChatProvider.generate  (or generate_stream for tokens)
@@ -142,7 +143,7 @@ example, and opens a **five-tab** window:
 
 | Tab | What it does |
 |---|---|
-| **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunking strategy / `top_k`, toggle the advanced retrieval features (hybrid, HyDE, reranker, multi-query, neighbor radius), then *Save to config.yaml*. Saving preserves any keys the GUI doesn't manage. URLs you've used before are remembered between sessions, and a *Clear vector DB* button lives next to Save. |
+| **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunking strategy / `top_k`, toggle the advanced retrieval features (hybrid, HyDE, decomposition, MMR, reranker, multi-query, neighbor radius), then *Save to config.yaml*. Saving preserves any keys the GUI doesn't manage. URLs you've used before are remembered between sessions, and a *Clear vector DB* button lives next to Save. |
 | **Ingest** | Index the configured documents folder, a single file, or any folder you pick. **Per-file scrolling log** with colour-coded status (indexed/skipped/failed) + a determinate progress bar. Force re-ingest is a checkbox. |
 | **Ask** | Multi-turn chat: type a question, tick *Debug* to see retrieved chunks + the literal prompt, type a `--filter` like `module=CAN`, click **Clear History** to reset the conversation. |
 | **Memory** | The GUI version of `list` + `forget` + `inspect`: table of every ingested document, multi-select + *Forget Selected* to evict chunks, *Show N random chunks* / *Show chunks for selected doc*, plus an *Open storage folder* shortcut. |
@@ -514,6 +515,23 @@ Cost: one extra LLM call + N extra embedding/search rounds per query.
 Implementation:
 [`Retriever._multi_query_variants`](src/rag_app/retrieval/retriever.py).
 
+### Query decomposition
+
+```yaml
+retrieval:
+  query_decomposition: true
+  query_decomposition_max_subquestions: 3
+```
+
+For compound questions, the LLM writes a few focused sub-questions.
+The original question plus those sub-questions are searched separately
+and merged with RRF. This helps questions that need evidence from more
+than one part of the corpus. If decomposition fails, retrieval falls
+back to the original question.
+
+Cost: one extra LLM call per query. Implementation:
+[`Retriever._decompose_question`](src/rag_app/retrieval/retriever.py).
+
 ### Neighbor chunk expansion (sentence-window retrieval)
 
 ```yaml
@@ -534,10 +552,29 @@ carry a `neighbor_expanded: true` metadata flag in `--debug` output.
 Cost: zero extra LLM calls — the prompt just gets wider. Implementation:
 [`Retriever._expand_neighbors`](src/rag_app/retrieval/retriever.py).
 
+### MMR diversity reranking
+
+```yaml
+retrieval:
+  use_mmr: true
+  mmr_lambda: 0.5
+  candidate_k: null   # auto = top_k * 4 when MMR/reranker is enabled
+```
+
+Maximal Marginal Relevance selects the final top-k from a larger
+candidate pool by balancing relevance to the query against similarity
+to chunks already selected. It reduces "five versions of the same
+paragraph" source lists without needing another model.
+
+Lower `mmr_lambda` favors diversity; higher values favor pure relevance.
+Implementation: [`mmr.py`](src/rag_app/retrieval/mmr.py), called from
+[`Retriever.retrieve`](src/rag_app/retrieval/retriever.py).
+
 ### Cross-encoder-style reranker
 
 ```yaml
 retrieval:
+  reranker_backend: "llm"
   reranker_model: "llm-rerank"   # any non-empty string enables it
 ```
 
@@ -551,6 +588,21 @@ Cost: N extra LLM calls per query, one per retrieved chunk.
 Implementation: [`reranker.py`](src/rag_app/retrieval/reranker.py),
 plumbed via `RagService(reranker_chat_provider=...)`.
 
+For a real local cross-encoder, install the optional extra and switch
+the backend:
+
+```powershell
+pip install -e .[reranker]
+```
+
+```yaml
+retrieval:
+  reranker_backend: "sentence-transformers"
+  reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+```
+
+That uses `sentence_transformers.CrossEncoder` lazily on first query.
+
 ### Combining them
 
 A "production" pipeline turns everything on:
@@ -558,23 +610,30 @@ A "production" pipeline turns everything on:
 ```yaml
 retrieval:
   top_k: 5
+  candidate_k: 20
   hybrid: true
   use_hyde: true
+  query_decomposition: true
   multi_query: 3
+  use_mmr: true
+  mmr_lambda: 0.5
   neighbor_radius: 1
-  reranker_model: "llm-rerank"
+  reranker_backend: "sentence-transformers"
+  reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
 ```
 
 Flow becomes:
 
 ```text
 question
+  -> query decomposition LLM call -> focused sub-questions
   -> multi-query LLM call -> 3 rephrasings
   -> HyDE LLM call -> hypothetical paragraph (for the original question)
-  -> embed hypothetical + each rephrasing
+  -> embed hypothetical + each query variant
   -> [vector top-20 per variant] + [BM25 top-20 per variant]
   -> RRF merge -> top-20 fused
-  -> reranker LLM (×20 calls) -> top-5
+  -> MMR selects a diverse top-5
+  -> cross-encoder reranker orders those 5
   -> stitch ±1 neighbors around each survivor
   -> prompt build + answer
 ```
@@ -650,10 +709,16 @@ vector_store:
 ```yaml
 retrieval:
   top_k: 5
+  candidate_k: null                 # candidate pool for MMR/rerankers (null = auto)
   score_threshold: null            # float to drop chunks farther than X
   hybrid: false                    # BM25 + vector via RRF
   hybrid_keyword_weight: 0.3
   use_hyde: false                  # hypothetical-document expansion
+  query_decomposition: false       # split compound questions into sub-questions
+  query_decomposition_max_subquestions: 3
+  use_mmr: false                   # diversity selection before final top_k
+  mmr_lambda: 0.5                  # 0 = diversity, 1 = relevance
+  reranker_backend: "llm"          # llm | sentence-transformers
   reranker_model: null             # any non-empty string enables reranker
   multi_query: 0                   # N LLM rephrasings searched + RRF-merged (0 = off)
   neighbor_radius: 0               # stitch ±N adjacent chunks per hit (0 = off)
@@ -761,14 +826,15 @@ RAG_system/
       base.py                  # VectorStore ABC + all_chunks() for BM25
       chroma_store.py          # ChromaDB PersistentClient + inspection helpers
     retrieval/
-      retriever.py             # vector + hybrid + HyDE + multi-query + neighbor expansion + metadata filter
+      retriever.py             # vector + hybrid + HyDE + decomposition + multi-query + MMR + metadata filter
       bm25.py                  # BM25Index + reciprocal_rank_fusion
-      reranker.py              # LLM-as-cross-encoder reranker
+      mmr.py                   # Maximal Marginal Relevance diversity selection
+      reranker.py              # LLM or sentence-transformers cross-encoder reranker
       prompt_builder.py        # system + history + user message assembly
       rag_service.py           # full query flow: answer / answer_with_debug / answer_stream
     eval/
       models.py                # pydantic schema for questions.json
-      runner.py                # recall@k + keyword scoring
+      runner.py                # recall@k + MRR + nDCG@k + keyword scoring
     gui/
       app.py                   # MainWindow + dark Fusion palette + entry point
       provider_panel.py        # reusable chat/embedding provider widget with model auto-discovery
@@ -787,8 +853,10 @@ RAG_system/
     test_hash_tracker.py
     test_prompt_builder.py
     test_rag_service.py
-    test_retriever_features.py # multi-query + neighbor expansion
-    test_eval_runner.py        # incl. MRR scoring
+    test_retriever_features.py # multi-query + decomposition + neighbor expansion
+    test_mmr.py                # MMR diversity selection
+    test_reranker.py           # LLM/cross-encoder reranker helpers
+    test_eval_runner.py        # recall/MRR/nDCG scoring
 ```
 
 ---
@@ -816,7 +884,7 @@ small classes in `retrieval/` are the seams where new features bolt on:
 | Qdrant or another vector DB    | new file in `vectorstores/` implementing `VectorStore` + a config knob |
 | A new file format              | add extractor in `text_extractor.py` + extension in `document_loader.SUPPORTED_EXTENSIONS` |
 | A custom chunking strategy     | new `ChunkStrategy` in `chunker.py` + register in `_STRATEGIES` |
-| Real cross-encoder reranker    | replace the LLM-based scorer in `reranker.py` with `sentence-transformers` |
+| Another reranker backend       | add a backend branch in `reranker.py` |
 | Different fusion algorithm     | new function next to `reciprocal_rank_fusion` in `bm25.py` |
 | Authentication on the REST API | FastAPI middleware in `server.py` |
 | A web UI                       | call the REST endpoints from any frontend |

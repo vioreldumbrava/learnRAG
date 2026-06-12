@@ -20,6 +20,7 @@ def test_load_questions_roundtrip(tmp_path: Path):
         {
             "question": "Q1",
             "expected_sources": ["a.txt"],
+            "expected_relevance": {"a.txt": 2.0},
             "expected_contains": ["foo", "bar"],
         },
         {"question": "Q2"},  # both lists optional
@@ -29,6 +30,7 @@ def test_load_questions_roundtrip(tmp_path: Path):
     questions = load_questions(path)
     assert len(questions) == 2
     assert questions[0].expected_sources == ["a.txt"]
+    assert questions[0].expected_relevance == {"a.txt": 2.0}
     assert questions[1].expected_contains == []
 
 
@@ -121,6 +123,64 @@ def test_report_mean_reciprocal_rank_averages_only_asserted_questions():
         ]
     )
     assert report.mean_reciprocal_rank == 0.5
+
+
+def test_ndcg_binary_relevance_from_expected_sources():
+    q = EvalQuestion(question="?", expected_sources=["b.txt", "c.txt"])
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+        RetrievedChunk(id="2", text="y", metadata={"source_file": "b.txt"}),
+        RetrievedChunk(id="3", text="z", metadata={"source_file": "c.txt"}),
+    ]
+    result = score_question(q, retrieved, answer=None)
+
+    assert result.ndcg is not None
+    assert 0.0 < result.ndcg < 1.0
+
+
+def test_ndcg_graded_relevance_and_duplicate_sources():
+    q = EvalQuestion(
+        question="?",
+        expected_relevance={"a.txt": 3.0, "b.txt": 1.0},
+    )
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+        RetrievedChunk(id="2", text="dup", metadata={"source_file": "a.txt"}),
+        RetrievedChunk(id="3", text="y", metadata={"source_file": "b.txt"}),
+    ]
+    result = score_question(q, retrieved, answer=None)
+
+    # Duplicate a.txt does not get counted twice, so this is below perfect.
+    assert result.ndcg is not None
+    assert 0.0 < result.ndcg < 1.0
+    assert result.sources_expected == 2
+
+
+def test_ndcg_not_asserted_without_relevance_labels():
+    q = EvalQuestion(question="?")
+    retrieved = [
+        RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"}),
+    ]
+    result = score_question(q, retrieved, answer=None)
+
+    assert result.ndcg is None
+
+
+def test_report_mean_ndcg_averages_only_asserted_questions():
+    q_ranked = EvalQuestion(question="?", expected_sources=["a.txt"])
+    q_missed = EvalQuestion(question="?", expected_sources=["b.txt"])
+    q_unasserted = EvalQuestion(question="?")
+    hit_a = [RetrievedChunk(id="1", text="x", metadata={"source_file": "a.txt"})]
+
+    report = EvalReport(
+        results=[
+            score_question(q_ranked, hit_a, answer=None),
+            score_question(q_missed, hit_a, answer=None),
+            score_question(q_unasserted, hit_a, answer=None),
+        ]
+    )
+
+    assert report.mean_ndcg == 0.5
 
 
 def test_run_eval_with_fakes_no_llm(

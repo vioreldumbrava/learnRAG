@@ -620,7 +620,7 @@ Merging strategies:
 Hybrid search fixes the `ERR080082` / `NBRP` / `CHEN0` failure mode — any
 query with rare technical identifiers benefits.
 
-#### B. Reranking with cross-encoders — *implemented* (LLM-based variant)
+#### B. Reranking with cross-encoders — *implemented*
 
 The retriever's job is "fast filter to 50 candidates." A **cross-encoder
 reranker** (e.g. `bge-reranker-v2`, Cohere Rerank) then re-scores those
@@ -629,11 +629,11 @@ reranker** (e.g. `bge-reranker-v2`, Cohere Rerank) then re-scores those
 similarity. Two-stage retrieval is the standard production pattern for
 high-stakes RAG.
 
-This project ships a **prompt-based reranker**: instead of running a
-dedicated cross-encoder model locally, it asks the configured chat model
-to score each chunk's relevance to the query on a 0–10 scale. Slower
-than a real cross-encoder per-chunk but cheaper to operate (one less
-model to load), and surprisingly effective for short corpora.
+This project ships two reranker backends. The default **prompt-based
+reranker** asks the configured chat model to score each chunk's
+relevance to the query on a 0–10 scale. The optional
+`sentence-transformers` backend runs a local `CrossEncoder` model such
+as `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 
 #### C. Query transformations — *HyDE implemented*
 
@@ -649,8 +649,9 @@ Your user's literal question might not be a good search query.
   for recall — it fixes *vocabulary mismatch* (you ask about "speed",
   the doc says "baud rate"). **Implemented** — set
   `retrieval.multi_query: 3` in `config.yaml`.
-- **Query decomposition** (not implemented): break "What was X in year Y
-  vs year Z?" into two sub-questions, retrieve for each.
+- **Query decomposition**: break "What was X in year Y vs year Z?" into
+  sub-questions, retrieve for each, then merge with RRF. **Implemented**
+  — set `retrieval.query_decomposition: true`.
 
 #### D. Context expansion (neighbor / sentence-window) — *implemented*
 
@@ -667,13 +668,13 @@ Cheap — zero extra LLM calls, the prompt just gets wider. Set
 chunk ids are deterministic `<document_hash>:<index>`, so "the chunk
 after `abc:7`" is simply `abc:8`.
 
-#### E. MMR (Maximal Marginal Relevance) — *not implemented*
+#### E. MMR (Maximal Marginal Relevance) — *implemented*
 
 Diversifies the top-K so you don't get five near-duplicates of the same
 chunk. Useful when source files have a lot of overlap. Re-ranks the
 candidate set to balance relevance to query against dissimilarity to
-already-picked chunks. Would slot in next to `reranker.py` as another
-post-retrieval re-ordering step.
+already-picked chunks. Set `retrieval.use_mmr: true`; tune the
+relevance/diversity trade-off with `retrieval.mmr_lambda`.
 
 #### F. Advanced architectures — *not implemented*
 
@@ -688,7 +689,7 @@ post-retrieval re-ordering step.
 
 ### In this code
 
-Five of the six are **wired in**, each behind a single `config.yaml`
+The retrieval upgrades are **wired in**, each behind a single `config.yaml`
 flag (all default off so the basic flow stays readable):
 
 | upgrade | flag | implementation |
@@ -696,19 +697,23 @@ flag (all default off so the basic flow stays readable):
 | Hybrid search | `retrieval.hybrid: true` | [`bm25.py`](../src/rag_app/retrieval/bm25.py) (`BM25Index`, `reciprocal_rank_fusion`) + [`Retriever._bm25_search`](../src/rag_app/retrieval/retriever.py) |
 | HyDE | `retrieval.use_hyde: true` | [`Retriever._hyde_expand`](../src/rag_app/retrieval/retriever.py) (extra LLM call before embedding) |
 | Multi-query | `retrieval.multi_query: 3` | [`Retriever._multi_query_variants`](../src/rag_app/retrieval/retriever.py) (LLM rephrasings, each searched, RRF-merged) |
-| Neighbor expansion | `retrieval.neighbor_radius: 1` | [`Retriever._expand_neighbors`](../src/rag_app/retrieval/retriever.py) (stitch ±N adjacent chunks by id) |
-| Reranker (LLM-as-judge) | `retrieval.reranker_model: "llm-rerank"` | [`reranker.py`](../src/rag_app/retrieval/reranker.py) + [`RagService._retrieve_and_rerank`](../src/rag_app/retrieval/rag_service.py) |
+| Query decomposition | `retrieval.query_decomposition: true` | [`Retriever._decompose_question`](../src/rag_app/retrieval/retriever.py) (LLM sub-questions, each searched, RRF-merged) |
+| MMR | `retrieval.use_mmr: true` | [`mmr.py`](../src/rag_app/retrieval/mmr.py) (diverse final top-k from a candidate pool) |
+| Neighbor expansion | `retrieval.neighbor_radius: 1` | [`Retriever._expand_neighbors`](../src/rag_app/retrieval/retriever.py) (stitch +/-N adjacent chunks by id) |
+| Reranker | `retrieval.reranker_model: "llm-rerank"` or `retrieval.reranker_backend: "sentence-transformers"` | [`reranker.py`](../src/rag_app/retrieval/reranker.py) + [`RagService._retrieve_and_rerank`](../src/rag_app/retrieval/rag_service.py) |
 
 Combined flow when everything is on:
 
 ```text
 question
+  -> query decomposition LLM call -> sub-questions
   -> multi-query LLM call -> N rephrasings
   -> HyDE LLM call -> hypothetical answer paragraph (original question only)
-  -> embed hypothetical + each rephrasing
+  -> embed hypothetical + each query variant
   -> vector search top-20 per variant  +  BM25 search top-20 per variant
   -> RRF merge -> top-20 fused
-  -> reranker LLM scores each chunk 0-10 -> top-5
+  -> MMR selects a diverse top-5
+  -> reranker orders those 5
   -> stitch ±1 neighbor chunks around each survivor
   -> prompt build + answer
 ```
@@ -771,14 +776,12 @@ Watch each upgrade fix a specific failure:
   each separately. Much more accurate at the cost of being too slow for
   the first-stage retriever. Two-stage retrieval (fast filter →
   cross-encoder rerank) is the standard production pattern.
-- **Q: This project's reranker isn't a real cross-encoder — what's the
-  trade-off?**
-  Using the chat LLM as a 0–10 relevance scorer is cheaper to operate
-  (no extra model to load), more flexible (works with any provider),
-  but costs N extra LLM calls per query (one per candidate) and depends
-  on how well the LLM follows the "reply with only a number" instruction.
-  A dedicated `bge-reranker-v2` or `mxbai-rerank` is faster per-chunk
-  and more reliable, at the cost of loading a second model.
+- **Q: Which reranker backend should I use?**
+  The default `llm` backend uses the chat LLM as a 0–10 relevance
+  scorer: no extra model to load, but N extra LLM calls per query. The
+  optional `sentence-transformers` backend uses a real local
+  `CrossEncoder`: faster per chunk and more reliable, but it adds a
+  heavier dependency and a second model.
 - **Q: What is HyDE?**
   Hypothetical Document Embeddings. Generate a hypothetical answer,
   embed that, search with it. Exploits the fact that answers embed

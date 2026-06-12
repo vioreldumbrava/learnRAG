@@ -175,15 +175,28 @@ class AskTab(QWidget):
                 persist_dir=cfg.paths.chroma_dir,
                 collection_name=cfg.vector_store.collection_name,
             )
-            needs_llm = cfg.retrieval.use_hyde or cfg.retrieval.multi_query > 0
+            needs_llm = (
+                cfg.retrieval.use_hyde
+                or cfg.retrieval.multi_query > 0
+                or cfg.retrieval.query_decomposition
+            )
+            reranker_enabled = bool(cfg.retrieval.reranker_model)
             retriever = Retriever(
                 embedding_provider=embedding_provider,
                 vector_store=store,
                 top_k=cfg.retrieval.top_k,
                 score_threshold=cfg.retrieval.score_threshold,
                 hybrid=cfg.retrieval.hybrid,
+                candidate_k=cfg.retrieval.candidate_k,
                 use_hyde=cfg.retrieval.use_hyde,
                 multi_query=cfg.retrieval.multi_query,
+                query_decomposition=cfg.retrieval.query_decomposition,
+                query_decomposition_max_subquestions=(
+                    cfg.retrieval.query_decomposition_max_subquestions
+                ),
+                use_mmr=cfg.retrieval.use_mmr,
+                mmr_lambda=cfg.retrieval.mmr_lambda,
+                return_candidates=reranker_enabled and not cfg.retrieval.use_mmr,
                 neighbor_radius=cfg.retrieval.neighbor_radius,
                 chat_provider=chat_provider if needs_llm else None,
                 where=where,
@@ -192,7 +205,14 @@ class AskTab(QWidget):
                 answer_only_from_context=cfg.prompt.answer_only_from_context,
                 include_sources=cfg.prompt.include_sources,
             )
-            reranker_chat = chat_provider if cfg.retrieval.reranker_model else None
+            reranker_chat = (
+                chat_provider
+                if (
+                    cfg.retrieval.reranker_model
+                    and cfg.retrieval.reranker_backend == "llm"
+                )
+                else None
+            )
             service = RagService(
                 retriever=retriever,
                 prompt_builder=prompt_builder,
@@ -201,6 +221,8 @@ class AskTab(QWidget):
                 max_tokens=cfg.chat.max_tokens,
                 reranker_chat_provider=reranker_chat,
                 reranker_top_k=cfg.retrieval.top_k,
+                reranker_model=cfg.retrieval.reranker_model,
+                reranker_backend=cfg.retrieval.reranker_backend,
             )
             if debug:
                 return service.answer_with_debug(question, history=history)

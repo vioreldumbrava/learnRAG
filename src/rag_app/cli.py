@@ -82,7 +82,12 @@ def _make_retriever(
 ) -> Retriever:
     """Build a Retriever with all configured enhancements."""
 
-    needs_llm = cfg.retrieval.use_hyde or cfg.retrieval.multi_query > 0
+    needs_llm = (
+        cfg.retrieval.use_hyde
+        or cfg.retrieval.multi_query > 0
+        or cfg.retrieval.query_decomposition
+    )
+    reranker_enabled = bool(cfg.retrieval.reranker_model)
     return Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
@@ -90,8 +95,16 @@ def _make_retriever(
         score_threshold=cfg.retrieval.score_threshold,
         hybrid=cfg.retrieval.hybrid,
         hybrid_keyword_weight=cfg.retrieval.hybrid_keyword_weight,
+        candidate_k=cfg.retrieval.candidate_k,
         use_hyde=cfg.retrieval.use_hyde,
         multi_query=cfg.retrieval.multi_query,
+        query_decomposition=cfg.retrieval.query_decomposition,
+        query_decomposition_max_subquestions=(
+            cfg.retrieval.query_decomposition_max_subquestions
+        ),
+        use_mmr=cfg.retrieval.use_mmr,
+        mmr_lambda=cfg.retrieval.mmr_lambda,
+        return_candidates=reranker_enabled and not cfg.retrieval.use_mmr,
         neighbor_radius=cfg.retrieval.neighbor_radius,
         chat_provider=chat_provider if needs_llm else None,
         where=where,
@@ -106,7 +119,11 @@ def _make_service(cfg: AppConfig, retriever, chat_provider) -> RagService:
         include_sources=cfg.prompt.include_sources,
     )
 
-    reranker_chat = chat_provider if cfg.retrieval.reranker_model else None
+    reranker_chat = (
+        chat_provider
+        if cfg.retrieval.reranker_model and cfg.retrieval.reranker_backend == "llm"
+        else None
+    )
 
     return RagService(
         retriever=retriever,
@@ -116,6 +133,8 @@ def _make_service(cfg: AppConfig, retriever, chat_provider) -> RagService:
         max_tokens=cfg.chat.max_tokens,
         reranker_chat_provider=reranker_chat,
         reranker_top_k=cfg.retrieval.top_k,
+        reranker_model=cfg.retrieval.reranker_model,
+        reranker_backend=cfg.retrieval.reranker_backend,
     )
 
 
@@ -345,6 +364,8 @@ def chat(
             "[bold]Interactive RAG Chat[/bold]\n"
             "Type your questions. Commands: /clear (reset), /quit (exit).\n"
             f"Hybrid: {cfg.retrieval.hybrid} | HyDE: {cfg.retrieval.use_hyde} | "
+            f"Decompose: {cfg.retrieval.query_decomposition} | "
+            f"MMR: {cfg.retrieval.use_mmr} | "
             f"Reranker: {cfg.retrieval.reranker_model or 'off'} | "
             f"Multi-query: {cfg.retrieval.multi_query or 'off'} | "
             f"Neighbors: ±{cfg.retrieval.neighbor_radius}",
@@ -435,13 +456,16 @@ def retrieve(
     where = _parse_filters(filter)
 
     # No chat provider here on purpose: `retrieve` never calls the LLM, so
-    # HyDE / multi-query are skipped even if enabled in the config.
+    # HyDE / multi-query / decomposition are skipped even if enabled.
     retriever = Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         top_k=top_k if top_k is not None else cfg.retrieval.top_k,
         score_threshold=cfg.retrieval.score_threshold,
         hybrid=cfg.retrieval.hybrid,
+        candidate_k=cfg.retrieval.candidate_k,
+        use_mmr=cfg.retrieval.use_mmr,
+        mmr_lambda=cfg.retrieval.mmr_lambda,
         neighbor_radius=cfg.retrieval.neighbor_radius,
         where=where,
     )
@@ -452,6 +476,7 @@ def retrieve(
             f"Embeddings: {cfg.embeddings.provider} / {cfg.embeddings.model}\n"
             f"top_k:      {retriever.top_k}\n"
             f"Hybrid:     {cfg.retrieval.hybrid}\n"
+            f"MMR:        {cfg.retrieval.use_mmr}\n"
             f"Filter:     {filter or '(none)'}\n"
             f"Question:   {question}",
             title="rag-app retrieve",
@@ -617,6 +642,19 @@ def eval_cmd(
         chat_provider=chat_provider,
         top_k=cfg.retrieval.top_k,
         score_threshold=cfg.retrieval.score_threshold,
+        hybrid=cfg.retrieval.hybrid,
+        candidate_k=cfg.retrieval.candidate_k,
+        use_hyde=cfg.retrieval.use_hyde,
+        multi_query=cfg.retrieval.multi_query,
+        query_decomposition=cfg.retrieval.query_decomposition,
+        query_decomposition_max_subquestions=(
+            cfg.retrieval.query_decomposition_max_subquestions
+        ),
+        use_mmr=cfg.retrieval.use_mmr,
+        mmr_lambda=cfg.retrieval.mmr_lambda,
+        neighbor_radius=cfg.retrieval.neighbor_radius,
+        reranker_model=cfg.retrieval.reranker_model,
+        reranker_backend=cfg.retrieval.reranker_backend,
         chat_temperature=cfg.chat.temperature,
         chat_max_tokens=cfg.chat.max_tokens,
         answer_only_from_context=cfg.prompt.answer_only_from_context,
@@ -652,7 +690,34 @@ def stats(config: Path = ConfigOption) -> None:
     table.add_row("top_k", str(cfg.retrieval.top_k))
     table.add_row("Hybrid search", "on" if cfg.retrieval.hybrid else "off")
     table.add_row("HyDE", "on" if cfg.retrieval.use_hyde else "off")
-    table.add_row("Reranker", cfg.retrieval.reranker_model or "off")
+    table.add_row(
+        "Query decomposition",
+        (
+            f"on (max {cfg.retrieval.query_decomposition_max_subquestions})"
+            if cfg.retrieval.query_decomposition
+            else "off"
+        ),
+    )
+    table.add_row(
+        "MMR",
+        (
+            f"on (lambda {cfg.retrieval.mmr_lambda:.2f})"
+            if cfg.retrieval.use_mmr
+            else "off"
+        ),
+    )
+    table.add_row(
+        "Candidate pool",
+        str(cfg.retrieval.candidate_k or cfg.retrieval.top_k * 4),
+    )
+    table.add_row(
+        "Reranker",
+        (
+            f"{cfg.retrieval.reranker_backend}: {cfg.retrieval.reranker_model}"
+            if cfg.retrieval.reranker_model
+            else "off"
+        ),
+    )
     table.add_row(
         "Multi-query",
         f"on ({cfg.retrieval.multi_query} rephrasings)" if cfg.retrieval.multi_query else "off",
@@ -946,6 +1011,7 @@ def _print_eval_report(report: EvalReport) -> None:
     table.add_column("question")
     table.add_column("recall@k", justify="right")
     table.add_column("1st rank", justify="right")
+    table.add_column("nDCG@k", justify="right")
     table.add_column("keywords", justify="right")
     table.add_column("pass")
     for i, r in enumerate(report.results, start=1):
@@ -968,8 +1034,9 @@ def _print_eval_report(report: EvalReport) -> None:
             rank = "[red]miss[/red]"
         else:
             rank = str(r.first_relevant_rank)
+        ndcg = "n/a" if r.ndcg is None else f"{r.ndcg:.2f}"
         passed = "[green]PASS[/green]" if r.passed else "[red]FAIL[/red]"
-        table.add_row(str(i), q, recall, rank, kw, passed)
+        table.add_row(str(i), q, recall, rank, ndcg, kw, passed)
     console.print(table)
 
     console.print(
@@ -978,6 +1045,7 @@ def _print_eval_report(report: EvalReport) -> None:
             f"Failed: [red]{report.failed_count}[/red]\n"
             f"Mean retrieval recall: {report.mean_recall:.2f}\n"
             f"MRR (reciprocal rank): {report.mean_reciprocal_rank:.2f}\n"
+            f"Mean nDCG@k:            {report.mean_ndcg:.2f}\n"
             f"Mean keyword recall:   {report.mean_keyword_recall:.2f}",
             title="Summary",
             border_style="cyan" if report.all_passed else "red",

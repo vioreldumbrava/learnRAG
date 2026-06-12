@@ -27,6 +27,7 @@ expectation list was empty, in which case that dimension is "not asserted").
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +53,7 @@ class EvalResult:
     # 1-based rank of the first retrieved chunk that belongs to an expected
     # source, or None when no expected source appeared (or none was asserted).
     first_relevant_rank: int | None = None
+    ndcg: float | None = None
 
     @property
     def retrieval_recall(self) -> float | None:
@@ -106,6 +108,11 @@ class EvalReport:
         scored = [r.reciprocal_rank for r in self.results if r.reciprocal_rank is not None]
         return sum(scored) / len(scored) if scored else 0.0
 
+    @property
+    def mean_ndcg(self) -> float:
+        scored = [r.ndcg for r in self.results if r.ndcg is not None]
+        return sum(scored) / len(scored) if scored else 0.0
+
 
 def load_questions(path: str | Path) -> list[EvalQuestion]:
     p = Path(path)
@@ -129,6 +136,8 @@ def score_question(
         str(c.metadata.get("source_file", "")) for c in retrieved
     }
     expected = list(question.expected_sources)
+    if not expected and question.expected_relevance:
+        expected = list(question.expected_relevance)
     sources_found = sum(1 for f in expected if f in files_in_topk)
 
     # MRR: rank (1-based) of the first retrieved chunk from an expected source.
@@ -142,6 +151,7 @@ def score_question(
     keywords_expected = list(question.expected_contains)
     haystack = (answer or "").lower()
     keywords_found = sum(1 for kw in keywords_expected if kw.lower() in haystack)
+    ndcg = _ndcg_at_k(question, retrieved)
 
     sources_pass = (not expected) or sources_found == len(expected)
     # Keyword check only counts when (a) we have expected keywords AND (b) we
@@ -161,6 +171,49 @@ def score_question(
         keywords_expected=len(keywords_expected) if answer is not None else 0,
         passed=sources_pass and keywords_pass,
         first_relevant_rank=first_relevant_rank,
+        ndcg=ndcg,
+    )
+
+
+def _ndcg_at_k(
+    question: EvalQuestion,
+    retrieved: list[RetrievedChunk],
+) -> float | None:
+    """Compute source-file nDCG@k with optional graded relevance."""
+
+    gains_by_source: dict[str, float]
+    if question.expected_relevance:
+        gains_by_source = {
+            str(source): float(gain)
+            for source, gain in question.expected_relevance.items()
+            if float(gain) > 0.0
+        }
+    elif question.expected_sources:
+        gains_by_source = {str(source): 1.0 for source in question.expected_sources}
+    else:
+        return None
+
+    seen: set[str] = set()
+    gains: list[float] = []
+    for chunk in retrieved:
+        source = str(chunk.metadata.get("source_file", ""))
+        if source in seen:
+            gains.append(0.0)
+            continue
+        seen.add(source)
+        gains.append(gains_by_source.get(source, 0.0))
+
+    ideal_gains = sorted(gains_by_source.values(), reverse=True)[:len(retrieved)]
+    ideal = _dcg(ideal_gains)
+    if ideal == 0.0:
+        return 0.0
+    return _dcg(gains) / ideal
+
+
+def _dcg(gains: list[float]) -> float:
+    return sum(
+        gain / math.log2(rank + 1)
+        for rank, gain in enumerate(gains, start=1)
     )
 
 
@@ -172,6 +225,17 @@ def run_eval(
     *,
     top_k: int = 5,
     score_threshold: float | None = None,
+    hybrid: bool = False,
+    candidate_k: int | None = None,
+    use_hyde: bool = False,
+    multi_query: int = 0,
+    query_decomposition: bool = False,
+    query_decomposition_max_subquestions: int = 3,
+    use_mmr: bool = False,
+    mmr_lambda: float = 0.5,
+    neighbor_radius: int = 0,
+    reranker_model: str | None = None,
+    reranker_backend: str = "llm",
     chat_temperature: float = 0.2,
     chat_max_tokens: int = 800,
     answer_only_from_context: bool = True,
@@ -182,11 +246,30 @@ def run_eval(
     If `chat_provider` is None, the LLM is skipped — only retrieval is scored.
     """
 
+    needs_retrieval_llm = (
+        use_hyde or multi_query > 0 or query_decomposition
+    )
+    reranker_enabled = bool(
+        reranker_model
+        and (chat_provider is not None or reranker_backend == "sentence-transformers")
+    )
+
     retriever = Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         top_k=top_k,
         score_threshold=score_threshold,
+        hybrid=hybrid,
+        candidate_k=candidate_k,
+        use_hyde=use_hyde,
+        multi_query=multi_query,
+        query_decomposition=query_decomposition,
+        query_decomposition_max_subquestions=query_decomposition_max_subquestions,
+        use_mmr=use_mmr,
+        mmr_lambda=mmr_lambda,
+        return_candidates=reranker_enabled and not use_mmr,
+        neighbor_radius=neighbor_radius,
+        chat_provider=chat_provider if needs_retrieval_llm else None,
     )
 
     rag_service: RagService | None = None
@@ -195,12 +278,21 @@ def run_eval(
             answer_only_from_context=answer_only_from_context,
             include_sources=include_sources,
         )
+        reranker_chat = (
+            chat_provider
+            if reranker_enabled and reranker_backend == "llm"
+            else None
+        )
         rag_service = RagService(
             retriever=retriever,
             prompt_builder=prompt_builder,
             chat_provider=chat_provider,
             temperature=chat_temperature,
             max_tokens=chat_max_tokens,
+            reranker_chat_provider=reranker_chat,
+            reranker_top_k=top_k,
+            reranker_model=reranker_model if reranker_enabled else None,
+            reranker_backend=reranker_backend,
         )
 
     results: list[EvalResult] = []
@@ -210,6 +302,17 @@ def run_eval(
             results.append(score_question(q, rag_answer.sources, rag_answer.answer))
         else:
             chunks = retriever.retrieve(q.question)
+            if reranker_enabled:
+                from rag_app.retrieval.reranker import rerank
+
+                chunks = rerank(
+                    q.question,
+                    chunks,
+                    chat_provider,
+                    top_k=top_k,
+                    backend=reranker_backend,
+                    model_name=reranker_model,
+                )
             results.append(score_question(q, chunks, answer=None))
     return EvalReport(results=results)
 

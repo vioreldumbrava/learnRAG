@@ -471,16 +471,14 @@ Five endpoints in [`server.py`](../src/rag_app/server.py):
 Slackbot, a CI job — so they don't have to spawn Python processes per
 query.
 
-### 53. The reranker in this codebase is LLM-based, not a real cross-encoder. What's the trade-off?
+### 53. Which reranker backend does this codebase support?
 
-[`reranker.py`](../src/rag_app/retrieval/reranker.py) asks the chat
-model to score each candidate 0–10 for relevance. Pros: no extra model
-to load, works with any provider, easy to tune (just change the
-prompt). Cons: N extra LLM calls per query (one per candidate), and
-the score depends on how well the LLM follows the "reply with only a
-number" instruction. A dedicated cross-encoder like `bge-reranker-v2`
-would be faster per-chunk and more reliable — drop it into the same
-`rerank()` signature to swap.
+[`reranker.py`](../src/rag_app/retrieval/reranker.py) supports two
+backends. `retrieval.reranker_backend: "llm"` asks the chat model to
+score each candidate 0–10 for relevance. `sentence-transformers` uses
+a real local `CrossEncoder` such as
+`cross-encoder/ms-marco-MiniLM-L-6-v2`; install it with
+`pip install -e .[reranker]`.
 
 ### 54. HyDE — what does enabling it cost, and when is it worth it?
 

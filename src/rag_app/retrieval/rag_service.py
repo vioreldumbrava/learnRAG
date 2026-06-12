@@ -53,6 +53,8 @@ class RagService:
         *,
         reranker_chat_provider: ChatProvider | None = None,
         reranker_top_k: int | None = None,
+        reranker_model: str | None = None,
+        reranker_backend: str = "llm",
     ) -> None:
         self.retriever = retriever
         self.prompt_builder = prompt_builder
@@ -61,6 +63,10 @@ class RagService:
         self.max_tokens = max_tokens
         self._reranker_chat = reranker_chat_provider
         self._reranker_top_k = reranker_top_k
+        self._reranker_model = (
+            reranker_model or ("llm-rerank" if reranker_chat_provider else None)
+        )
+        self._reranker_backend = reranker_backend
 
     def answer(
         self,
@@ -133,12 +139,17 @@ class RagService:
 
         chunks = self.retriever.retrieve(question)
 
-        if self._reranker_chat is not None and chunks:
+        if self._reranker_model is not None and chunks:
             from rag_app.retrieval.reranker import rerank
 
             top_k = self._reranker_top_k or self.retriever.top_k
             chunks = rerank(
-                question, chunks, self._reranker_chat, top_k=top_k,
+                question,
+                chunks,
+                self._reranker_chat,
+                top_k=top_k,
+                backend=self._reranker_backend,
+                model_name=self._reranker_model,
             )
 
         return chunks

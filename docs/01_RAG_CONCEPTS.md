@@ -321,6 +321,10 @@ logarithmically. Range [0, 1].
 **When it matters:** Graded relevance (some chunks are "more relevant"
 than others), or when you have many gold-standard results per query.
 
+**Where in this code:** Computed by the `eval` command as `nDCG@k`.
+If an eval row provides `expected_relevance`, those source-file gains
+are used; otherwise `expected_sources` becomes binary relevance.
+
 ### MMR (Maximal Marginal Relevance)
 
 **What:** Re-rank candidate chunks to balance relevance to the query
@@ -329,6 +333,11 @@ in top-K.
 
 **When it matters:** Document collections with lots of overlap; chatbots
 that need diverse source citation.
+
+**Where in this code:** **Implemented.** Set `retrieval.use_mmr: true`
+and tune `retrieval.mmr_lambda`. [`mmr.py`](../src/rag_app/retrieval/mmr.py)
+embeds the candidate chunks, selects a diverse final top-k, and preserves
+the original retrieval score while adding MMR metadata.
 
 ### Metadata filters
 
@@ -402,15 +411,13 @@ retrieval. Examples: `bge-reranker-v2`, `mxbai-rerank`, Cohere Rerank.
 **When it matters:** When you can afford 50–500 ms extra latency and
 need accuracy. The cost-effective accuracy upgrade in production RAG.
 
-**Where in this code:** Implemented as an **LLM-as-judge reranker** in
-[`reranker.py`](../src/rag_app/retrieval/reranker.py): each candidate
-chunk is shown to the chat model, which scores it 0–10 for relevance.
-Enabled by setting `retrieval.reranker_model` to any non-empty string
-in `config.yaml`. Trade-off vs a dedicated cross-encoder: cheaper to
-operate (no second model to load), but spends N extra LLM calls per
-query (one per candidate). A real `bge-reranker-v2` would be faster
-per-chunk and more reliable — drop it into the same `rerank()`
-function signature to swap.
+**Where in this code:** Implemented in
+[`reranker.py`](../src/rag_app/retrieval/reranker.py). The default
+`retrieval.reranker_backend: "llm"` asks the chat model to score each
+candidate 0–10. The optional
+`retrieval.reranker_backend: "sentence-transformers"` lazy-loads a local
+`sentence_transformers.CrossEncoder`; install it with
+`pip install -e .[reranker]`.
 
 ---
 
@@ -660,10 +667,15 @@ neighbors of `abc:7` at radius 1 are simply `abc:6` and `abc:8`,
 fetched by id and stitched in document order. Expanded chunks carry a
 `neighbor_expanded: true` metadata flag visible in `--debug` output.
 
-### Query decomposition *(theory only — not implemented)*
+### Query decomposition
 
 **What:** "What was X in year Y vs year Z?" → two sub-questions, two
 retrievals, then synthesise.
+
+**Where in this code:** **Implemented.** Set
+`retrieval.query_decomposition: true`; [`Retriever._decompose_question`](../src/rag_app/retrieval/retriever.py)
+asks the LLM for focused sub-questions, searches them alongside the
+original query, and merges the lists with RRF.
 
 ### Multi-hop RAG *(theory only — not implemented)*
 

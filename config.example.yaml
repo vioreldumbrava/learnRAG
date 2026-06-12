@@ -70,6 +70,9 @@ vector_store:
 
 retrieval:
   top_k: 5
+  # Candidate pool used by MMR/rerankers before final top_k. null = auto
+  # (top_k * 4 when MMR or a reranker is enabled).
+  candidate_k: null
   score_threshold: null     # set a float to discard chunks above this distance
   # Hybrid search: combine dense vector retrieval with BM25 keyword search,
   # merge results with Reciprocal Rank Fusion. Fixes the "rare-token miss"
@@ -80,10 +83,20 @@ retrieval:
   # Often improves recall for vague or natural-language questions. Adds one
   # extra LLM call per query.
   use_hyde: false
+  # Query decomposition: split compound questions into focused sub-questions,
+  # search each one, then merge with RRF. Adds one LLM call per query.
+  query_decomposition: false
+  query_decomposition_max_subquestions: 3
+  # MMR: select final chunks by balancing query relevance against diversity.
+  # Lower lambda = more diversity; higher lambda = more pure relevance.
+  use_mmr: false
+  mmr_lambda: 0.5
   # Reranker: re-score the top retrieved chunks by asking the chat model to
-  # rate each one's relevance (0-10). Slower but much more accurate top-k.
-  # Set to any non-empty string to enable (the value is informational).
+  # rate each one's relevance (0-10), or by running a local sentence-transformers
+  # CrossEncoder when reranker_backend is "sentence-transformers".
+  # Set reranker_model to any non-empty string to enable.
   reranker_model: null
+  reranker_backend: "llm"   # llm | sentence-transformers
   # Multi-query: ask the LLM for N alternative phrasings of the question,
   # search with each one, and merge all result lists with RRF. Catches
   # vocabulary-mismatch misses (you say "speed", the doc says "baud rate").

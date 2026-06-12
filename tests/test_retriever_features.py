@@ -108,6 +108,114 @@ def test_multi_query_caps_variants_at_configured_count():
     assert variants == ["one", "two"]
 
 
+# ----- query decomposition --------------------------------------------------
+
+
+class SequentialChat(FakeChatProvider):
+    def __init__(self, replies: list[str]) -> None:
+        super().__init__(reply="")
+        self.replies = list(replies)
+
+    def generate(self, messages, temperature=0.2, max_tokens=800):
+        self.received.append(list(messages))
+        return self.replies.pop(0)
+
+
+def test_query_decomposition_searches_subquestions_and_merges():
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(embedder, ["alpha text", "beta text", "gamma text"])
+    chat = FakeChatProvider(reply="1. first subquestion\n2) second subquestion")
+    embedder.calls.clear()
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=2,
+        query_decomposition=True,
+        query_decomposition_max_subquestions=2,
+        chat_provider=chat,
+    )
+    results = retriever.retrieve("original question")
+
+    assert len(chat.received) == 1
+    embedded = [call[0] for call in embedder.calls]
+    assert embedded == ["original question", "first subquestion", "second subquestion"]
+    assert len(results) == 2
+
+
+def test_query_decomposition_failure_falls_back_to_original():
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(embedder, ["alpha text", "beta text"])
+    embedder.calls.clear()
+
+    class ExplodingChat(FakeChatProvider):
+        def generate(self, messages, temperature=0.2, max_tokens=800):
+            raise RuntimeError("LLM down")
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=2,
+        query_decomposition=True,
+        chat_provider=ExplodingChat(),
+    )
+    results = retriever.retrieve("original question")
+
+    assert [call[0] for call in embedder.calls] == ["original question"]
+    assert len(results) == 2
+
+
+def test_query_decomposition_stacks_with_multi_query():
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(embedder, ["alpha text", "beta text", "gamma text"])
+    chat = SequentialChat(
+        replies=[
+            "decomposed one\ndecomposed two",
+            "rephrased one\nrephrased two",
+        ]
+    )
+    embedder.calls.clear()
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=2,
+        query_decomposition=True,
+        query_decomposition_max_subquestions=2,
+        multi_query=2,
+        chat_provider=chat,
+    )
+    retriever.retrieve("original question")
+
+    embedded = [call[0] for call in embedder.calls]
+    assert embedded == [
+        "original question",
+        "decomposed one",
+        "decomposed two",
+        "rephrased one",
+        "rephrased two",
+    ]
+
+
+def test_return_candidates_uses_candidate_pool_without_final_top_k_cutoff():
+    embedder = FakeEmbeddingProvider()
+    store = _store_with_doc(
+        embedder,
+        ["alpha", "beta", "gamma", "delta", "epsilon"],
+    )
+
+    retriever = Retriever(
+        embedding_provider=embedder,
+        vector_store=store,
+        top_k=2,
+        candidate_k=4,
+        return_candidates=True,
+    )
+    results = retriever.retrieve("question")
+
+    assert len(results) == 4
+
+
 # ----- neighbor expansion (#12) ----------------------------------------------
 
 
