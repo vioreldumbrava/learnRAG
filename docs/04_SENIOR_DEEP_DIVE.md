@@ -60,12 +60,14 @@ The diagnostic IS the answer.
 | Hybrid (BM25 in-memory) | ~10-50ms | $0 |
 | Hybrid (BM25 via OpenSearch) | ~50-200ms | OpenSearch ops cost |
 | HyDE | +1 LLM call (~500ms) | +1 LLM call worth of tokens |
-| Reranker (LLM-as-judge, this codebase) | +N LLM calls (sequential!) | +N LLM calls |
+| Reranker (LLM-as-judge, this codebase) | +N LLM calls (4-way concurrent) | +N LLM calls |
 | Reranker (batched LLM) | +1 LLM call (~1-3s for 50 chunks) | +1 LLM call (bigger prompt) |
 | Reranker (cross-encoder, GPU) | ~50ms | GPU op time |
 
 Notice the LLM-as-judge reranker costs scale with `top_k_to_rerank`. At
-top-50 with 200ms/chunk it's 10s — fine for a CLI, broken for a chatbot.
+top-50 with 200ms/chunk it's 10s sequential; this codebase issues the
+calls on a small thread pool (4 workers → ~2.5s) — better, but still
+broken for a chatbot. Batch into one call or use a cross-encoder.
 
 ---
 
@@ -197,7 +199,8 @@ filters that reject responses revealing prefix content.
 ### e. Reranker dominated latency at scale
 
 **Symptom**: P95 query latency went from 1s to 18s after enabling a
-"prompt-based reranker" (like the one in this codebase).
+"prompt-based reranker" (like the one in this codebase — though ours now
+runs the per-chunk calls 4-way concurrent as a stopgap).
 
 **Root cause**: per-chunk LLM rerank at top-50 = 50 × 200ms = 10s per
 query, sequential.
@@ -431,7 +434,7 @@ becomes mandatory.
 
 | Reranker type | Latency / chunk | Quality | When to pick |
 |---|---|---|---|
-| LLM-as-judge (this project, sequential) | ~200ms | Decent | Prototype |
+| LLM-as-judge (this project, 4-way concurrent) | ~200ms | Decent | Prototype |
 | LLM-as-judge (batched: one call for N chunks) | ~1–3s for 50 chunks | Good | Production when you don't want a 2nd model |
 | Cross-encoder (BGE-rerank, mxbai-rerank) | ~5ms GPU, ~50ms CPU | High | Standard production |
 | ColBERT / late interaction | ~1ms after index build | Highest | Storage isn't bottleneck |

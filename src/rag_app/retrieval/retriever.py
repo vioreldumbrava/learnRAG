@@ -18,7 +18,7 @@ import re
 
 from rag_app.models import ChatMessage, RetrievedChunk
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
-from rag_app.retrieval.bm25 import BM25Index, reciprocal_rank_fusion
+from rag_app.retrieval.bm25 import BM25Index, get_bm25_index, reciprocal_rank_fusion
 from rag_app.retrieval.mmr import maximal_marginal_relevance
 from rag_app.vectorstores.base import VectorStore
 
@@ -187,16 +187,19 @@ class Retriever:
     # ----- BM25 (#2) -------------------------------------------------------
 
     def _bm25_search(self, query: str, top_k: int) -> list[RetrievedChunk]:
-        """Run a BM25 keyword search, building the index lazily."""
+        """Run a BM25 keyword search, building the index lazily.
+
+        The index comes from the shared cross-request cache in `bm25.py`;
+        it is pinned on this Retriever so one query sees one index even if
+        the store mutates mid-query.
+        """
 
         if self._bm25 is None:
-            self._bm25 = BM25Index()
             try:
-                all_chunks = self.vector_store.all_chunks()
-                self._bm25.build(all_chunks)
-                logger.info("BM25 index built with %d chunks", len(all_chunks))
+                self._bm25 = get_bm25_index(self.vector_store)
             except NotImplementedError:
                 logger.warning("Vector store does not support all_chunks(); BM25 disabled")
+                self._bm25 = BM25Index()
                 return []
         return self._bm25.search(query, top_k=top_k)
 

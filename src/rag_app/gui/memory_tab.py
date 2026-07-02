@@ -16,6 +16,7 @@ This tab is the GUI equivalent of `rag-app list`, `rag-app forget`, and
 
 from __future__ import annotations
 
+import logging
 import random
 import subprocess
 import sys
@@ -42,6 +43,9 @@ from PySide6.QtWidgets import (
 from rag_app.config import load_config
 from rag_app.ingestion.hash_tracker import HashTracker
 from rag_app.vectorstores.chroma_store import ChromaVectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryTab(QWidget):
@@ -151,11 +155,11 @@ class MemoryTab(QWidget):
         self.status_label.setStyleSheet("color: #888;")
         layout.addWidget(self.status_label)
 
-        # Try an initial refresh on construction (best-effort — silent on failure).
+        # Try an initial refresh on construction (best-effort).
         try:
             self.refresh()
         except Exception:
-            pass
+            logger.debug("Initial memory-tab refresh failed", exc_info=True)
 
     # ----- refresh ---------------------------------------------------------
 
@@ -369,6 +373,7 @@ class MemoryTab(QWidget):
         try:
             cfg = load_config(config_path)
         except Exception:
+            logger.debug("Config load failed for %s", config_path, exc_info=True)
             return
         # Open the parent of the chroma dir (= the storage dir).
         target = Path(cfg.paths.chroma_dir).parent.resolve()

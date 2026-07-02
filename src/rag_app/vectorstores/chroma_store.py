@@ -36,6 +36,9 @@ class ChromaVectorStore(VectorStore):
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+        # Bumped on every write so cached derived structures (the BM25
+        # index) know when to rebuild. See `bm25_cache_key`.
+        self._mutations = 0
 
     # ----- writes ----------------------------------------------------------
 
@@ -61,9 +64,11 @@ class ChromaVectorStore(VectorStore):
             documents=documents,
             metadatas=metadatas,
         )
+        self._mutations += 1
 
     def delete_by_document_hash(self, document_hash: str) -> None:
         self._collection.delete(where={"document_hash": document_hash})
+        self._mutations += 1
 
     def clear(self) -> None:
         # Easiest reliable way to wipe everything is to drop & recreate the
@@ -73,6 +78,7 @@ class ChromaVectorStore(VectorStore):
             name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+        self._mutations += 1
 
     # ----- reads -----------------------------------------------------------
 
@@ -181,6 +187,20 @@ class ChromaVectorStore(VectorStore):
         """Return every stored chunk (used for BM25 indexing)."""
 
         return self.list_chunks(limit=limit)
+
+    def bm25_cache_key(self) -> tuple:
+        """Identity of the store's current content for the BM25 cache.
+
+        Any write through this instance bumps `_mutations`; writes from
+        another process show up through the chunk count in most cases.
+        """
+
+        return (
+            self.persist_dir,
+            self.collection_name,
+            self._mutations,
+            self._collection.count(),
+        )
 
     def embeddings_for_ids(self, ids: list[str]) -> dict[str, list[float]]:
         """Return stored embeddings keyed by chunk id (used by MMR)."""

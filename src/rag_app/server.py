@@ -26,7 +26,7 @@ from rag_app.config import AppConfig, load_config
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
-from rag_app.retrieval.prompt_builder import PromptBuilder
+from rag_app.retrieval.factory import build_rag_service, build_retriever
 from rag_app.retrieval.rag_service import RagService
 from rag_app.retrieval.retriever import Retriever
 from rag_app.vectorstores.chroma_store import ChromaVectorStore
@@ -122,69 +122,38 @@ def _make_retriever(
     top_k: int | None = None,
     return_candidates: bool | None = None,
 ) -> Retriever:
-    """Build a Retriever from config.
+    """Build a Retriever from config using the shared factory.
 
     `return_candidates=None` means "auto": hand the reranker an oversized
     candidate pool when one is configured. Callers that never rerank
     (e.g. /api/retrieve) must pass False so they get exactly top_k back.
     """
 
-    needs_llm = (
-        cfg.retrieval.use_hyde
-        or cfg.retrieval.multi_query > 0
-        or cfg.retrieval.query_decomposition
-    )
-    reranker_enabled = bool(cfg.retrieval.reranker_model)
-    if return_candidates is None:
-        return_candidates = reranker_enabled and not cfg.retrieval.use_mmr
-    return Retriever(
-        embedding_provider=_state.embedding_provider,
-        vector_store=_state.vector_store,
-        top_k=top_k or cfg.retrieval.top_k,
-        score_threshold=cfg.retrieval.score_threshold,
-        hybrid=cfg.retrieval.hybrid,
-        candidate_k=cfg.retrieval.candidate_k,
-        use_hyde=cfg.retrieval.use_hyde,
-        multi_query=cfg.retrieval.multi_query,
-        query_decomposition=cfg.retrieval.query_decomposition,
-        query_decomposition_max_subquestions=(
-            cfg.retrieval.query_decomposition_max_subquestions
-        ),
-        use_mmr=cfg.retrieval.use_mmr,
-        mmr_lambda=cfg.retrieval.mmr_lambda,
-        return_candidates=return_candidates,
-        neighbor_radius=cfg.retrieval.neighbor_radius,
-        chat_provider=_state.chat_provider if needs_llm else None,
+    return build_retriever(
+        cfg,
+        _state.embedding_provider,
+        _state.vector_store,
+        _state.chat_provider,
         where=where,
+        top_k=top_k,
+        return_candidates=return_candidates,
     )
 
 
 def _make_service(cfg: AppConfig, retriever: Retriever) -> RagService:
-    prompt_builder = PromptBuilder(
-        answer_only_from_context=cfg.prompt.answer_only_from_context,
-        include_sources=cfg.prompt.include_sources,
-    )
-    reranker_chat = (
-        _state.chat_provider
-        if cfg.retrieval.reranker_model and cfg.retrieval.reranker_backend == "llm"
-        else None
-    )
-    return RagService(
-        retriever=retriever,
-        prompt_builder=prompt_builder,
-        chat_provider=_state.chat_provider,
-        temperature=cfg.chat.temperature,
-        max_tokens=cfg.chat.max_tokens,
-        reranker_chat_provider=reranker_chat,
-        reranker_top_k=cfg.retrieval.top_k,
-        reranker_model=cfg.retrieval.reranker_model,
-        reranker_backend=cfg.retrieval.reranker_backend,
-    )
+    return build_rag_service(cfg, retriever, _state.chat_provider)
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    """Liveness probe for containers/load balancers. No store access."""
+
+    return {"status": "ok"}
+
 
 @app.post("/api/query", response_model=QueryResponse)
 async def api_query(req: QueryRequest):

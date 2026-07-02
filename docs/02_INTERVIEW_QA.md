@@ -398,13 +398,16 @@ LLM vendors in a long weekend" and "we can't."
 Flip `retrieval.hybrid: true` in `config.yaml`. Inside
 [`Retriever.retrieve`](../src/rag_app/retrieval/retriever.py), two
 searches run: the existing vector search, and
-[`_bm25_search`](../src/rag_app/retrieval/retriever.py) which lazily
-builds a [`BM25Index`](../src/rag_app/retrieval/bm25.py) over all
-chunks pulled from the store. Both fetch `4 × top_k` candidates, then
+[`_bm25_search`](../src/rag_app/retrieval/retriever.py) which pulls a
+[`BM25Index`](../src/rag_app/retrieval/bm25.py) built over all chunks
+in the store — cached across requests via `get_bm25_index` and rebuilt
+only when the store mutates, since the server/GUI construct a fresh
+`Retriever` per query. Both legs fetch `4 × top_k` candidates, then
 [`reciprocal_rank_fusion`](../src/rag_app/retrieval/bm25.py) merges
-them (default RRF `k=60`) and we keep the top `top_k`. `RagService`,
-`PromptBuilder`, and the CLI are unchanged — that's the point of the
-`Retriever` seam.
+them (default RRF `k=60`, BM25 lists weighted by
+`retrieval.hybrid_keyword_weight`) and we keep the top `top_k`.
+`RagService`, `PromptBuilder`, and the CLI are unchanged — that's the
+point of the `Retriever` seam.
 
 ### 47. The `inspect` and `retrieve` commands look small — what do they teach?
 

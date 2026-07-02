@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 
 from PySide6.QtCore import Qt
@@ -19,6 +20,9 @@ from rag_app.gui.ingest_tab import IngestTab
 from rag_app.gui.memory_tab import MemoryTab
 from rag_app.gui.settings_tab import SettingsTab
 from rag_app.gui.stats_tab import StatsTab
+
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -67,7 +71,7 @@ class MainWindow(QMainWindow):
                 self.memory_tab.refresh()
                 self.stats_tab.refresh()
             except Exception:
-                pass
+                logger.debug("Post-ingest tab refresh failed", exc_info=True)
         self.ingest_tab._reset_running_state = _reset_and_refresh
 
         # Status bar

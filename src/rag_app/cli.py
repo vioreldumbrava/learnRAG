@@ -29,9 +29,8 @@ from rag_app.eval.runner import EvalReport, run_eval_file
 from rag_app.ingestion.hash_tracker import HashTracker
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
-from rag_app.retrieval.prompt_builder import PromptBuilder
-from rag_app.retrieval.rag_service import DebugInfo, RagService
-from rag_app.retrieval.retriever import Retriever
+from rag_app.retrieval.factory import build_rag_service, build_retriever
+from rag_app.retrieval.rag_service import DebugInfo
 from rag_app.utils.logging import setup_logging
 from rag_app.vectorstores.chroma_store import ChromaVectorStore
 
@@ -70,71 +69,6 @@ def _make_vector_store(config: AppConfig) -> ChromaVectorStore:
     return ChromaVectorStore(
         persist_dir=config.paths.chroma_dir,
         collection_name=config.vector_store.collection_name,
-    )
-
-
-def _make_retriever(
-    cfg: AppConfig,
-    embedding_provider,
-    vector_store,
-    chat_provider=None,
-    where: dict | None = None,
-) -> Retriever:
-    """Build a Retriever with all configured enhancements."""
-
-    needs_llm = (
-        cfg.retrieval.use_hyde
-        or cfg.retrieval.multi_query > 0
-        or cfg.retrieval.query_decomposition
-    )
-    reranker_enabled = bool(cfg.retrieval.reranker_model)
-    return Retriever(
-        embedding_provider=embedding_provider,
-        vector_store=vector_store,
-        top_k=cfg.retrieval.top_k,
-        score_threshold=cfg.retrieval.score_threshold,
-        hybrid=cfg.retrieval.hybrid,
-        hybrid_keyword_weight=cfg.retrieval.hybrid_keyword_weight,
-        candidate_k=cfg.retrieval.candidate_k,
-        use_hyde=cfg.retrieval.use_hyde,
-        multi_query=cfg.retrieval.multi_query,
-        query_decomposition=cfg.retrieval.query_decomposition,
-        query_decomposition_max_subquestions=(
-            cfg.retrieval.query_decomposition_max_subquestions
-        ),
-        use_mmr=cfg.retrieval.use_mmr,
-        mmr_lambda=cfg.retrieval.mmr_lambda,
-        return_candidates=reranker_enabled and not cfg.retrieval.use_mmr,
-        neighbor_radius=cfg.retrieval.neighbor_radius,
-        chat_provider=chat_provider if needs_llm else None,
-        where=where,
-    )
-
-
-def _make_service(cfg: AppConfig, retriever, chat_provider) -> RagService:
-    """Build a RagService with all configured enhancements."""
-
-    prompt_builder = PromptBuilder(
-        answer_only_from_context=cfg.prompt.answer_only_from_context,
-        include_sources=cfg.prompt.include_sources,
-    )
-
-    reranker_chat = (
-        chat_provider
-        if cfg.retrieval.reranker_model and cfg.retrieval.reranker_backend == "llm"
-        else None
-    )
-
-    return RagService(
-        retriever=retriever,
-        prompt_builder=prompt_builder,
-        chat_provider=chat_provider,
-        temperature=cfg.chat.temperature,
-        max_tokens=cfg.chat.max_tokens,
-        reranker_chat_provider=reranker_chat,
-        reranker_top_k=cfg.retrieval.top_k,
-        reranker_model=cfg.retrieval.reranker_model,
-        reranker_backend=cfg.retrieval.reranker_backend,
     )
 
 
@@ -272,8 +206,8 @@ def query(
     vector_store = _make_vector_store(cfg)
     where = _parse_filters(filter)
 
-    retriever = _make_retriever(cfg, embedding_provider, vector_store, chat_provider, where)
-    service = _make_service(cfg, retriever, chat_provider)
+    retriever = build_retriever(cfg, embedding_provider, vector_store, chat_provider, where=where)
+    service = build_rag_service(cfg, retriever, chat_provider)
 
     if stream:
         # Streaming mode (#5): print tokens as they arrive.
@@ -353,8 +287,8 @@ def chat(
     vector_store = _make_vector_store(cfg)
     where = _parse_filters(filter)
 
-    retriever = _make_retriever(cfg, embedding_provider, vector_store, chat_provider, where)
-    service = _make_service(cfg, retriever, chat_provider)
+    retriever = build_retriever(cfg, embedding_provider, vector_store, chat_provider, where=where)
+    service = build_rag_service(cfg, retriever, chat_provider)
 
     from rag_app.models import ChatMessage
     history: list[ChatMessage] = []
@@ -456,18 +390,15 @@ def retrieve(
     where = _parse_filters(filter)
 
     # No chat provider here on purpose: `retrieve` never calls the LLM, so
-    # HyDE / multi-query / decomposition are skipped even if enabled.
-    retriever = Retriever(
-        embedding_provider=embedding_provider,
-        vector_store=vector_store,
-        top_k=top_k if top_k is not None else cfg.retrieval.top_k,
-        score_threshold=cfg.retrieval.score_threshold,
-        hybrid=cfg.retrieval.hybrid,
-        candidate_k=cfg.retrieval.candidate_k,
-        use_mmr=cfg.retrieval.use_mmr,
-        mmr_lambda=cfg.retrieval.mmr_lambda,
-        neighbor_radius=cfg.retrieval.neighbor_radius,
+    # HyDE / multi-query / decomposition are skipped even if enabled. No
+    # reranker runs either, so return_candidates=False gives exactly top_k.
+    retriever = build_retriever(
+        cfg,
+        embedding_provider,
+        vector_store,
+        top_k=top_k,
         where=where,
+        return_candidates=False,
     )
 
     console.print(
@@ -637,28 +568,10 @@ def eval_cmd(
 
     report = run_eval_file(
         path=file,
+        cfg=cfg,
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         chat_provider=chat_provider,
-        top_k=cfg.retrieval.top_k,
-        score_threshold=cfg.retrieval.score_threshold,
-        hybrid=cfg.retrieval.hybrid,
-        candidate_k=cfg.retrieval.candidate_k,
-        use_hyde=cfg.retrieval.use_hyde,
-        multi_query=cfg.retrieval.multi_query,
-        query_decomposition=cfg.retrieval.query_decomposition,
-        query_decomposition_max_subquestions=(
-            cfg.retrieval.query_decomposition_max_subquestions
-        ),
-        use_mmr=cfg.retrieval.use_mmr,
-        mmr_lambda=cfg.retrieval.mmr_lambda,
-        neighbor_radius=cfg.retrieval.neighbor_radius,
-        reranker_model=cfg.retrieval.reranker_model,
-        reranker_backend=cfg.retrieval.reranker_backend,
-        chat_temperature=cfg.chat.temperature,
-        chat_max_tokens=cfg.chat.max_tokens,
-        answer_only_from_context=cfg.prompt.answer_only_from_context,
-        include_sources=cfg.prompt.include_sources,
     )
     _print_eval_report(report)
     if not report.all_passed:

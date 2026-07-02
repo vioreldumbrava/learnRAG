@@ -1,0 +1,67 @@
+# Configuration for running the REST API server inside Docker.
+#
+# docker-compose.yml mounts this file over /app/config.yaml (read-only), so
+# you can edit it and restart the container without rebuilding the image.
+#
+# The one setting that MUST differ from a local config: `server.host` has to
+# be 0.0.0.0 so the API is reachable through Docker's port mapping.
+#
+# Choosing `base_url` from inside a container:
+#   * LM Studio / Ollama on the machine running Docker Desktop:
+#       http://host.docker.internal:1234/v1   (LM Studio)
+#       http://host.docker.internal:11434     (Ollama)
+#   * A server elsewhere on your LAN: use its IP directly, e.g.
+#       http://192.168.50.28:1234/v1
+#   * The bundled Ollama compose service (docker compose --profile ollama up):
+#       http://ollama:11434
+
+app:
+  name: "local-rag-learning"
+  debug: false
+
+paths:
+  documents_dir: "documents"
+  storage_dir: "storage"
+  chroma_dir: "storage/chroma"
+  index_file: "storage/document_index.json"
+
+chunking:
+  chunk_size: 900
+  chunk_overlap: 150
+  strategy: "paragraph"
+
+chat:
+  provider: "lmstudio"            # ollama | lmstudio
+  model: "google/gemma-4-e4b"
+  base_url: "http://host.docker.internal:1234/v1"
+  temperature: 0.2
+  max_tokens: 800
+
+embeddings:
+  provider: "lmstudio"            # ollama | lmstudio
+  model: "text-embedding-nomic-embed-text-v1.5"
+  base_url: "http://host.docker.internal:1234/v1"
+
+vector_store:
+  provider: "chroma"
+  collection_name: "local_rag_docs"
+
+# All advanced retrieval features default off — see config.example.yaml for
+# the full annotated reference of every flag.
+retrieval:
+  top_k: 5
+
+prompt:
+  answer_only_from_context: true
+  include_sources: true
+
+# OCR needs the image built with `--build-arg WITH_OCR=true` (installs
+# tesseract-ocr + poppler-utils and the Python OCR packages).
+ocr:
+  enabled: false
+  min_chars_per_page: 50
+  lang: "eng"
+
+server:
+  host: "0.0.0.0"   # required inside a container
+  port: 8000

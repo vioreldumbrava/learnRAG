@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
 from rag_app.models import ChatMessage, RetrievedChunk
@@ -24,6 +25,11 @@ _RERANK_SYSTEM = (
 )
 
 _CROSS_ENCODER_CACHE: dict[str, object] = {}
+
+# The LLM reranker makes one chat call per candidate chunk. Issuing them
+# concurrently pipelines the HTTP round-trips; local model servers queue
+# what they can't parallelise, so a small pool is enough.
+_LLM_RERANK_MAX_WORKERS = 4
 
 
 def rerank(
@@ -63,17 +69,24 @@ def _rerank_with_llm(
     *,
     top_k: int,
 ) -> list[RetrievedChunk]:
-    scored: list[tuple[float, RetrievedChunk]] = []
-    for chunk in chunks:
+    def _safe_score(chunk: RetrievedChunk) -> float:
         try:
-            score = _score_chunk(query, chunk, chat_provider)
+            return _score_chunk(query, chunk, chat_provider)
         except Exception:
             logger.warning(
                 "Reranker failed for chunk %s - keeping neutral score",
                 chunk.id,
             )
-            score = 5.0
-        scored.append((score, chunk))
+            return 5.0
+
+    if len(chunks) == 1:
+        scores = [_safe_score(chunks[0])]
+    else:
+        workers = min(_LLM_RERANK_MAX_WORKERS, len(chunks))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            scores = list(pool.map(_safe_score, chunks))
+
+    scored = list(zip(scores, chunks))
     return _materialize(scored, top_k=top_k, score_key="reranker_score")
 
 

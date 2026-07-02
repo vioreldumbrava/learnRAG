@@ -31,12 +31,16 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rag_app.config import AppConfig
 from rag_app.eval.models import EvalQuestion
 from rag_app.models import RagAnswer, RetrievedChunk
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
-from rag_app.retrieval.prompt_builder import PromptBuilder
+from rag_app.retrieval.factory import (
+    build_rag_service,
+    build_retriever,
+    reranker_enabled,
+)
 from rag_app.retrieval.rag_service import RagService
-from rag_app.retrieval.retriever import Retriever
 from rag_app.vectorstores.base import VectorStore
 
 
@@ -225,81 +229,24 @@ def _dcg(gains: list[float]) -> float:
 
 def run_eval(
     questions: list[EvalQuestion],
+    cfg: AppConfig,
     embedding_provider: EmbeddingProvider,
     vector_store: VectorStore,
     chat_provider: ChatProvider | None,
-    *,
-    top_k: int = 5,
-    score_threshold: float | None = None,
-    hybrid: bool = False,
-    candidate_k: int | None = None,
-    use_hyde: bool = False,
-    multi_query: int = 0,
-    query_decomposition: bool = False,
-    query_decomposition_max_subquestions: int = 3,
-    use_mmr: bool = False,
-    mmr_lambda: float = 0.5,
-    neighbor_radius: int = 0,
-    reranker_model: str | None = None,
-    reranker_backend: str = "llm",
-    chat_temperature: float = 0.2,
-    chat_max_tokens: int = 800,
-    answer_only_from_context: bool = True,
-    include_sources: bool = True,
 ) -> EvalReport:
-    """Run the gold-standard set through the pipeline.
+    """Run the gold-standard set through the pipeline described by `cfg`.
 
-    If `chat_provider` is None, the LLM is skipped — only retrieval is scored.
+    The Retriever/RagService are built through the shared factory, so eval
+    scores exactly the pipeline the CLI/server/GUI would run. If
+    `chat_provider` is None, the LLM is skipped — only retrieval is scored.
     """
 
-    needs_retrieval_llm = (
-        use_hyde or multi_query > 0 or query_decomposition
-    )
-    reranker_enabled = bool(
-        reranker_model
-        and (chat_provider is not None or reranker_backend == "sentence-transformers")
-    )
-
-    retriever = Retriever(
-        embedding_provider=embedding_provider,
-        vector_store=vector_store,
-        top_k=top_k,
-        score_threshold=score_threshold,
-        hybrid=hybrid,
-        candidate_k=candidate_k,
-        use_hyde=use_hyde,
-        multi_query=multi_query,
-        query_decomposition=query_decomposition,
-        query_decomposition_max_subquestions=query_decomposition_max_subquestions,
-        use_mmr=use_mmr,
-        mmr_lambda=mmr_lambda,
-        return_candidates=reranker_enabled and not use_mmr,
-        neighbor_radius=neighbor_radius,
-        chat_provider=chat_provider if needs_retrieval_llm else None,
-    )
+    retriever = build_retriever(cfg, embedding_provider, vector_store, chat_provider)
+    can_rerank = reranker_enabled(cfg, chat_provider)
 
     rag_service: RagService | None = None
     if chat_provider is not None:
-        prompt_builder = PromptBuilder(
-            answer_only_from_context=answer_only_from_context,
-            include_sources=include_sources,
-        )
-        reranker_chat = (
-            chat_provider
-            if reranker_enabled and reranker_backend == "llm"
-            else None
-        )
-        rag_service = RagService(
-            retriever=retriever,
-            prompt_builder=prompt_builder,
-            chat_provider=chat_provider,
-            temperature=chat_temperature,
-            max_tokens=chat_max_tokens,
-            reranker_chat_provider=reranker_chat,
-            reranker_top_k=top_k,
-            reranker_model=reranker_model if reranker_enabled else None,
-            reranker_backend=reranker_backend,
-        )
+        rag_service = build_rag_service(cfg, retriever, chat_provider)
 
     results: list[EvalResult] = []
     for q in questions:
@@ -308,16 +255,16 @@ def run_eval(
             results.append(score_question(q, rag_answer.sources, rag_answer.answer))
         else:
             chunks = retriever.retrieve(q.question)
-            if reranker_enabled:
+            if can_rerank:
                 from rag_app.retrieval.reranker import rerank
 
                 chunks = rerank(
                     q.question,
                     chunks,
                     chat_provider,
-                    top_k=top_k,
-                    backend=reranker_backend,
-                    model_name=reranker_model,
+                    top_k=cfg.retrieval.top_k,
+                    backend=cfg.retrieval.reranker_backend,
+                    model_name=cfg.retrieval.reranker_model,
                 )
             results.append(score_question(q, chunks, answer=None))
     return EvalReport(results=results)
@@ -325,18 +272,18 @@ def run_eval(
 
 def run_eval_file(
     path: str | Path,
+    cfg: AppConfig,
     embedding_provider: EmbeddingProvider,
     vector_store: VectorStore,
     chat_provider: ChatProvider | None,
-    **kwargs,
 ) -> EvalReport:
     """Convenience: load questions from disk and run."""
 
     questions = load_questions(path)
     return run_eval(
         questions=questions,
+        cfg=cfg,
         embedding_provider=embedding_provider,
         vector_store=vector_store,
         chat_provider=chat_provider,
-        **kwargs,
     )

@@ -43,7 +43,7 @@ REM ----- 3. Verify required packages, install if anything is missing --------
 if errorlevel 1 (
     echo [gui.bat] Installing dependencies into %VENV_DIR% ...
     "%PYTHON_CONSOLE_EXE%" -m pip install --upgrade pip
-    "%PYTHON_CONSOLE_EXE%" -m pip install -e .
+    "%PYTHON_CONSOLE_EXE%" -m pip install -e ".[gui]"
     if errorlevel 1 (
         echo [gui.bat] ERROR: dependency installation failed.
         popd >nul

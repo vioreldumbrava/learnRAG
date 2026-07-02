@@ -137,5 +137,7 @@ ocr:
 
 server:
   # Used by `rag-app serve` (FastAPI REST API).
+  # Inside Docker use host "0.0.0.0" (see config.docker.yaml) — 127.0.0.1
+  # is not reachable through the container's port mapping.
   host: "127.0.0.1"
   port: 8000

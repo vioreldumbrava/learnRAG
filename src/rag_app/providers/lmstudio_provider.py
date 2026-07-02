@@ -36,6 +36,7 @@ def _ensure_model_loaded(base_url: str, model_name: str, model_type: str = "llm"
         parsed = urllib.parse.urlparse(base_url)
         root_url = f"{parsed.scheme}://{parsed.netloc}"
     except Exception:
+        logger.debug("Could not parse base_url %r; falling back to localhost", base_url)
         root_url = "http://localhost:1234"
 
     available_models = []

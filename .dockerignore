@@ -1,0 +1,36 @@
+# VCS / editor / agent state
+.git
+.gitignore
+.vscode
+.idea
+.claude
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Virtual environments
+.venv
+venv
+env
+
+# Python build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+
+# Local state — mounted as volumes, never baked into the image
+storage
+documents
+config.yaml
+
+# Not needed at runtime
+tests
+docs
+eval
+*.bat
+0*.md
+docker-compose.yml
+Dockerfile
+.dockerignore

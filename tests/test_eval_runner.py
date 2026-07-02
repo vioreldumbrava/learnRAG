@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from rag_app.config import AppConfig
 from rag_app.eval.models import EvalQuestion
 from rag_app.eval.runner import (
     EvalReport,
@@ -13,6 +14,16 @@ from rag_app.eval.runner import (
     score_question,
 )
 from rag_app.models import DocumentChunk, RetrievedChunk
+
+
+def _make_cfg(**retrieval) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "chat": {"model": "m", "base_url": "http://x"},
+            "embeddings": {"model": "e", "base_url": "http://x"},
+            "retrieval": retrieval,
+        }
+    )
 
 
 def test_load_questions_roundtrip(tmp_path: Path):
@@ -211,10 +222,10 @@ def test_run_eval_with_fakes_no_llm(
 
     report: EvalReport = run_eval(
         questions=questions,
+        cfg=_make_cfg(top_k=2),
         embedding_provider=fake_embedding_provider,
         vector_store=fake_vector_store,
         chat_provider=None,
-        top_k=2,
     )
     # With top_k=2 the right file will always be in the top-k since there are
     # only two chunks total — so recall is 1.0 for both questions.
@@ -252,10 +263,10 @@ def test_run_eval_with_fakes_and_chat(
     ]
     report = run_eval(
         questions=questions,
+        cfg=_make_cfg(top_k=1),
         embedding_provider=fake_embedding_provider,
         vector_store=fake_vector_store,
         chat_provider=fake_chat_provider,
-        top_k=1,
     )
     assert report.passed_count == 1
     assert report.failed_count == 1

@@ -35,9 +35,8 @@ from rag_app.config import load_config
 from rag_app.gui.workers import run_in_thread
 from rag_app.models import ChatMessage, RagAnswer
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
-from rag_app.retrieval.prompt_builder import PromptBuilder
-from rag_app.retrieval.rag_service import DebugInfo, RagService
-from rag_app.retrieval.retriever import Retriever
+from rag_app.retrieval.factory import build_rag_service, build_retriever
+from rag_app.retrieval.rag_service import DebugInfo
 from rag_app.vectorstores.chroma_store import ChromaVectorStore
 
 
@@ -47,6 +46,11 @@ class AskTab(QWidget):
         self._config_path_getter = config_path_getter
         self._thread: QThread | None = None
         self._history: list[ChatMessage] = []  # conversation history (#1)
+        # Providers + Chroma client survive across queries; rebuilt only when
+        # the config file changes. Only the worker thread touches these, and
+        # queries run one at a time (Ask is disabled while one is running).
+        self._pipeline_key: tuple[str, int] | None = None
+        self._pipeline: tuple | None = None
 
         layout = QVBoxLayout(self)
 
@@ -168,62 +172,13 @@ class AskTab(QWidget):
                 where = {"$and": [{k: v} for k, v in where.items()]}
 
         def task():
-            cfg = load_config(config_path)
-            embedding_provider = build_embedding_provider(cfg.embeddings)
-            chat_provider = build_chat_provider(cfg.chat)
-            store = ChromaVectorStore(
-                persist_dir=cfg.paths.chroma_dir,
-                collection_name=cfg.vector_store.collection_name,
+            cfg, embedding_provider, chat_provider, store = self._get_pipeline(
+                config_path
             )
-            needs_llm = (
-                cfg.retrieval.use_hyde
-                or cfg.retrieval.multi_query > 0
-                or cfg.retrieval.query_decomposition
+            retriever = build_retriever(
+                cfg, embedding_provider, store, chat_provider, where=where,
             )
-            reranker_enabled = bool(cfg.retrieval.reranker_model)
-            retriever = Retriever(
-                embedding_provider=embedding_provider,
-                vector_store=store,
-                top_k=cfg.retrieval.top_k,
-                score_threshold=cfg.retrieval.score_threshold,
-                hybrid=cfg.retrieval.hybrid,
-                candidate_k=cfg.retrieval.candidate_k,
-                use_hyde=cfg.retrieval.use_hyde,
-                multi_query=cfg.retrieval.multi_query,
-                query_decomposition=cfg.retrieval.query_decomposition,
-                query_decomposition_max_subquestions=(
-                    cfg.retrieval.query_decomposition_max_subquestions
-                ),
-                use_mmr=cfg.retrieval.use_mmr,
-                mmr_lambda=cfg.retrieval.mmr_lambda,
-                return_candidates=reranker_enabled and not cfg.retrieval.use_mmr,
-                neighbor_radius=cfg.retrieval.neighbor_radius,
-                chat_provider=chat_provider if needs_llm else None,
-                where=where,
-            )
-            prompt_builder = PromptBuilder(
-                answer_only_from_context=cfg.prompt.answer_only_from_context,
-                include_sources=cfg.prompt.include_sources,
-            )
-            reranker_chat = (
-                chat_provider
-                if (
-                    cfg.retrieval.reranker_model
-                    and cfg.retrieval.reranker_backend == "llm"
-                )
-                else None
-            )
-            service = RagService(
-                retriever=retriever,
-                prompt_builder=prompt_builder,
-                chat_provider=chat_provider,
-                temperature=cfg.chat.temperature,
-                max_tokens=cfg.chat.max_tokens,
-                reranker_chat_provider=reranker_chat,
-                reranker_top_k=cfg.retrieval.top_k,
-                reranker_model=cfg.retrieval.reranker_model,
-                reranker_backend=cfg.retrieval.reranker_backend,
-            )
+            service = build_rag_service(cfg, retriever, chat_provider)
             if debug:
                 return service.answer_with_debug(question, history=history)
             return service.answer(question, history=history), None
@@ -236,6 +191,30 @@ class AskTab(QWidget):
             on_error=self._on_error,
             on_done=self._reset_running_state,
         )
+
+    def _get_pipeline(self, config_path: str):
+        """Return (cfg, embedding_provider, chat_provider, store) for a query.
+
+        The config is re-read every query (it's cheap and keeps flag changes
+        live), but providers and the Chroma client are rebuilt only when the
+        config file itself changes — reopening Chroma's PersistentClient per
+        query is wasted work.
+        """
+
+        key = (config_path, Path(config_path).stat().st_mtime_ns)
+        cfg = load_config(config_path)
+        if self._pipeline is None or self._pipeline_key != key:
+            self._pipeline = (
+                build_embedding_provider(cfg.embeddings),
+                build_chat_provider(cfg.chat),
+                ChromaVectorStore(
+                    persist_dir=cfg.paths.chroma_dir,
+                    collection_name=cfg.vector_store.collection_name,
+                ),
+            )
+            self._pipeline_key = key
+        embedding_provider, chat_provider, store = self._pipeline
+        return cfg, embedding_provider, chat_provider, store
 
     def _on_done(self, payload) -> None:
         answer, debug_info = payload  # type: ignore[misc]

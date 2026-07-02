@@ -556,6 +556,10 @@ actually mention the fact?").
 - [`src/rag_app/eval/runner.py`](../src/rag_app/eval/runner.py) —
   `run_eval()` runs a list of questions and scores recall@k, **MRR**
   (1/rank of the first relevant chunk, averaged), and keyword presence.
+  It takes the whole `AppConfig` and builds its pipeline through the
+  shared [`retrieval/factory.py`](../src/rag_app/retrieval/factory.py),
+  so eval scores *exactly* the pipeline the CLI/server/GUI run — no
+  drift between what you measure and what you ship.
   The CLI report shows each question's first-relevant rank in the
   `1st rank` column and the aggregate MRR in the summary panel.
 - [`eval/questions.json`](../eval/questions.json) — starter set covering
@@ -692,7 +696,11 @@ relevance/diversity trade-off with `retrieval.mmr_lambda`.
 ### In this code
 
 The retrieval upgrades are **wired in**, each behind a single `config.yaml`
-flag (all default off so the basic flow stays readable):
+flag (all default off so the basic flow stays readable). Every surface
+(CLI, REST server, GUI, eval runner) builds its pipeline through one shared
+factory — [`retrieval/factory.py`](../src/rag_app/retrieval/factory.py)
+(`build_retriever` / `build_rag_service`) — so a new flag is wired in
+exactly once:
 
 | upgrade | flag | implementation |
 |---|---|---|
@@ -780,8 +788,9 @@ Watch each upgrade fix a specific failure:
   cross-encoder rerank) is the standard production pattern.
 - **Q: Which reranker backend should I use?**
   The default `llm` backend uses the chat LLM as a 0–10 relevance
-  scorer: no extra model to load, but N extra LLM calls per query. The
-  optional `sentence-transformers` backend uses a real local
+  scorer: no extra model to load, but N extra LLM calls per query
+  (issued 4-way concurrent on a thread pool to hide the round-trips).
+  The optional `sentence-transformers` backend uses a real local
   `CrossEncoder`: faster per chunk and more reliable, but it adds a
   heavier dependency and a second model.
 - **Q: What is HyDE?**
@@ -862,8 +871,21 @@ Things that matter the moment "demo" becomes "service":
   [`server.py`](../src/rag_app/server.py). The `/api/query` endpoint
   supports SSE streaming, debug mode, metadata filters and conversation
   history — all the things the CLI does.
-- **Caching, observability, auth, rate limits**: not implemented. This
-  is where you'd extend the codebase for real production.
+- **BM25 index caching**: the server and GUI build a fresh `Retriever`
+  per request, so the hybrid-search BM25 index is cached *across*
+  requests ([`get_bm25_index`](../src/rag_app/retrieval/bm25.py), keyed
+  by the store's mutation counter + chunk count) instead of re-tokenising
+  the whole corpus every query.
+- **Concurrent reranking**: the LLM-as-judge reranker scores candidates
+  on a 4-thread pool ([`reranker.py`](../src/rag_app/retrieval/reranker.py))
+  instead of N sequential round-trips.
+- **Deployment**: the REST API runs headless in Docker —
+  [`Dockerfile`](../Dockerfile), [`docker-compose.yml`](../docker-compose.yml),
+  [`config.docker.yaml`](../config.docker.yaml), and a `GET /health`
+  liveness endpoint for the container healthcheck. See README §10.
+- **Answer/embedding caching, observability, auth, rate limits**: not
+  implemented. This is where you'd extend the codebase for real
+  production.
 
 ### Try it
 
@@ -926,8 +948,9 @@ project ships all of them so the seams are visible.
 |---|---|
 | CLI (one-shot) | [`cli.py` → `query` / `retrieve` / `inspect` / `eval`](../src/rag_app/cli.py) |
 | CLI (interactive multi-turn) | [`cli.py` → `chat`](../src/rag_app/cli.py) — history list, `/clear`, `/quit` |
-| Desktop GUI | [`gui/app.py`](../src/rag_app/gui/app.py) — 4-tab PySide6 window |
-| REST API | [`server.py`](../src/rag_app/server.py) — FastAPI; `POST /api/query`, `POST /api/retrieve`, `POST /api/ingest`, `GET /api/stats`, `DELETE /api/index` |
+| Desktop GUI | [`gui/app.py`](../src/rag_app/gui/app.py) — five-tab PySide6 window (optional: `pip install -e .[gui]`, `gui.bat` does it for you) |
+| REST API | [`server.py`](../src/rag_app/server.py) — FastAPI; `GET /health`, `POST /api/query`, `POST /api/retrieve`, `POST /api/ingest`, `GET /api/stats`, `DELETE /api/index` |
+| Docker deployment | [`Dockerfile`](../Dockerfile) (headless, no Qt) + [`docker-compose.yml`](../docker-compose.yml) (volumes for `storage/` + `documents/`, optional `--profile ollama` model server) + [`config.docker.yaml`](../config.docker.yaml) (`server.host: 0.0.0.0`) |
 | Streaming | `ChatProvider.generate_stream` in [`providers/base.py`](../src/rag_app/providers/base.py); native impls in [`ollama_provider.py`](../src/rag_app/providers/ollama_provider.py) and [`lmstudio_provider.py`](../src/rag_app/providers/lmstudio_provider.py) |
 | Multi-turn history | `history: list[ChatMessage]` threaded through `RagService.answer(...)` → `PromptBuilder.build(history=...)` |
 | Metadata filters | `--filter "key=value,key2=value2"`; folder-derived `module` in [`_derive_folder_metadata`](../src/rag_app/ingestion/ingest_service.py); forwarded to Chroma via `Retriever(where=...)` |
@@ -962,6 +985,11 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/query" -Method Post -ContentTy
 
 # Desktop GUI (PySide6).
 .\gui.bat
+
+# Docker — the REST API as a container (edit config.docker.yaml first
+# so base_url points at your model servers).
+docker compose up --build -d
+curl.exe http://localhost:8000/health
 ```
 
 ### Interview check
@@ -996,6 +1024,16 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/query" -Method Post -ContentTy
   organising your corpus by topic gives you free filtering. Multi-key
   filters use Chroma's `$and` operator. This prevents the
   cross-document false-positive problem when corpora share vocabulary.
+- **Q: How would you deploy this on a machine without a desktop?**
+  Containerize only the headless surface: the Docker image installs the
+  package *without* the Qt GUI (PySide6 lives behind the `[gui]` extra),
+  binds `0.0.0.0` instead of loopback, gets its config bind-mounted, and
+  keeps all state (Chroma DB + ingest hash index) in volumes so the
+  container stays disposable. The model servers stay *outside* the
+  container — the config's `base_url` just points at them
+  (`host.docker.internal` for the Docker host, a LAN IP, or the
+  `ollama` compose service name). A `GET /health` endpoint gives the
+  orchestrator a liveness probe that doesn't touch the vector store.
 
 ---
 

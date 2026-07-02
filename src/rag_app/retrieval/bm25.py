@@ -5,19 +5,24 @@ chunks already stored in the vector store.  It builds an inverted index on
 first use and scores queries using the standard BM25 formula (Okapi BM25
 with k1=1.5, b=0.75).
 
-The index is intentionally transient — rebuilt each time the CLI or GUI
-starts a query session.  For the scale of a local RAG project (tens of
-thousands of chunks at most) this is fast enough.
+Built indexes are reused across Retriever instances via `get_bm25_index`,
+so surfaces that construct a fresh Retriever per query (the REST server,
+the GUI) don't re-tokenise the whole corpus on every request.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 
 from rag_app.models import RetrievedChunk
+from rag_app.vectorstores.base import VectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 # Simple tokeniser: lowercase, split on non-word characters.
@@ -112,6 +117,53 @@ class BM25Index:
             denominator = tf + self.k1 * (1 - self.b + self.b * dl / self._avg_dl)
             score += idf * numerator / denominator
         return score
+
+
+# ---------------------------------------------------------------------------
+# Cross-request index cache
+# ---------------------------------------------------------------------------
+
+# One entry per (persist_dir, collection); replaced whenever the store's
+# cache key changes.
+_INDEX_CACHE: dict[tuple, BM25Index] = {}
+
+
+def get_bm25_index(store: VectorStore) -> BM25Index:
+    """Build (or reuse) a BM25 index over every chunk in `store`.
+
+    Stores that implement `bm25_cache_key()` (ChromaVectorStore does) get
+    process-wide caching: the key changes whenever the store mutates through
+    this process or its chunk count changes, which invalidates the entry.
+    Out-of-process edits that keep the chunk count identical are not
+    detected — restart the server (or re-ingest through it) in that case.
+
+    Stores without a cache key (e.g. in-memory test fakes) get a fresh
+    index per call.
+
+    Raises NotImplementedError when the store cannot enumerate its chunks.
+    """
+
+    key_fn = getattr(store, "bm25_cache_key", None)
+    key = key_fn() if key_fn is not None else None
+
+    if key is not None:
+        cached = _INDEX_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    all_chunks = store.all_chunks()
+    index = BM25Index()
+    index.build(all_chunks)
+    logger.info("BM25 index built with %d chunks", len(all_chunks))
+
+    if key is not None:
+        # Evict stale entries for the same collection so old indexes don't
+        # pile up as the store mutates.
+        prefix = key[:2]
+        for stale in [k for k in _INDEX_CACHE if k[:2] == prefix]:
+            del _INDEX_CACHE[stale]
+        _INDEX_CACHE[key] = index
+    return index
 
 
 def reciprocal_rank_fusion(

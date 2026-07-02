@@ -377,6 +377,11 @@ in `config.yaml`. Vector search runs as before; in parallel,
 builds an in-memory `BM25Index` over all chunks in the store; results
 are merged with RRF (see below). Fetch-K is 4× the configured `top_k`
 on each leg before merging, so the fusion has something to work with.
+The built index is cached process-wide
+([`get_bm25_index`](../src/rag_app/retrieval/bm25.py), invalidated when
+the store mutates), so surfaces that construct a fresh `Retriever` per
+request — the REST server, the GUI — don't re-tokenise the corpus on
+every query.
 
 ### BM25 (Best Match 25)
 

@@ -20,7 +20,6 @@ dependencies = [
     "rich>=13.7",
     "typer>=0.12",
     "openai>=1.30",
-    "PySide6>=6.7",
     "python-docx>=1.1",
     "beautifulsoup4>=4.12",
     "fastapi>=0.111",
@@ -30,6 +29,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+]
+gui = [
+    "PySide6>=6.7",
 ]
 reranker = [
     "sentence-transformers>=3.0",

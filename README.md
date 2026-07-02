@@ -32,9 +32,10 @@ toggled by a single line in `config.yaml`.
 7. [Advanced RAG features](#7-advanced-rag-features)
 8. [Configuration reference](#8-configuration-reference)
 9. [REST API server](#9-rest-api-server)
-10. [Project layout](#10-project-layout)
-11. [Tests](#11-tests)
-12. [Extending the project](#12-extending-the-project)
+10. [Docker deployment](#10-docker-deployment)
+11. [Project layout](#11-project-layout)
+12. [Tests](#12-tests)
+13. [Extending the project](#13-extending-the-project)
 
 ---
 
@@ -166,11 +167,20 @@ Any argument after `run.bat` is forwarded straight to `python -m rag_app`.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
+pip install -e ".[gui]"
 Copy-Item config.example.yaml config.yaml
 python -m rag_app ingest
 python -m rag_app query "..." --debug
 ```
+
+Install extras by use case (they can be combined, e.g. `.[gui,dev]`):
+
+| install | what you get |
+|---|---|
+| `pip install -e .` | CLI + REST API server (headless — what the Docker image uses) |
+| `pip install -e ".[gui]"` | + PySide6 desktop GUI (`gui.bat` does this automatically) |
+| `pip install -e ".[reranker]"` | + sentence-transformers cross-encoder reranker |
+| `pip install -e ".[dev]"` | + pytest |
 
 ### Switching providers
 
@@ -760,7 +770,9 @@ server:
   port: 8000
 ```
 
-Used by `rag-app serve` (see next section).
+Used by `rag-app serve` (see next section). Inside a container the host
+must be `0.0.0.0` (that's what `config.docker.yaml` sets) — `127.0.0.1`
+is unreachable through Docker's port mapping.
 
 ---
 
@@ -802,15 +814,87 @@ Implementation: [`src/rag_app/server.py`](src/rag_app/server.py).
 
 ---
 
-## 10. Project layout
+## 10. Docker deployment
+
+The REST API server runs headless in Docker (the desktop GUI stays on the
+host). Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+on Windows/macOS or the Docker engine on Linux.
+
+```powershell
+docker compose up --build -d               # build + start the API
+curl.exe http://localhost:8000/health      # -> {"status":"ok"}
+```
+
+### Pointing the container at your model servers
+
+Edit [`config.docker.yaml`](config.docker.yaml) (mounted over the
+container's `config.yaml`, so no rebuild needed — just restart):
+
+| where your LM Studio / Ollama runs | `base_url` to use |
+|---|---|
+| On the machine running Docker Desktop | `http://host.docker.internal:1234/v1` (LM Studio) / `http://host.docker.internal:11434` (Ollama) |
+| Another machine on your LAN | its IP directly, e.g. `http://192.168.50.28:1234/v1` |
+| The bundled `ollama` compose service | `http://ollama:11434` |
+
+### Optional bundled Ollama
+
+A self-contained stack with its own model server (models persist in a
+named volume):
+
+```powershell
+docker compose --profile ollama up -d
+docker compose exec ollama ollama pull gemma3:12b
+docker compose exec ollama ollama pull embeddinggemma
+```
+
+Then set both `base_url`s in `config.docker.yaml` to `http://ollama:11434`
+with `provider: "ollama"` and restart: `docker compose restart rag-api`.
+
+### Volumes and state
+
+| host path | container path | contents |
+|---|---|---|
+| `./storage` | `/app/storage` | Chroma DB + ingest hash index (survives restarts) |
+| `./documents` | `/app/documents` | your corpus — drop files here, then `POST /api/ingest` |
+| `./config.docker.yaml` | `/app/config.yaml` (read-only) | server configuration |
+
+> **Warning:** `./storage` is the same directory the host CLI/GUI uses.
+> Chroma is SQLite-backed — don't run the container and a host-side
+> `rag-app` against the same storage at the same time.
+
+### OCR-enabled image
+
+The default image is lean (no Tesseract). To ingest scanned PDFs/images
+inside the container:
+
+```powershell
+docker build -t rag-api --build-arg WITH_OCR=true .
+```
+
+and set `ocr.enabled: true` in `config.docker.yaml`.
+
+### Smoke test
+
+```powershell
+$q = @{ question = "What happens if NBRP and DBRP are different?" } | ConvertTo-Json
+Invoke-RestMethod http://localhost:8000/api/ingest -Method Post -ContentType 'application/json' -Body '{}'
+Invoke-RestMethod http://localhost:8000/api/query  -Method Post -ContentType 'application/json' -Body $q
+```
+
+---
+
+## 11. Project layout
 
 ```text
 RAG_system/
   run.bat                      # Windows launcher: venv + deps + CLI
   gui.bat                      # Windows launcher: venv + deps + PySide6 GUI
-  pyproject.toml               # package metadata + runtime dependencies
-  requirements.txt             # pinned deps for `pip install -r`
+  pyproject.toml               # package metadata + runtime dependencies (+ gui/reranker/dev extras)
+  requirements.txt             # headless runtime deps for `pip install -r`
   config.example.yaml          # copied to config.yaml on first run
+  config.docker.yaml           # container config (server.host=0.0.0.0), mounted by compose
+  Dockerfile                   # headless REST API image (optional OCR build arg)
+  docker-compose.yml           # rag-api service + optional `ollama` profile
   docs/                        # 📚 RAG learning path (start here)
     00_LEARNING_PATH.md        # 11-stage walkthrough mapping features → concepts
     01_RAG_CONCEPTS.md         # concept-by-concept reference
@@ -846,8 +930,9 @@ RAG_system/
       base.py                  # VectorStore ABC + all_chunks() for BM25
       chroma_store.py          # ChromaDB PersistentClient + inspection helpers
     retrieval/
+      factory.py               # THE Retriever/RagService build site shared by CLI, server, GUI, eval
       retriever.py             # vector + hybrid + HyDE + decomposition + multi-query + MMR + metadata filter
-      bm25.py                  # BM25Index + reciprocal_rank_fusion
+      bm25.py                  # BM25Index + reciprocal_rank_fusion + cross-request index cache
       mmr.py                   # Maximal Marginal Relevance diversity selection
       reranker.py              # LLM or sentence-transformers cross-encoder reranker
       prompt_builder.py        # system + history + user message assembly
@@ -877,11 +962,14 @@ RAG_system/
     test_mmr.py                # MMR diversity selection
     test_reranker.py           # LLM/cross-encoder reranker helpers
     test_eval_runner.py        # recall/MRR/nDCG scoring
+    test_factory.py            # every retrieval flag reaches the Retriever
+    test_bm25_cache.py         # BM25 cache reuse + invalidation
+    test_server_endpoints.py   # FastAPI endpoints over the fakes
 ```
 
 ---
 
-## 11. Tests
+## 12. Tests
 
 ```powershell
 pytest
@@ -893,7 +981,7 @@ external dependency is mocked via the fakes in
 
 ---
 
-## 12. Extending the project
+## 13. Extending the project
 
 The interfaces in `providers/base.py`, `vectorstores/base.py`, and the
 small classes in `retrieval/` are the seams where new features bolt on:

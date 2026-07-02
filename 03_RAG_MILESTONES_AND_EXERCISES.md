@@ -324,6 +324,46 @@ Good UI learning stack:
 
 ---
 
+## Milestone 11: Deploy with Docker
+
+Goal: run the REST API as a container so any machine with Docker can serve it.
+
+This is implemented in the repo — study the pieces, then try to reproduce
+them from scratch:
+
+1. `Dockerfile` — headless image: the package installs *without* PySide6
+   (the desktop GUI is an optional `[gui]` extra). Optional
+   `--build-arg WITH_OCR=true` adds Tesseract + Poppler for scanned PDFs.
+2. `config.docker.yaml` — same schema as `config.yaml` but
+   `server.host: "0.0.0.0"` so the API is reachable through the port
+   mapping. Compose mounts it over the container's config, so edits only
+   need a restart, not a rebuild.
+3. `docker-compose.yml` — the `rag-api` service with `./storage` and
+   `./documents` as volumes, plus an optional Ollama model server behind
+   `--profile ollama`.
+4. `GET /health` — the liveness endpoint the container healthcheck probes
+   (no vector-store access, so it stays cheap).
+
+Try it:
+
+```powershell
+docker compose up --build -d
+curl.exe http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/api/stats
+```
+
+Exercise questions:
+
+- Why must the server bind `0.0.0.0` inside the container but `127.0.0.1`
+  on your desktop?
+- Why is `storage/` a volume instead of being baked into the image?
+- Which `base_url` does the container need when LM Studio runs on the
+  Docker host? On another LAN machine? As the bundled compose service?
+- Why is it a bad idea to run the container and a host-side `rag-app`
+  against the same `storage/` at the same time?
+
+---
+
 ## Key learning summary
 
 By the end of this project, you should understand:
@@ -338,3 +378,5 @@ By the end of this project, you should understand:
 8. Hybrid search is important for technical identifiers.
 9. Local models can be used through Ollama or LM Studio.
 10. Original documents should remain the source of truth.
+11. A headless API + a config file + volumes is all it takes to
+    containerize the system — state lives in volumes, never in images.

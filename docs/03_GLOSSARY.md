@@ -52,6 +52,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 ## H
 
 - **Hallucination** — Confident-sounding statement not supported by the retrieved context (or by reality).
+- **Health endpoint** — Cheap HTTP route (`GET /health` here) that reports process liveness without touching the vector store; what container healthchecks and load balancers probe. See [`server.py`](../src/rag_app/server.py).
 - **HNSW** — Hierarchical Navigable Small World. Layered proximity graph; the modern default ANN index. Sub-millisecond at 10M+ vectors.
 - **Hybrid search** — Dense (vector) + sparse (BM25) retrieval merged with RRF. Fixes the rare-token failure mode of pure dense. Toggle `retrieval.hybrid: true` to enable in this project.
 - **HyDE** — Hypothetical Document Embeddings. Generate a fake answer, embed it, search with that. Often beats searching with the literal question. Toggle `retrieval.use_hyde: true` to enable.
@@ -111,6 +112,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 - **Reranker** — Second-stage model that re-scores a candidate pool jointly with the query. This project supports an LLM scorer and an optional `sentence-transformers` CrossEncoder backend — see [`reranker.py`](../src/rag_app/retrieval/reranker.py).
 - **REST API** — HTTP wrapper around the RAG pipeline; lets non-Python clients query the system. This project ships one in [`server.py`](../src/rag_app/server.py) via FastAPI.
 - **Retrieval phase** — See *Query phase*.
+- **Retriever factory** — The single construction point for the retrieval pipeline ([`retrieval/factory.py`](../src/rag_app/retrieval/factory.py)); every surface (CLI, REST server, GUI, eval) builds through it so a new config flag is wired in exactly once.
 - **RRF** — Reciprocal Rank Fusion. Merge ranked lists by summing `1 / (k + rank)`. Default `k=60`. The modern way to merge dense+sparse.
 
 ## S
