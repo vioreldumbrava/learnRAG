@@ -15,6 +15,7 @@
     <button class="tab" data-panel="ingest">Ingest</button>
     <button class="tab" data-panel="documents">Documents</button>
     <button class="tab" data-panel="stats">Stats</button>
+    <button class="tab" data-panel="config">Config</button>
   </nav>
 </header>
 
@@ -36,7 +37,7 @@
     <pre id="answer" class="answer"></pre>
     <h2>Sources</h2>
     <table id="sources">
-      <thead><tr><th>#</th><th>file</th><th>chunk</th><th>score</th></tr></thead>
+      <thead><tr><th>#</th><th>file</th><th>section</th><th>chunk</th><th>score</th></tr></thead>
       <tbody></tbody>
     </table>
     <div id="debug-block" hidden>
@@ -47,11 +48,14 @@
 
   <!-- Ingest ---------------------------------------------------------- -->
   <section id="panel-ingest" class="panel">
-    <p class="muted">Indexes the server's configured <code>documents/</code>
-      folder. Drop files into that folder (a mounted volume when running in
-      Docker), then run ingest.</p>
+    <p class="muted">Indexes documents from the server's filesystem. Leave the
+      path empty to ingest the configured <code>documents/</code> folder (a
+      mounted volume in Docker), or give a single file / folder path
+      <em>as seen by the server</em>.</p>
+    <input type="text" id="ingest-path"
+      placeholder="path on the server (empty = configured documents_dir)">
     <div class="controls">
-      <label><input type="checkbox" id="force"> Force re-ingest</label>
+      <label><input type="checkbox" id="force"> Force re-ingest (ignore hash cache)</label>
       <span class="spacer"></span>
       <button id="run-ingest" class="primary">Run Ingest</button>
     </div>
@@ -64,12 +68,26 @@
     <div class="controls">
       <span id="documents-status" class="status"></span>
       <span class="spacer"></span>
+      <button id="forget-selected" class="danger secondary">Forget Selected</button>
       <button id="refresh-documents" class="secondary">Refresh</button>
     </div>
     <table id="documents">
-      <thead><tr><th>file</th><th>path</th><th>chunks</th><th>hash</th><th></th></tr></thead>
+      <thead><tr>
+        <th><input type="checkbox" id="select-all" title="Select all"></th>
+        <th>file</th><th>path</th><th>chunks</th><th>hash</th><th></th>
+      </tr></thead>
       <tbody></tbody>
     </table>
+
+    <h2>Inspect chunks</h2>
+    <div class="controls">
+      <label>Random sample:
+        <input type="number" id="sample-n" value="5" min="1" max="50" style="width:60px">
+      </label>
+      <button id="show-random" class="secondary">Show random chunks</button>
+      <span class="muted">or click a document's <b>Inspect</b> button above.</span>
+    </div>
+    <pre id="chunks-view" class="answer"></pre>
   </section>
 
   <!-- Stats ----------------------------------------------------------- -->
@@ -81,6 +99,21 @@
       <button id="clear-index" class="danger">Clear Index</button>
     </div>
     <table id="stats"><tbody></tbody></table>
+  </section>
+
+  <!-- Config (read-only) ---------------------------------------------- -->
+  <section id="panel-config" class="panel">
+    <p class="muted">The effective server configuration. This is
+      <b>read-only</b>: the server builds its providers once at startup and the
+      config file is a read-only mount in Docker. To change settings, edit the
+      config file (<code>config.docker.yaml</code> for the container) and
+      restart. There is no Refresh-models / Save here for that reason.</p>
+    <div class="controls">
+      <span id="config-status" class="status"></span>
+      <span class="spacer"></span>
+      <button id="refresh-config" class="secondary">Refresh</button>
+    </div>
+    <div id="config-tables"></div>
   </section>
 </main>
 

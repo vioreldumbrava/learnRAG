@@ -124,6 +124,8 @@ def test_query_returns_answer_with_sources(api):
     assert body["answer"] == "The answer, per [Source 1]."
     assert len(body["sources"]) == 3  # config top_k
     assert body["debug"] is None
+    # Sources carry the section column the GUI shows.
+    assert "section" in body["sources"][0]
 
 
 def test_query_debug_payload(api):
@@ -251,3 +253,33 @@ def test_webui_serves_index_html(api):
     # The two static assets the page references resolve too.
     assert client.get("/ui/app.js").status_code == 200
     assert client.get("/ui/style.css").status_code == 200
+
+
+def test_config_endpoint_returns_effective_config(api):
+    client, *_ = api
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    cfg = response.json()
+    # The sections the Config panel + enriched Stats read.
+    assert cfg["chat"]["model"] == "m"
+    assert cfg["embeddings"]["model"] == "e"
+    assert cfg["retrieval"]["top_k"] == 3
+    assert "chunking" in cfg and "ocr" in cfg
+
+
+def test_chunks_sample_and_by_source_file(api):
+    client, store, embedder, _ = api
+    _fill(store, embedder, n=6)  # all metadata source_file == "a.txt"
+
+    # Random sample is capped at what's available.
+    sampled = client.get("/api/chunks", params={"sample": 4}).json()["chunks"]
+    assert len(sampled) == 4
+    assert {"id", "source_file", "chunk_index", "section", "text"} <= set(sampled[0])
+
+    # Filter by source_file returns only that document's chunks.
+    by_file = client.get("/api/chunks", params={"source_file": "a.txt"}).json()["chunks"]
+    assert len(by_file) == 6
+    assert all(c["source_file"] == "a.txt" for c in by_file)
+
+    none = client.get("/api/chunks", params={"source_file": "missing.txt"}).json()["chunks"]
+    assert none == []

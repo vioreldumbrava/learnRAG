@@ -9,6 +9,8 @@ Endpoints:
     POST /api/retrieve     - retrieval only, no LLM
     GET  /api/documents    - list ingested documents
     DELETE /api/documents  - forget one document (?path=...)
+    GET  /api/config       - effective (read-only) configuration
+    GET  /api/chunks       - sample/inspect stored chunks
     GET  /api/stats        - store statistics
     DELETE /api/index      - clear the store
 
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -167,6 +170,7 @@ def _source_payload(sources) -> list[dict]:
     return [
         {
             "file": s.metadata.get("source_file", "?"),
+            "section": s.metadata.get("section", ""),
             "chunk_index": s.metadata.get("chunk_index", "?"),
             "score": s.score,
         }
@@ -302,6 +306,58 @@ async def api_stats():
         persist_dir=s.get("persist_dir", ""),
         embedding_dim=dim,
     )
+
+
+@app.get("/api/config")
+async def api_config():
+    """Return the effective configuration (read-only).
+
+    The server loads config and builds its providers once at startup, and in
+    Docker the config file is a read-only mount — so this is a *view*, not an
+    editor. Change settings by editing the config file and restarting. No
+    secrets live in the config (the local providers are keyless), so the full
+    validated config is safe to return.
+    """
+
+    return _state.cfg.model_dump(mode="json")
+
+
+@app.get("/api/chunks")
+async def api_chunks(
+    sample: int | None = None,
+    source_file: str | None = None,
+    limit: int = 50,
+):
+    """Inspect stored chunks (the REST version of `rag-app inspect`).
+
+    - `source_file=<name>`: every chunk from that document (up to `limit`).
+    - `sample=<n>`: `n` random chunks from the whole store.
+    - neither: the first `limit` chunks.
+    """
+
+    store = _state.vector_store
+    if source_file:
+        chunks = store.list_chunks(where={"source_file": source_file}, limit=limit)
+    elif sample:
+        pool = store.list_chunks(limit=2000)
+        chunks = random.sample(pool, k=min(sample, len(pool))) if pool else []
+    else:
+        chunks = store.list_chunks(limit=limit)
+
+    return {
+        "chunks": [
+            {
+                "id": c.id,
+                "source_file": c.metadata.get("source_file", "?"),
+                "chunk_index": c.metadata.get("chunk_index", "?"),
+                "section": c.metadata.get("section", ""),
+                "module": c.metadata.get("module", ""),
+                "file_type": c.metadata.get("file_type", ""),
+                "text": c.text,
+            }
+            for c in chunks
+        ],
+    }
 
 
 @app.get("/api/documents", response_model=DocumentsResponse)

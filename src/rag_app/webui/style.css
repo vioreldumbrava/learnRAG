@@ -66,7 +66,16 @@ textarea, input[type="text"] {
   font: inherit;
 }
 textarea { width: 100%; resize: vertical; }
-textarea:focus, input[type="text"]:focus { outline: 1px solid var(--accent); }
+input#ingest-path { width: 100%; }
+input[type="number"] {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+  font: inherit;
+}
+textarea:focus, input[type="text"]:focus, input[type="number"]:focus { outline: 1px solid var(--accent); }
 
 .controls {
   display: flex;
@@ -125,6 +134,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td .mini {
   padding: 3px 10px;
   font-size: 12px;
+  margin-right: 5px;
 }
 
 ul.result-list { margin: 6px 0; padding-left: 22px; }

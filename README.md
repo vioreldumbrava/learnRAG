@@ -793,6 +793,8 @@ FastAPI-based, hot-config via `config.yaml`. Endpoints:
 | `POST` | `/api/ingest` | Trigger ingestion. Body: `{force?, path?}`. |
 | `GET`  | `/api/documents` | List every ingested document (path, chunks, hash). |
 | `DELETE` | `/api/documents?path=...` | Forget one document (the REST version of `rag-app forget`). |
+| `GET`  | `/api/chunks` | Inspect stored chunks: `?sample=N` (random) or `?source_file=...`. |
+| `GET`  | `/api/config` | The effective (read-only) configuration. |
 | `GET`  | `/api/stats` | Collection name, chunk count, embedding dim. |
 | `DELETE` | `/api/index` | Wipe the vector store + index. |
 
@@ -808,19 +810,24 @@ generation starts), then `data: {"token": "..."}` per token, then the
 `rag-app serve` also serves a zero-dependency web UI at
 `http://127.0.0.1:8000/ui/` (the root URL redirects there) — plain
 HTML/JS from [`src/rag_app/webui/`](src/rag_app/webui/), no build step.
-Four panels mirror the desktop GUI:
+Five panels mirror the desktop GUI:
 
 | panel | what it does |
 |---|---|
-| **Ask** | Streaming answers (token by token), multi-turn history, debug view, metadata filter — same features as the GUI's Ask tab. |
-| **Ingest** | Run ingestion (with Force), per-file indexed/skipped/failed results. |
-| **Documents** | Every ingested document with per-row **Forget**. |
-| **Stats** | Collection info + **Clear Index** (with confirmation). |
+| **Ask** | Streaming answers (token by token), multi-turn history, debug view, metadata filter, sources table with the `section` column — same features as the GUI's Ask tab. |
+| **Ingest** | Run ingestion with a server-side path (empty = configured `documents/`) and Force; indexed/skipped/failed lists. |
+| **Documents** | Every ingested document with multi-select **Forget Selected** / per-row Forget, plus **Inspect** — view a document's chunks or a random sample (the GUI's Memory tab). |
+| **Stats** | Store stats **and** the effective providers, chunking, `top_k`, and retrieval-feature toggles + **Clear Index**. |
+| **Config** | Read-only view of the full effective configuration. |
 
-Settings are deliberately absent: the server's config is a file
-(read-only mount in Docker) — edit it and restart. There is **no
-authentication**: anyone who can reach the port can query *and wipe*
-the index, so don't expose it beyond your LAN.
+The **Config panel is read-only by design**: the server builds its
+providers once at startup and the Docker config is a read-only mount, so
+changing settings is a file-edit-plus-restart operation (edit
+`config.docker.yaml`, then `docker compose restart rag-api`) — not a live
+form. That's also why there is no model-discovery "Refresh models" button
+the desktop Settings tab has. There is **no authentication**: anyone who
+can reach the port can query *and wipe* the index, so don't expose it
+beyond your LAN.
 
 Example — multi-turn chat via REST:
 

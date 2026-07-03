@@ -138,16 +138,23 @@ class FakeVectorStore(VectorStore):
         self.embeddings.clear()
 
     def all_chunks(self, limit: int = 50_000) -> list[RetrievedChunk]:
+        return self.list_chunks(limit=limit)
+
+    def list_chunks(
+        self,
+        *,
+        where: dict | None = None,
+        limit: int | None = None,
+    ) -> list[RetrievedChunk]:
         out: list[RetrievedChunk] = []
-        for cid, c in list(self.chunks.items())[:limit]:
+        for cid, c in self.chunks.items():
+            if where and not self._matches_where(c.metadata, where):
+                continue
             out.append(
-                RetrievedChunk(
-                    id=c.id,
-                    text=c.text,
-                    metadata=c.metadata,
-                    score=None,
-                )
+                RetrievedChunk(id=c.id, text=c.text, metadata=c.metadata, score=None)
             )
+            if limit is not None and len(out) >= limit:
+                break
         return out
 
     def get(self, chunk_id: str) -> RetrievedChunk | None:

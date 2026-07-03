@@ -20,6 +20,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     $(`#panel-${tab.dataset.panel}`).classList.add("active");
     if (tab.dataset.panel === "documents") refreshDocuments();
     if (tab.dataset.panel === "stats") refreshStats();
+    if (tab.dataset.panel === "config") refreshConfig();
   });
 });
 
@@ -121,6 +122,7 @@ function renderSources(sources) {
     const row = document.createElement("tr");
     row.appendChild(td(String(i + 1), "num"));
     row.appendChild(td(String(s.file)));
+    row.appendChild(td(s.section || ""));
     row.appendChild(td(String(s.chunk_index), "num"));
     row.appendChild(td(s.score == null ? "n/a" : Number(s.score).toFixed(4), "num"));
     tbody.appendChild(row);
@@ -253,11 +255,12 @@ $("#run-ingest").addEventListener("click", async () => {
   $("#run-ingest").disabled = true;
   setStatus("#ingest-status", "Ingesting... (embedding can take a while)");
   clearChildren($("#ingest-results"));
+  const path = $("#ingest-path").value.trim();
   try {
     const result = await fetchJson("/api/ingest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ force: $("#force").checked }),
+      body: JSON.stringify({ force: $("#force").checked, path: path || null }),
     });
     setStatus(
       "#ingest-status",
@@ -283,22 +286,37 @@ $("#run-ingest").addEventListener("click", async () => {
 
 async function refreshDocuments() {
   setStatus("#documents-status", "Loading...");
+  $("#select-all").checked = false;
   try {
     const result = await fetchJson("/api/documents");
     const tbody = $("#documents tbody");
     clearChildren(tbody);
     for (const doc of result.documents) {
       const row = document.createElement("tr");
+
+      const checkCell = document.createElement("td");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.className = "doc-check";
+      check.value = doc.path;
+      checkCell.appendChild(check);
+      row.appendChild(checkCell);
+
       row.appendChild(td(doc.source_file));
       row.appendChild(td(doc.path));
       row.appendChild(td(String(doc.chunks), "num"));
       row.appendChild(td(doc.document_hash.slice(0, 12)));
 
       const actions = document.createElement("td");
+      const inspectBtn = document.createElement("button");
+      inspectBtn.textContent = "Inspect";
+      inspectBtn.className = "secondary mini";
+      inspectBtn.addEventListener("click", () => inspectDocument(doc.source_file));
       const forgetBtn = document.createElement("button");
       forgetBtn.textContent = "Forget";
       forgetBtn.className = "danger mini";
-      forgetBtn.addEventListener("click", () => forgetDocument(doc.path));
+      forgetBtn.addEventListener("click", () => forgetDocuments([doc.path]));
+      actions.appendChild(inspectBtn);
       actions.appendChild(forgetBtn);
       row.appendChild(actions);
       tbody.appendChild(row);
@@ -312,33 +330,108 @@ async function refreshDocuments() {
   }
 }
 
-async function forgetDocument(path) {
-  if (!confirm(`Forget "${path}"?\n\nIts chunks are removed from the vector store; re-ingesting will bring it back.`)) return;
+$("#select-all").addEventListener("change", (e) => {
+  document.querySelectorAll(".doc-check").forEach((c) => { c.checked = e.target.checked; });
+});
+
+$("#forget-selected").addEventListener("click", () => {
+  const paths = Array.from(document.querySelectorAll(".doc-check:checked")).map((c) => c.value);
+  if (!paths.length) {
+    setStatus("#documents-status", "Select one or more documents first.");
+    return;
+  }
+  forgetDocuments(paths);
+});
+
+async function forgetDocuments(paths) {
+  const label = paths.length === 1 ? `"${paths[0]}"` : `${paths.length} documents`;
+  if (!confirm(`Forget ${label}?\n\nChunks are removed from the vector store; the files on disk are untouched and re-ingesting brings them back.`)) return;
   try {
-    await fetchJson(`/api/documents?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+    for (const path of paths) {
+      await fetchJson(`/api/documents?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+    }
     await refreshDocuments();
   } catch (e) {
     setStatus("#documents-status", `Error: ${e.message}`, true);
   }
 }
 
+function renderChunks(chunks) {
+  if (!chunks.length) {
+    $("#chunks-view").textContent = "(no chunks)";
+    return;
+  }
+  $("#chunks-view").textContent = chunks
+    .map((c, i) =>
+      `[${i + 1}] id=${c.id}\n` +
+      `    source_file=${c.source_file}  chunk_index=${c.chunk_index}` +
+      `  section=${c.section || "-"}  module=${c.module || "-"}\n` +
+      `    ${c.text.trim()}`)
+    .join("\n\n");
+}
+
+async function inspectDocument(sourceFile) {
+  setStatus("#documents-status", `Loading chunks for ${sourceFile}...`);
+  try {
+    const result = await fetchJson(`/api/chunks?source_file=${encodeURIComponent(sourceFile)}&limit=50`);
+    renderChunks(result.chunks);
+    setStatus("#documents-status", `${result.chunks.length} chunk(s) from ${sourceFile}`);
+  } catch (e) {
+    setStatus("#documents-status", `Error: ${e.message}`, true);
+  }
+}
+
+$("#show-random").addEventListener("click", async () => {
+  const n = Number($("#sample-n").value) || 5;
+  setStatus("#documents-status", "Sampling chunks...");
+  try {
+    const result = await fetchJson(`/api/chunks?sample=${n}`);
+    renderChunks(result.chunks);
+    setStatus("#documents-status", `${result.chunks.length} random chunk(s)`);
+  } catch (e) {
+    setStatus("#documents-status", `Error: ${e.message}`, true);
+  }
+});
+
 $("#refresh-documents").addEventListener("click", refreshDocuments);
 
 // ---------------------------------------------------------------------------
-// Stats
+// Stats  (store stats + a summary of the effective config)
 // ---------------------------------------------------------------------------
+
+function featuresSummary(r) {
+  const reranker = r.reranker_model ? `${r.reranker_backend}:${r.reranker_model}` : "off";
+  return [
+    `hybrid: ${r.hybrid ? "on" : "off"}`,
+    `HyDE: ${r.use_hyde ? "on" : "off"}`,
+    `decompose: ${r.query_decomposition ? "on" : "off"}`,
+    `MMR: ${r.use_mmr ? "on" : "off"}`,
+    `reranker: ${reranker}`,
+    `multi-query: ${r.multi_query || "off"}`,
+    `neighbors: ±${r.neighbor_radius}`,
+  ].join("  |  ");
+}
 
 async function refreshStats() {
   setStatus("#stats-status", "Loading...");
   try {
-    const stats = await fetchJson("/api/stats");
+    const [stats, cfg] = await Promise.all([
+      fetchJson("/api/stats"),
+      fetchJson("/api/config"),
+    ]);
     const tbody = $("#stats tbody");
     clearChildren(tbody);
     const rows = [
       ["Collection", stats.collection_name],
       ["Chunks indexed", stats.chunks_indexed],
-      ["Persist dir", stats.persist_dir],
+      ["Vector DB path", stats.persist_dir],
       ["Embedding dimension", stats.embedding_dim ?? "(empty)"],
+      ["Embedding provider", `${cfg.embeddings.provider} / ${cfg.embeddings.model}`],
+      ["Chat provider", `${cfg.chat.provider} / ${cfg.chat.model}`],
+      ["Chunk size / overlap", `${cfg.chunking.chunk_size} / ${cfg.chunking.chunk_overlap}`],
+      ["Chunk strategy", cfg.chunking.strategy],
+      ["top_k", cfg.retrieval.top_k],
+      ["Retrieval features", featuresSummary(cfg.retrieval)],
     ];
     for (const [key, value] of rows) {
       const row = document.createElement("tr");
@@ -363,3 +456,52 @@ $("#clear-index").addEventListener("click", async () => {
     setStatus("#stats-status", `Error: ${e.message}`, true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Config (read-only view of the effective server configuration)
+// ---------------------------------------------------------------------------
+
+// Order + which sections to show (skip nothing — the config is non-secret).
+const CONFIG_SECTIONS = [
+  ["chat", "Chat provider"],
+  ["embeddings", "Embedding provider"],
+  ["chunking", "Chunking"],
+  ["retrieval", "Retrieval"],
+  ["ocr", "OCR"],
+  ["vector_store", "Vector store"],
+  ["prompt", "Prompt"],
+  ["paths", "Paths"],
+  ["server", "Server"],
+  ["app", "App"],
+];
+
+async function refreshConfig() {
+  setStatus("#config-status", "Loading...");
+  try {
+    const cfg = await fetchJson("/api/config");
+    const container = $("#config-tables");
+    clearChildren(container);
+    for (const [key, title] of CONFIG_SECTIONS) {
+      const section = cfg[key];
+      if (section == null || typeof section !== "object") continue;
+      const heading = document.createElement("h2");
+      heading.textContent = title;
+      container.appendChild(heading);
+      const table = document.createElement("table");
+      const tbody = document.createElement("tbody");
+      for (const [field, value] of Object.entries(section)) {
+        const row = document.createElement("tr");
+        row.appendChild(td(field));
+        row.appendChild(td(value === null ? "(null)" : String(value)));
+        tbody.appendChild(row);
+      }
+      table.appendChild(tbody);
+      container.appendChild(table);
+    }
+    setStatus("#config-status", "Read-only. Edit the config file + restart to change.");
+  } catch (e) {
+    setStatus("#config-status", `Error: ${e.message}`, true);
+  }
+}
+
+$("#refresh-config").addEventListener("click", refreshConfig);
