@@ -949,7 +949,8 @@ project ships all of them so the seams are visible.
 | CLI (one-shot) | [`cli.py` → `query` / `retrieve` / `inspect` / `eval`](../src/rag_app/cli.py) |
 | CLI (interactive multi-turn) | [`cli.py` → `chat`](../src/rag_app/cli.py) — history list, `/clear`, `/quit` |
 | Desktop GUI | [`gui/app.py`](../src/rag_app/gui/app.py) — five-tab PySide6 window (optional: `pip install -e .[gui]`, `gui.bat` does it for you) |
-| REST API | [`server.py`](../src/rag_app/server.py) — FastAPI; `GET /health`, `POST /api/query`, `POST /api/retrieve`, `POST /api/ingest`, `GET /api/stats`, `DELETE /api/index` |
+| Web UI | [`webui/`](../src/rag_app/webui/) — vanilla HTML/JS served by the API at `/ui/` (Ask with SSE streaming + history, Ingest, Documents with forget, Stats). The GUI for the Docker deployment. |
+| REST API | [`server.py`](../src/rag_app/server.py) — FastAPI; `GET /health`, `POST /api/query`, `POST /api/retrieve`, `POST /api/ingest`, `GET /api/documents`, `DELETE /api/documents`, `GET /api/stats`, `DELETE /api/index` |
 | Docker deployment | [`Dockerfile`](../Dockerfile) (headless, no Qt) + [`docker-compose.yml`](../docker-compose.yml) (volumes for `storage/` + `documents/`, optional `--profile ollama` model server) + [`config.docker.yaml`](../config.docker.yaml) (`server.host: 0.0.0.0`) |
 | Streaming | `ChatProvider.generate_stream` in [`providers/base.py`](../src/rag_app/providers/base.py); native impls in [`ollama_provider.py`](../src/rag_app/providers/ollama_provider.py) and [`lmstudio_provider.py`](../src/rag_app/providers/lmstudio_provider.py) |
 | Multi-turn history | `history: list[ChatMessage]` threaded through `RagService.answer(...)` → `PromptBuilder.build(history=...)` |
@@ -986,10 +987,14 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/query" -Method Post -ContentTy
 # Desktop GUI (PySide6).
 .\gui.bat
 
-# Docker — the REST API as a container (edit config.docker.yaml first
-# so base_url points at your model servers).
+# Web UI — served by the REST server; also works with `run.bat serve`.
+# Open http://127.0.0.1:8000 in a browser (redirects to /ui/).
+
+# Docker — the REST API + web UI as a container (edit config.docker.yaml
+# first so base_url points at your model servers).
 docker compose up --build -d
 curl.exe http://localhost:8000/health
+# ...then browse http://localhost:8000 from any machine on the LAN.
 ```
 
 ### Interview check

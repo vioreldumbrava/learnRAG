@@ -307,18 +307,28 @@ Example query body:
 
 Goal: make the system easier to use.
 
-UI sections:
+This is implemented in the repo as a build-step-free single page served by
+the FastAPI server itself — `src/rag_app/webui/` (`index.html`, `app.js`,
+`style.css`), mounted at `/ui/` (the root URL redirects there). Study the
+pieces, then try to reproduce them from scratch:
 
-1. Upload documents
-2. Ingest documents
-3. Ask question
-4. Show final answer
-5. Show retrieved chunks
-6. Show source metadata
+1. **Ask panel** — streamed answers over SSE (`fetch` + `ReadableStream`
+   parsing, since `EventSource` can't POST), multi-turn history sent back
+   as the `history` array, debug view, metadata filter.
+2. **Ingest panel** — `POST /api/ingest` with per-file indexed/skipped/
+   failed results. (No upload step: drop files into the `documents/`
+   volume, then ingest.)
+3. **Documents panel** — `GET /api/documents` + per-row forget via
+   `DELETE /api/documents?path=...`.
+4. **Stats panel** — `GET /api/stats` + Clear Index.
 
-Good UI learning stack:
+Design constraints worth copying: same-origin serving (no CORS needed),
+zero external assets (works offline), all server data rendered with
+`textContent` (retrieved chunks are untrusted — never `innerHTML`).
 
-- FastAPI backend
+If you want a richer stack as an exercise:
+
+- FastAPI backend (already there)
 - React frontend
 - Or Streamlit for fastest prototype
 

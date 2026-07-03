@@ -1,9 +1,14 @@
 """FastAPI REST server exposing the RAG pipeline as HTTP endpoints (#8).
 
 Endpoints:
+    GET  /                 - redirect to the built-in web UI
+    GET  /ui/              - single-page web UI (static, no build step)
+    GET  /health           - liveness probe
     POST /api/ingest       - trigger ingestion
     POST /api/query        - ask a question (optionally with streaming SSE)
     POST /api/retrieve     - retrieval only, no LLM
+    GET  /api/documents    - list ingested documents
+    DELETE /api/documents  - forget one document (?path=...)
     GET  /api/stats        - store statistics
     DELETE /api/index      - clear the store
 
@@ -13,16 +18,19 @@ Start via CLI:
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rag_app.config import AppConfig, load_config
+from rag_app.ingestion.hash_tracker import HashTracker
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
@@ -112,6 +120,17 @@ class StatsResponse(BaseModel):
     embedding_dim: int | None = None
 
 
+class DocumentEntry(BaseModel):
+    path: str
+    source_file: str
+    chunks: int
+    document_hash: str
+
+
+class DocumentsResponse(BaseModel):
+    documents: list[DocumentEntry]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -144,6 +163,17 @@ def _make_service(cfg: AppConfig, retriever: Retriever) -> RagService:
     return build_rag_service(cfg, retriever, _state.chat_provider)
 
 
+def _source_payload(sources) -> list[dict]:
+    return [
+        {
+            "file": s.metadata.get("source_file", "?"),
+            "chunk_index": s.metadata.get("chunk_index", "?"),
+            "score": s.score,
+        }
+        for s in sources
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -173,9 +203,13 @@ async def api_query(req: QueryRequest):
     if req.stream:
         token_iter, sources = service.answer_stream(req.question, history=history)
 
+        # SSE framing: one sources event up front (retrieval finishes before
+        # generation starts), then one JSON-encoded event per token — raw
+        # tokens would break the protocol when they contain newlines.
         def generate():
+            yield f"data: {json.dumps({'sources': _source_payload(sources)})}\n\n"
             for token in token_iter:
-                yield f"data: {token}\n\n"
+                yield f"data: {json.dumps({'token': token})}\n\n"
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(generate(), media_type="text/event-stream")
@@ -206,14 +240,7 @@ async def api_query(req: QueryRequest):
     answer = service.answer(req.question, history=history)
     return QueryResponse(
         answer=answer.answer,
-        sources=[
-            {
-                "file": s.metadata.get("source_file", "?"),
-                "chunk_index": s.metadata.get("chunk_index", "?"),
-                "score": s.score,
-            }
-            for s in answer.sources
-        ],
+        sources=_source_payload(answer.sources),
     )
 
 
@@ -277,14 +304,66 @@ async def api_stats():
     )
 
 
+@app.get("/api/documents", response_model=DocumentsResponse)
+async def api_documents():
+    """List every ingested document (from the hash-tracker index)."""
+
+    tracker = HashTracker(_state.cfg.paths.index_file)
+    documents = [
+        DocumentEntry(
+            path=path,
+            source_file=str(entry.get("source_file", Path(path).name)),
+            chunks=int(entry.get("chunks", 0)),
+            document_hash=str(entry.get("document_hash", entry.get("hash", ""))),
+        )
+        for path, entry in sorted(tracker.all_entries().items())
+    ]
+    return DocumentsResponse(documents=documents)
+
+
+@app.delete("/api/documents")
+async def api_forget_document(path: str):
+    """Forget one document: evict its chunks and drop its index entry.
+
+    Same flow as the `forget` CLI command, keyed by the indexed path
+    (as returned by GET /api/documents).
+    """
+
+    tracker = HashTracker(_state.cfg.paths.index_file)
+    entry = tracker.all_entries().get(path)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Not in the index: {path}")
+
+    document_hash = entry.get("document_hash") or entry.get("hash")
+    if document_hash:
+        _state.vector_store.delete_by_document_hash(str(document_hash))
+    tracker.remove(path)
+    tracker.save()
+    return {"status": "forgotten", "path": path, "chunks_removed": entry.get("chunks", 0)}
+
+
 @app.delete("/api/index")
 async def api_clear():
     """Clear the vector store."""
 
     _state.vector_store.clear()
     # Also clear the hash tracker.
-    from rag_app.ingestion.hash_tracker import HashTracker
     tracker = HashTracker(_state.cfg.paths.index_file)
     tracker.clear()
     tracker.save()
     return {"status": "cleared"}
+
+
+# ---------------------------------------------------------------------------
+# Built-in web UI (static single page, served same-origin — no CORS needed)
+# ---------------------------------------------------------------------------
+
+_WEBUI_DIR = Path(__file__).parent / "webui"
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> RedirectResponse:
+    return RedirectResponse(url="/ui/")
+
+
+app.mount("/ui", StaticFiles(directory=_WEBUI_DIR, html=True), name="webui")

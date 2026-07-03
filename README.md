@@ -786,13 +786,41 @@ FastAPI-based, hot-config via `config.yaml`. Endpoints:
 
 | method | path | what it does |
 |---|---|---|
+| `GET`  | `/` | Redirects to the built-in web UI at `/ui/`. |
+| `GET`  | `/health` | Liveness probe (no store access) — what container healthchecks hit. |
 | `POST` | `/api/query` | Ask a question. JSON body: `{question, top_k?, debug?, stream?, filter?, history?}`. With `stream: true` returns Server-Sent Events. |
 | `POST` | `/api/retrieve` | Retrieval only. Body: `{question, top_k?, filter?}`. |
 | `POST` | `/api/ingest` | Trigger ingestion. Body: `{force?, path?}`. |
+| `GET`  | `/api/documents` | List every ingested document (path, chunks, hash). |
+| `DELETE` | `/api/documents?path=...` | Forget one document (the REST version of `rag-app forget`). |
 | `GET`  | `/api/stats` | Collection name, chunk count, embedding dim. |
 | `DELETE` | `/api/index` | Wipe the vector store + index. |
 
 OpenAPI / Swagger UI is at `http://127.0.0.1:8000/docs`.
+
+Streaming responses (`stream: true`) are SSE frames with JSON payloads:
+first one `data: {"sources": [...]}` event (retrieval finishes before
+generation starts), then `data: {"token": "..."}` per token, then the
+`data: [DONE]` terminator.
+
+### Built-in web UI
+
+`rag-app serve` also serves a zero-dependency web UI at
+`http://127.0.0.1:8000/ui/` (the root URL redirects there) — plain
+HTML/JS from [`src/rag_app/webui/`](src/rag_app/webui/), no build step.
+Four panels mirror the desktop GUI:
+
+| panel | what it does |
+|---|---|
+| **Ask** | Streaming answers (token by token), multi-turn history, debug view, metadata filter — same features as the GUI's Ask tab. |
+| **Ingest** | Run ingestion (with Force), per-file indexed/skipped/failed results. |
+| **Documents** | Every ingested document with per-row **Forget**. |
+| **Stats** | Collection info + **Clear Index** (with confirmation). |
+
+Settings are deliberately absent: the server's config is a file
+(read-only mount in Docker) — edit it and restart. There is **no
+authentication**: anyone who can reach the port can query *and wipe*
+the index, so don't expose it beyond your LAN.
 
 Example — multi-turn chat via REST:
 
@@ -824,6 +852,12 @@ on Windows/macOS or the Docker engine on Linux.
 docker compose up --build -d               # build + start the API
 curl.exe http://localhost:8000/health      # -> {"status":"ok"}
 ```
+
+Then open `http://localhost:8000` in a browser — the container serves the
+[built-in web UI](#built-in-web-ui) (ask questions, ingest, manage
+documents, stats) from any machine on your LAN. This is the intended
+"GUI" for the Docker deployment; the PySide6 desktop app stays on the
+desktop and should not run against the container's `storage/`.
 
 ### Pointing the container at your model servers
 
@@ -911,7 +945,11 @@ RAG_system/
     document_index.json        # SHA-256 hash tracker (git-ignored)
   src/rag_app/
     cli.py                     # Typer CLI: ingest, query, chat, retrieve, inspect, eval, stats, clear, serve
-    server.py                  # FastAPI REST API
+    server.py                  # FastAPI REST API + static web UI hosting
+    webui/                     # built-in web UI (vanilla HTML/JS, no build step)
+      index.html               # Ask / Ingest / Documents / Stats panels
+      app.js                   # fetch + SSE streaming client
+      style.css                # dark theme
     config.py                  # YAML -> AppConfig (pydantic)
     models.py                  # DocumentChunk, RetrievedChunk, ChatMessage, RagAnswer
     ingestion/
@@ -964,7 +1002,7 @@ RAG_system/
     test_eval_runner.py        # recall/MRR/nDCG scoring
     test_factory.py            # every retrieval flag reaches the Retriever
     test_bm25_cache.py         # BM25 cache reuse + invalidation
-    test_server_endpoints.py   # FastAPI endpoints over the fakes
+    test_server_endpoints.py   # FastAPI endpoints, SSE streaming, web UI serving
 ```
 
 ---

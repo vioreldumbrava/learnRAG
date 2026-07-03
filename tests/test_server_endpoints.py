@@ -150,3 +150,104 @@ def test_clear_index_empties_store_and_tracker(api, tmp_path):
     assert store.stats()["count"] == 0
     # The hash tracker file was (re)written empty.
     assert (tmp_path / "storage" / "index.json").exists()
+
+
+def test_streaming_query_sends_sources_then_tokens(api):
+    client, store, embedder, chat = api
+    _fill(store, embedder)
+    chat.reply = "streamed answer"
+
+    response = client.post(
+        "/api/query", json={"question": "what is chunk 1?", "stream": True},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    frames = [
+        line[len("data: "):]
+        for line in response.text.split("\n\n")
+        if line.startswith("data: ")
+    ]
+    assert frames[-1] == "[DONE]"
+
+    import json as jsonlib
+
+    events = [jsonlib.loads(f) for f in frames[:-1]]
+    # First event carries the sources, before any token arrives.
+    assert "sources" in events[0]
+    assert len(events[0]["sources"]) == 3  # config top_k
+    tokens = [e["token"] for e in events[1:]]
+    assert "".join(tokens) == "streamed answer"
+
+
+def _seed_tracker(tmp_path, entries: dict) -> None:
+    """Write a document_index.json where the server's config points."""
+
+    import json as jsonlib
+
+    index_file = tmp_path / "storage" / "index.json"
+    index_file.parent.mkdir(parents=True, exist_ok=True)
+    index_file.write_text(jsonlib.dumps(entries), encoding="utf-8")
+
+
+def test_documents_lists_tracker_entries(api, tmp_path):
+    client, *_ = api
+    _seed_tracker(tmp_path, {
+        "documents/a.txt": {
+            "hash": "h1", "document_hash": "h1", "chunks": 3, "source_file": "a.txt",
+        },
+        "documents/b.md": {
+            "hash": "h2", "document_hash": "h2", "chunks": 1, "source_file": "b.md",
+        },
+    })
+
+    response = client.get("/api/documents")
+    assert response.status_code == 200
+    docs = response.json()["documents"]
+    assert [d["path"] for d in docs] == ["documents/a.txt", "documents/b.md"]
+    assert docs[0] == {
+        "path": "documents/a.txt", "source_file": "a.txt",
+        "chunks": 3, "document_hash": "h1",
+    }
+
+
+def test_forget_document_removes_chunks_and_entry(api, tmp_path):
+    client, store, embedder, _ = api
+    _fill(store, embedder)  # chunks carry document_hash "d"
+    _seed_tracker(tmp_path, {
+        "documents/a.txt": {
+            "hash": "d", "document_hash": "d", "chunks": 5, "source_file": "a.txt",
+        },
+    })
+
+    response = client.delete("/api/documents", params={"path": "documents/a.txt"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "forgotten"
+    assert body["chunks_removed"] == 5
+    assert store.stats()["count"] == 0  # every chunk had document_hash "d"
+    assert client.get("/api/documents").json()["documents"] == []
+
+
+def test_forget_unknown_document_is_404(api):
+    client, *_ = api
+    response = client.delete("/api/documents", params={"path": "nope.txt"})
+    assert response.status_code == 404
+
+
+def test_root_redirects_to_webui(api):
+    client, *_ = api
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code in (302, 307)
+    assert response.headers["location"] == "/ui/"
+
+
+def test_webui_serves_index_html(api):
+    client, *_ = api
+    response = client.get("/ui/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "local-rag-learning" in response.text
+    # The two static assets the page references resolve too.
+    assert client.get("/ui/app.js").status_code == 200
+    assert client.get("/ui/style.css").status_code == 200

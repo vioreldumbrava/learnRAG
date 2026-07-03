@@ -44,7 +44,7 @@ rag-app = "rag_app.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-rag_app = ["py.typed"]
+rag_app = ["py.typed", "webui/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

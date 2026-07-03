@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>local-rag-learning</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>local-rag-learning</h1>
+  <span id="health" class="health" title="API status">&#9679;</span>
+  <nav>
+    <button class="tab active" data-panel="ask">Ask</button>
+    <button class="tab" data-panel="ingest">Ingest</button>
+    <button class="tab" data-panel="documents">Documents</button>
+    <button class="tab" data-panel="stats">Stats</button>
+  </nav>
+</header>
+
+<main>
+  <!-- Ask ------------------------------------------------------------- -->
+  <section id="panel-ask" class="panel active">
+    <textarea id="question" rows="3"
+      placeholder="Type your question, then press Ask (Ctrl+Enter)"></textarea>
+    <div class="controls">
+      <label><input type="checkbox" id="stream" checked> Stream</label>
+      <label><input type="checkbox" id="debug"> Debug</label>
+      <input type="text" id="filter" placeholder="filter, e.g. module=CAN">
+      <span id="history-label" class="muted"></span>
+      <span class="spacer"></span>
+      <button id="clear-history" class="secondary">Clear History</button>
+      <button id="ask" class="primary">Ask</button>
+    </div>
+    <div id="ask-status" class="status"></div>
+    <pre id="answer" class="answer"></pre>
+    <h2>Sources</h2>
+    <table id="sources">
+      <thead><tr><th>#</th><th>file</th><th>chunk</th><th>score</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="debug-block" hidden>
+      <h2>Debug</h2>
+      <pre id="debug-info"></pre>
+    </div>
+  </section>
+
+  <!-- Ingest ---------------------------------------------------------- -->
+  <section id="panel-ingest" class="panel">
+    <p class="muted">Indexes the server's configured <code>documents/</code>
+      folder. Drop files into that folder (a mounted volume when running in
+      Docker), then run ingest.</p>
+    <div class="controls">
+      <label><input type="checkbox" id="force"> Force re-ingest</label>
+      <span class="spacer"></span>
+      <button id="run-ingest" class="primary">Run Ingest</button>
+    </div>
+    <div id="ingest-status" class="status"></div>
+    <div id="ingest-results"></div>
+  </section>
+
+  <!-- Documents ------------------------------------------------------- -->
+  <section id="panel-documents" class="panel">
+    <div class="controls">
+      <span id="documents-status" class="status"></span>
+      <span class="spacer"></span>
+      <button id="refresh-documents" class="secondary">Refresh</button>
+    </div>
+    <table id="documents">
+      <thead><tr><th>file</th><th>path</th><th>chunks</th><th>hash</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- Stats ----------------------------------------------------------- -->
+  <section id="panel-stats" class="panel">
+    <div class="controls">
+      <span id="stats-status" class="status"></span>
+      <span class="spacer"></span>
+      <button id="refresh-stats" class="secondary">Refresh</button>
+      <button id="clear-index" class="danger">Clear Index</button>
+    </div>
+    <table id="stats"><tbody></tbody></table>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

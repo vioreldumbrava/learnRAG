@@ -119,7 +119,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 - **Score threshold** — Drop retrieved chunks farther than X. Lets retrieval honestly return "nothing relevant."
 - **Sparse retrieval** — Retrieval based on exact tokens (BM25, TF-IDF). Complement to dense retrieval.
-- **SSE (Server-Sent Events)** — One-way HTTP streaming protocol: server pushes `data: ...` lines until `[DONE]`. Used by this project's REST API for `stream: true` query responses.
+- **SSE (Server-Sent Events)** — One-way HTTP streaming protocol: server pushes `data: ...` frames until `[DONE]`. This project's `stream: true` query responses send JSON payloads: one `{"sources": [...]}` event first, then one `{"token": "..."}` per token (JSON-encoding keeps multi-line tokens protocol-safe).
 - **Streaming** — Return tokens to the user as generated, instead of buffering the whole answer. Cuts perceived latency.
 
 ## T
