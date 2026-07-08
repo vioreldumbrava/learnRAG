@@ -34,6 +34,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 ## D
 
 - **Dense retrieval** — Retrieval via embedding similarity (as opposed to keyword / BM25 retrieval).
+- **Document loader** — Framework component that reads a source (file, URL, DB) into a standard document object. LangChain `DirectoryLoader`/`TextLoader`, LlamaIndex `SimpleDirectoryReader` — this repo's `ingestion/document_loader.py`.
 - **Dimension** — Length of the embedding vector. Property of the model: 384–3072 typical.
 - **Dot product** — `sum(a_i * b_i)`. Cosine without normalisation. Fast but only meaningful for unit-length vectors.
 
@@ -77,6 +78,11 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 ## L
 
 - **L2 distance** — Euclidean distance. `sqrt(sum((a_i - b_i)^2))`. Equivalent to cosine for unit-length vectors.
+- **LangChain** — Broad LLM-app toolkit: composable loaders/splitters/vector-stores/retrievers/LLMs wired with LCEL. This project maps its from-scratch pieces to LangChain in [`05_FRAMEWORKS.md`](05_FRAMEWORKS.md) + [`examples/langchain_rag.py`](../examples/langchain_rag.py).
+- **LangGraph** — LangChain's library for stateful, cyclic graphs (agents, multi-hop). The framework parallel to this repo's `Retriever._run_hops`; see [`examples/langgraph_agentic_rag.py`](../examples/langgraph_agentic_rag.py).
+- **LangSmith** — Hosted tracing / dataset / eval product for LangChain apps. The managed cousin of this repo's `utils/metrics.py` + `eval/runner.py`.
+- **LCEL (LangChain Expression Language)** — Composing `Runnable`s with the `|` pipe into a chain that gets `.invoke`/`.stream`/`.batch`/async for free. LangChain's version of this repo's retrieve→prompt→generate flow.
+- **LlamaIndex** — Data/RAG-first framework organised as Documents → Nodes → Index → QueryEngine. Mapped in [`05_FRAMEWORKS.md`](05_FRAMEWORKS.md) + [`examples/llamaindex_rag.py`](../examples/llamaindex_rag.py).
 - **LLM-as-judge** — Using a (usually stronger) LLM to score the output of your production LLM. Common in RAGAS.
 - **LRU (Least Recently Used)** — Eviction policy: when the cache is full, drop the entry untouched for the longest. Both query-path caches here are LRU-bounded.
 - **Lost in the middle** — LLMs attend less to the middle of long prompts than to start/end. Put highest-ranked chunks at edges of the context.
@@ -93,6 +99,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 ## N
 
 - **NDCG** — Normalised Discounted Cumulative Gain. Standard IR ranking metric with log-scale rank discount.
+- **Node (LlamaIndex)** — LlamaIndex's unit of indexed content — a chunk plus metadata and relationships. Its `SentenceSplitter` (a *node parser*) is this repo's `Chunker`.
 - **Neighbor expansion** — After ranking, stitch the ±N adjacent chunks of each hit into its text so the LLM sees the surrounding context. Match small, read wide. Toggle `retrieval.neighbor_radius: 1` in this project. Also called *sentence-window retrieval*.
 
 ## O
@@ -110,12 +117,14 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 ## Q
 
 - **Qdrant** — Open-source vector database (embedded or server). This project's optional second `VectorStore` backend behind the `[qdrant]` extra; point ids are UUIDs and search returns similarity (converted to distance in the adapter).
+- **Query engine (LlamaIndex)** — `index.as_query_engine()` — bundles a retriever + a response synthesizer (compact/refine/tree_summarize) + prompt templating. The LlamaIndex equivalent of this repo's `RagService.answer`.
 - **Query expansion** — General term for any technique that augments the user's literal question (multi-query, HyDE, decomposition).
 
 ## R
 
 - **RAG** — Retrieval-Augmented Generation. The architecture this whole project implements.
 - **RAGAS** — Most common open-source RAG eval framework. Computes faithfulness, answer relevance, context relevance with LLM judges.
+- **Runnable (LangChain)** — The interface every LCEL step implements (`.invoke`/`.stream`/`.batch`/async). Compose them with `|` to build a chain.
 - **Recall@k** — Fraction of expected sources that appear in top-K retrieved chunks. First retrieval metric most teams track.
 - **Reranker** — Second-stage model that re-scores a candidate pool jointly with the query. This project supports an LLM scorer and an optional `sentence-transformers` CrossEncoder backend — see [`reranker.py`](../src/rag_app/retrieval/reranker.py).
 - **REST API** — HTTP wrapper around the RAG pipeline; lets non-Python clients query the system. This project ships one in [`server.py`](../src/rag_app/server.py) via FastAPI.
@@ -134,6 +143,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 ## T
 
 - **Tesseract** — The open-source OCR engine this project shells out to for scanned pages/images. Language(s) set via `ocr.lang` (e.g. `eng`, `eng+deu`).
+- **Trulens** — Open-source LLM-app eval/observability library (an alternative to RAGAS/LangSmith) for scoring RAG groundedness/relevance.
 - **Token** — The unit the LLM operates on (~3–4 characters of English). Context windows, costs, and rate limits are all in tokens.
 - **top_k** — Number of chunks to retrieve per query.
 

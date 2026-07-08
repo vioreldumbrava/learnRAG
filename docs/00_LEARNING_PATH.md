@@ -1,6 +1,6 @@
 # RAG Learning Path
 
-An 11-stage walkthrough that takes you from "what is RAG?" to "I can answer
+A 12-stage walkthrough that takes you from "what is RAG?" to "I can answer
 mid-level interview questions about it." Each stage uses the running code in
 this repo as its lab.
 
@@ -12,6 +12,8 @@ this repo as its lab.
 - [04_SENIOR_DEEP_DIVE.md](04_SENIOR_DEEP_DIVE.md) — senior-level deep dive:
   trade-offs, system design, war stories, newer techniques (Contextual
   Retrieval, ColBERT, prompt caching, …).
+- [05_FRAMEWORKS.md](05_FRAMEWORKS.md) — LangChain & LlamaIndex mapped onto
+  everything you built here, with runnable [`examples/`](../examples/).
 
 **Each stage has the same shape:**
 
@@ -45,6 +47,7 @@ Tick a stage once you've cleared its **Checkpoint**:
       neighbors, multi-hop, contextual retrieval)
 - [ ] Stage 10 — Production Concerns (incl. caching & observability)
 - [ ] Stage 11 — Operating the System (CLI / GUI / Web / REST / Docker)
+- [ ] Stage 12 — Frameworks: LangChain & LlamaIndex
 
 ---
 
@@ -1479,6 +1482,113 @@ the image.
 
 ---
 
+## Stage 12 — Frameworks: LangChain & LlamaIndex
+
+### Concept
+
+Everything through Stage 11 you built **from scratch** — that's how you learned
+what RAG actually does. But most job postings list **LangChain** and/or
+**LlamaIndex**, and interviewers expect you to speak both. The good news: the
+frameworks are just *named abstractions* over the exact pieces you already
+built. Your `Chunker` is their `RecursiveCharacterTextSplitter` /
+`SentenceSplitter`; your `Retriever.retrieve` is `vectorstore.as_retriever()`
+/ `index.as_retriever()`; your `RagService.answer` is an LCEL chain
+(`prompt | llm | parser`) or a LlamaIndex query engine. Having built it once,
+you can pick up a framework in an afternoon **and** reason about what it hides
+when it misbehaves — which is exactly what senior interviews probe.
+
+- **LangChain** — composable pieces wired with **LCEL** (the `|` pipe);
+  **LangGraph** adds stateful graphs for agents; **LangSmith** is hosted
+  tracing/eval.
+- **LlamaIndex** — data-first, organised as Documents → **Nodes** → **Index**
+  → **QueryEngine** (retriever + response synthesizer bundled together).
+
+### In this code
+
+The core stays framework-free on purpose. The frameworks live only under
+[`examples/`](../examples/), behind optional extras, each line annotated with
+the `src/rag_app/` file it mirrors:
+
+| example | mirrors |
+|---|---|
+| [`examples/langchain_rag.py`](../examples/langchain_rag.py) | the whole ingest→retrieve→answer flow as an LCEL chain |
+| [`examples/llamaindex_rag.py`](../examples/llamaindex_rag.py) | `VectorStoreIndex` + query engine |
+| [`examples/langgraph_agentic_rag.py`](../examples/langgraph_agentic_rag.py) | **multi-hop** (`Retriever._run_hops`) as a LangGraph state machine |
+
+The full component→LangChain→LlamaIndex mapping table, LCEL-vs-query-engine
+mental models, agents, eval/observability, and "framework vs roll-your-own"
+trade-offs are in [05_FRAMEWORKS.md](05_FRAMEWORKS.md).
+
+### Try it
+
+```powershell
+pip install -e .[langchain]        # LangChain + LangGraph
+pip install -e .[llamaindex]       # LlamaIndex
+# Start Ollama / LM Studio (same as the from-scratch app), then:
+python -m examples.langchain_rag  --ingest -q "What happens if NBRP and DBRP are different?"
+python -m examples.llamaindex_rag --ingest -q "What happens if NBRP and DBRP are different?"
+.\run.bat query                          "What happens if NBRP and DBRP are different?"
+```
+
+Compare the three answers — same models, same docs, three implementations.
+Each example writes to its **own** Chroma collection, so your from-scratch
+index is untouched.
+
+### Exercises
+
+#### Exercise 12.1 — Read the mapping, not the magic (~15 min)
+
+**Goal:** connect one framework line to your own code. **Steps:** open
+`examples/langchain_rag.py` next to `src/rag_app/retrieval/rag_service.py`;
+find the LCEL chain and name which from-scratch method each stage
+(`retriever`, `prompt`, `llm`, parser) corresponds to. **Expected:** you can
+say "this `|` step is my `Retriever.retrieve`, this is `PromptBuilder.build`,
+this is `chat.generate`."
+
+#### Exercise 12.2 — Agentic multi-hop, two ways (~15 min)
+
+**Goal:** see the same control flow hand-rolled vs. graph-based. **Steps:**
+run `.\run.bat query "..." --debug` with `retrieval.multi_hop: true` (Stage
+9-F) and `python -m examples.langgraph_agentic_rag --ingest -q "..."`; compare
+the hop behaviour. **Expected:** both retrieve→decide→retrieve→answer; the
+LangGraph version makes the loop an explicit state machine.
+
+<details>
+<summary>What you should have seen</summary>
+
+Same idea, different packaging. Your `_run_hops` loop and the LangGraph
+`retrieve → decide → (loop | answer)` graph implement the same feedback loop
+with the same guards (a hop cap, a "done" signal). LangGraph earns its keep
+once you add branches, retries, or tools; for a two-hop loop the from-scratch
+version is simpler — which is why this repo ships both.
+</details>
+
+### Checkpoint
+
+- [ ] I installed a framework extra and ran an example against the same models
+      as the from-scratch app, and compared answers.
+- [ ] I can map at least five of my from-scratch components to their LangChain
+      **and** LlamaIndex equivalents without looking.
+- [ ] I can explain what LCEL is, what `as_query_engine()` hides, and when I'd
+      reach for a framework vs. roll my own.
+
+### Interview check
+
+- **Q: You built this without LangChain — can you use LangChain?**
+  Yes, and better for having built it by hand: I know what each abstraction
+  hides. `RecursiveCharacterTextSplitter` is my chunker, `as_retriever()` is my
+  retriever, an LCEL chain is my `RagService.answer`. See `examples/`.
+- **Q: LangChain vs LlamaIndex?**
+  Heavy overlap. LlamaIndex is data/RAG-first (strong index + query-engine
+  abstractions); LangChain is orchestration/agent-first (LCEL + LangGraph).
+  Choose by where the complexity is, or mix them.
+- **Q: When would you NOT use a framework?**
+  Simple/stable flows, tight latency/token budgets, minimising dependency
+  weight and churn, or when debugging and the abstraction is in the way — keep
+  the hot path thin, use the framework for ingestion/loaders.
+
+---
+
 ## Closing — How to use these docs for interview prep
 
 1. **Day 1:** read this file top to bottom. Run every "Try it" command.
@@ -1492,7 +1602,10 @@ the image.
    [`04_SENIOR_DEEP_DIVE.md`](04_SENIOR_DEEP_DIVE.md). Focus on the
    trade-off decision tree (§1), the system-design sketch (§2), and the
    war stories (§3) — those are where senior interviews live.
-5. The day before the interview: skim
+5. **If the role lists LangChain/LlamaIndex:** work Stage 12 and
+   [`05_FRAMEWORKS.md`](05_FRAMEWORKS.md), and run the [`examples/`](../examples/).
+   Practice mapping each from-scratch component to its framework equivalent.
+6. The day before the interview: skim
    [`03_GLOSSARY.md`](03_GLOSSARY.md) for vocabulary you might blank on.
 
 When an interviewer asks something like "walk me through how a RAG system

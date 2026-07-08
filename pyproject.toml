@@ -39,6 +39,24 @@ reranker = [
 qdrant = [
     "qdrant-client>=1.9",
 ]
+# Optional framework learning track (examples/ only — the core stays
+# framework-free). See docs/05_FRAMEWORKS.md.
+langchain = [
+    "langchain-core>=0.3",
+    "langchain-chroma>=0.1",
+    "langchain-ollama>=0.2",
+    "langchain-openai>=0.2",
+    "langchain-text-splitters>=0.3",
+    "langgraph>=0.2",
+]
+llamaindex = [
+    "llama-index-core>=0.11",
+    "llama-index-llms-ollama>=0.3",
+    "llama-index-embeddings-ollama>=0.3",
+    "llama-index-vector-stores-chroma>=0.2",
+    "llama-index-llms-openai-like>=0.2",
+    "llama-index-embeddings-openai-like>=0.1",
+]
 
 [project.scripts]
 rag-app = "rag_app.cli:app"

@@ -575,6 +575,30 @@ Knowing when *not* to RAG is a senior signal.
 
 ---
 
+## 12b. Frameworks in production (build vs buy, lock-in)
+
+"Would you use LangChain / LlamaIndex here?" is a senior trap — there's no
+dogmatic answer, and picking a side without naming the trade-off is the wrong
+one. Full mapping + runnable examples are in
+[05_FRAMEWORKS.md](05_FRAMEWORKS.md); the senior framing:
+
+- **Buy (framework) when:** breadth matters (dozens of loaders / vector stores
+  / rerankers behind one interface), you're prototyping, you need agent/tool
+  plumbing (LangGraph), or you want managed tracing + eval (LangSmith).
+- **Build (thin / from scratch) when:** the flow is simple and stable, you need
+  tight control over latency / tokens / prompts, you want to minimise
+  dependency weight and API churn, or the abstraction is obstructing a debug.
+- **The costs to name out loud:** dependency weight and fast-moving APIs
+  (breaking changes between minor versions), **abstraction leakage** (you still
+  must understand chunking/retrieval to tune them — the framework doesn't
+  absolve you), and **lock-in**. Many teams split the difference: framework for
+  ingestion/loaders, hand-written for the hot query path.
+- **The meta-point:** because you built the internals, adopting *or* dropping a
+  framework is a reversible engineering choice, not a rewrite. That optionality
+  is itself the argument for understanding the layer beneath the framework.
+
+---
+
 ## 13. Senior interview questions
 
 ### System design

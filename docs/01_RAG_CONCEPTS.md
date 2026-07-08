@@ -833,6 +833,27 @@ Heavy ingestion cost, more infra.
 
 ---
 
+## Frameworks (LangChain / LlamaIndex)
+
+**What:** The from-scratch components in this project each have a named
+equivalent in the popular RAG frameworks. **LangChain** composes pieces with
+**LCEL** (the `|` pipe) and adds **LangGraph** for agents; **LlamaIndex** is
+data-first (Documents → Nodes → Index → QueryEngine). Knowing the mapping —
+`Chunker` ↔ `RecursiveCharacterTextSplitter`/`SentenceSplitter`,
+`Retriever.retrieve` ↔ `as_retriever()`, `RagService.answer` ↔ an LCEL chain /
+a query engine — lets you move between "roll your own" and "use a framework"
+deliberately instead of cargo-culting.
+
+**When it matters:** Most job postings list one or both. Having built the
+internals, you can pick a framework up quickly *and* debug it when the
+abstraction leaks.
+
+**Where in this code:** the full mapping table, runnable examples, agents, and
+eval/observability equivalents are in
+[05_FRAMEWORKS.md](05_FRAMEWORKS.md) + [`examples/`](../examples/).
+
+---
+
 ## Quick decision crib
 
 A few common interview "what would you reach for?" scenarios:

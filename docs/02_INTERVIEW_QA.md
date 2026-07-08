@@ -607,3 +607,56 @@ at a time, compare mean recall@k between runs. For end-to-end quality,
 run without `--skip-llm` and watch keyword-recall in the answer.
 Without an eval set, every "I think this is better" is a vibe; vibes
 lie.
+
+---
+
+## Frameworks (LangChain / LlamaIndex)
+
+Full treatment in [05_FRAMEWORKS.md](05_FRAMEWORKS.md); runnable parallels in
+[`examples/`](../examples/).
+
+### 56. This project is framework-free — can you use LangChain / LlamaIndex?
+
+Yes, and building it by hand makes me *better* with them: I know what each
+abstraction hides. `RecursiveCharacterTextSplitter` / `SentenceSplitter` is my
+`Chunker`; `vectorstore.as_retriever()` / `index.as_retriever()` is my
+`Retriever.retrieve`; an LCEL chain (`prompt | llm | parser`) or a LlamaIndex
+query engine is my `RagService.answer`. See `examples/langchain_rag.py` and
+`examples/llamaindex_rag.py`.
+
+### 57. LangChain vs LlamaIndex — how do you choose?
+
+Heavy overlap. LlamaIndex is data/RAG-first (strong Documents→Nodes→Index→
+QueryEngine abstractions); LangChain is orchestration/agent-first (LCEL +
+LangGraph). Pick by where the complexity is — index/retrieval leans LlamaIndex,
+multi-step agent/tool flows lean LangChain/LangGraph — or mix them.
+
+### 58. What is LCEL and what does `index.as_query_engine()` hide?
+
+LCEL is composing `Runnable`s with `|` into a chain that gets
+`.invoke`/`.stream`/`.batch`/async for free — it *exposes* the pipeline. A
+LlamaIndex query engine *encapsulates* it: `as_query_engine()` bundles a
+retriever + a response synthesizer (how top-k chunks are combined:
+compact/refine/tree_summarize) + prompt templating. Both bottom out in the same
+retrieve→prompt→generate you built by hand.
+
+### 59. When would you NOT use a framework?
+
+Simple/stable flows, tight latency or token budgets, minimising dependency
+weight and API churn, or when debugging and the abstraction is in the way. A
+common middle ground: framework for ingestion/loaders, hand-written for the hot
+query path.
+
+### 60. LangGraph vs a hand-rolled multi-hop loop?
+
+Same idea (retrieve→decide→retrieve→answer). LangGraph makes the control flow
+an explicit, inspectable state machine — worth it once you have branches,
+retries, tools, or human-in-the-loop; overkill for a two-hop loop. This repo
+ships both: `Retriever._run_hops` and `examples/langgraph_agentic_rag.py`.
+
+### 61. How would you evaluate a framework-based RAG app?
+
+The same metrics you already know — recall@k / MRR / nDCG for retrieval,
+faithfulness / answer-relevance for generation — via RAGAS, LlamaIndex evals,
+or LangSmith datasets. The framework changes *how* you wire the eval, not
+*what* you measure.

@@ -1,23 +1,27 @@
 # local-rag-learning
 
-A framework-free **Retrieval-Augmented Generation** project for learning
-how RAG works internally and (now) for putting modern RAG techniques in
-your hands one config flag at a time. Everything is local: documents on
-disk, a local vector database (ChromaDB), and a local LLM served by
-**Ollama** or **LM Studio**. No cloud APIs, no LangChain, no LlamaIndex.
+A **Retrieval-Augmented Generation** project for learning how RAG works
+internally and (now) for putting modern RAG techniques in your hands one
+config flag at a time. Everything is local: documents on disk, a local vector
+database (ChromaDB), and a local LLM served by **Ollama** or **LM Studio**. No
+cloud APIs. The **core is framework-free on purpose** — the RAG flow is written
+out in plain Python so you can read it top-to-bottom — but for the many roles
+that require LangChain/LlamaIndex, the same pipeline is rebuilt with those
+frameworks in [`examples/`](examples/) + [docs/05_FRAMEWORKS.md](docs/05_FRAMEWORKS.md).
 
 The whole RAG flow is written out explicitly in plain Python so it can be
 read top-to-bottom. Advanced features (hybrid search, HyDE, multi-query,
-query decomposition, MMR, reranker, neighbor expansion, multi-turn chat,
-streaming, REST API) are layered on the same explicit core — each one
-toggled by a single line in `config.yaml`.
+query decomposition, MMR, reranker, neighbor expansion, multi-hop, contextual
+retrieval, caching, multi-turn chat, streaming, REST API) are layered on the
+same explicit core — each one toggled by a single line in `config.yaml`.
 
 > 📚 **Learning RAG?** Read [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md)
-> first — an 11-stage walkthrough mapping each app feature to a RAG concept,
+> first — a 12-stage walkthrough mapping each app feature to a RAG concept,
 > with a companion [interview Q&A](docs/02_INTERVIEW_QA.md) (~55 mid-level
 > questions), [senior deep dive](docs/04_SENIOR_DEEP_DIVE.md) (trade-offs,
 > system design, war stories), [concept reference](docs/01_RAG_CONCEPTS.md),
-> and [glossary](docs/03_GLOSSARY.md).
+> [glossary](docs/03_GLOSSARY.md), and a
+> [LangChain/LlamaIndex track](docs/05_FRAMEWORKS.md) with runnable examples.
 
 ---
 
@@ -1109,7 +1113,7 @@ RAG_system/
   Dockerfile                   # headless REST API image (optional OCR build arg)
   docker-compose.yml           # rag-api service + optional `ollama` profile
   docs/                        # 📚 RAG learning path (start here)
-    00_LEARNING_PATH.md        # 11-stage walkthrough mapping features → concepts
+    00_LEARNING_PATH.md        # 12-stage walkthrough mapping features → concepts
     01_RAG_CONCEPTS.md         # concept-by-concept reference
     02_INTERVIEW_QA.md         # ~55 mid-level interview questions + answers
     03_GLOSSARY.md             # one-line vocabulary
@@ -1191,7 +1195,13 @@ RAG_system/
     test_vectorstore_factory.py# chroma/qdrant selection + missing-dep error
     test_contextual_ingest.py  # contextual retrieval at ingest time
     test_config_docs.py        # every config field is documented (drift guard)
+    test_examples_import.py    # framework examples build (skipped without extras)
     test_server_endpoints.py   # FastAPI endpoints, SSE streaming, web UI serving
+  examples/                    # LangChain/LlamaIndex parallels ([langchain]/[llamaindex] extras)
+    _providers.py              # config -> framework LLM/embeddings translation
+    langchain_rag.py           # LCEL pipeline
+    llamaindex_rag.py          # VectorStoreIndex + query engine
+    langgraph_agentic_rag.py   # multi-hop as a LangGraph state machine
 ```
 
 ---
@@ -1204,7 +1214,9 @@ pytest
 
 Tests do **not** require Ollama or LM Studio to be running. Every
 external dependency is mocked via the fakes in
-[tests/conftest.py](tests/conftest.py).
+[tests/conftest.py](tests/conftest.py). The framework example tests
+(`test_examples_import.py`) skip automatically unless the `[langchain]` /
+`[llamaindex]` extras are installed, so the default run stays lightweight.
 
 ---
 
