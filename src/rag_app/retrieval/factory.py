@@ -52,9 +52,21 @@ def build_retriever(
     """
 
     r = cfg.retrieval
-    needs_llm = r.use_hyde or r.multi_query > 0 or r.query_decomposition
+    needs_llm = (
+        r.use_hyde or r.multi_query > 0 or r.query_decomposition or r.multi_hop
+    )
     if return_candidates is None:
         return_candidates = reranker_enabled(cfg, chat_provider) and not r.use_mmr
+
+    # Query-embedding cache wraps only the retrieval provider — ingestion keeps
+    # the raw provider (bulk embed_texts is left uncached).
+    if cfg.cache.embedding:
+        from rag_app.retrieval.cache import CachedEmbeddingProvider, get_embedding_cache
+
+        embedding_provider = CachedEmbeddingProvider(
+            embedding_provider, get_embedding_cache(cfg.cache.max_entries)
+        )
+
     return Retriever(
         embedding_provider=embedding_provider,
         vector_store=vector_store,
@@ -73,6 +85,8 @@ def build_retriever(
         mmr_lambda=r.mmr_lambda,
         return_candidates=return_candidates,
         neighbor_radius=r.neighbor_radius,
+        multi_hop=r.multi_hop,
+        multi_hop_max_hops=r.multi_hop_max_hops,
         chat_provider=chat_provider if needs_llm else None,
         where=where,
     )
@@ -94,6 +108,11 @@ def build_rag_service(
         if cfg.retrieval.reranker_model and cfg.retrieval.reranker_backend == "llm"
         else None
     )
+    answer_cache = None
+    if cfg.cache.answer:
+        from rag_app.retrieval.cache import get_answer_cache
+
+        answer_cache = get_answer_cache(cfg.cache.max_entries)
     return RagService(
         retriever=retriever,
         prompt_builder=prompt_builder,
@@ -104,4 +123,6 @@ def build_rag_service(
         reranker_top_k=cfg.retrieval.top_k,
         reranker_model=cfg.retrieval.reranker_model,
         reranker_backend=cfg.retrieval.reranker_backend,
+        answer_cache=answer_cache,
+        log_timings=cfg.observability.log_timings,
     )

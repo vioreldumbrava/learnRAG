@@ -1,5 +1,10 @@
 # Codex Implementation Prompt: Local RAG Learning System
 
+> **Historical document (frozen).** This is the original prompt used to
+> generate the first version of the codebase. It is kept for reference only.
+> The living curriculum is [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md);
+> the living feature/config reference is README §7/§8.
+
 You are an expert Python engineer. Build a local Retrieval-Augmented Generation learning project based on the requirements below.
 
 The purpose of this project is not only to build a working RAG system, but also to make the code understandable for a developer learning how RAG works internally.

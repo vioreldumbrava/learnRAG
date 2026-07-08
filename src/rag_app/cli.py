@@ -32,7 +32,8 @@ from rag_app.providers.factory import build_chat_provider, build_embedding_provi
 from rag_app.retrieval.factory import build_rag_service, build_retriever
 from rag_app.retrieval.rag_service import DebugInfo
 from rag_app.utils.logging import setup_logging
-from rag_app.vectorstores.chroma_store import ChromaVectorStore
+from rag_app.vectorstores.base import VectorStore
+from rag_app.vectorstores.factory import build_vector_store
 
 
 app = typer.Typer(
@@ -65,11 +66,8 @@ def _load(config_path: Path) -> AppConfig:
         raise typer.Exit(code=2)
 
 
-def _make_vector_store(config: AppConfig) -> ChromaVectorStore:
-    return ChromaVectorStore(
-        persist_dir=config.paths.chroma_dir,
-        collection_name=config.vector_store.collection_name,
-    )
+def _make_vector_store(config: AppConfig) -> VectorStore:
+    return build_vector_store(config)
 
 
 def _parse_filters(filter_str: str | None) -> dict | None:
@@ -108,16 +106,33 @@ def ingest(
         "--path",
         help="Ingest a single file instead of scanning the documents folder.",
     ),
+    ocr: Optional[bool] = typer.Option(
+        None,
+        "--ocr/--no-ocr",
+        help="Override ocr.enabled for this run (scanned PDFs / images).",
+    ),
 ) -> None:
     """Scan the documents folder, chunk, embed, and store everything."""
 
     cfg = _load(config)
     setup_logging(cfg.app.debug)
 
+    # --ocr/--no-ocr overrides the config just for this run (mirrors --top-k).
+    if ocr is not None:
+        cfg.ocr.enabled = ocr
+
     embedding_provider = build_embedding_provider(cfg.embeddings)
     vector_store = _make_vector_store(cfg)
-    service = IngestService(cfg, embedding_provider, vector_store)
+    # Contextual retrieval needs the chat model at ingest time.
+    ingest_chat = build_chat_provider(cfg.chat) if cfg.chunking.contextual else None
+    service = IngestService(cfg, embedding_provider, vector_store, ingest_chat)
 
+    ocr_state = f"on ({cfg.ocr.lang})" if cfg.ocr.enabled else "off"
+    contextual_state = (
+        "on (~1 chat LLM call per chunk — slow with local models)"
+        if cfg.chunking.contextual
+        else "off"
+    )
     console.print(
         Panel.fit(
             f"[bold]Ingesting[/bold]\n"
@@ -125,6 +140,8 @@ def ingest(
             f"Chroma dir:    {cfg.paths.chroma_dir}\n"
             f"Embeddings:    {cfg.embeddings.provider} / {cfg.embeddings.model}\n"
             f"Strategy:      {cfg.chunking.strategy}\n"
+            f"OCR:           {ocr_state}\n"
+            f"Contextual:    {contextual_state}\n"
             f"Force:         {force}",
             title="rag-app ingest",
             border_style="cyan",
@@ -302,7 +319,8 @@ def chat(
             f"MMR: {cfg.retrieval.use_mmr} | "
             f"Reranker: {cfg.retrieval.reranker_model or 'off'} | "
             f"Multi-query: {cfg.retrieval.multi_query or 'off'} | "
-            f"Neighbors: ±{cfg.retrieval.neighbor_radius}",
+            f"Neighbors: ±{cfg.retrieval.neighbor_radius} | "
+            f"Multi-hop: {f'max {cfg.retrieval.multi_hop_max_hops}' if cfg.retrieval.multi_hop else 'off'}",
             title="rag-app chat",
             border_style="green",
         )
@@ -590,6 +608,7 @@ def stats(config: Path = ConfigOption) -> None:
     table = Table(title="rag-app stats", show_header=False, border_style="cyan")
     table.add_column("key", style="bold")
     table.add_column("value")
+    table.add_row("Vector store", cfg.vector_store.provider)
     table.add_row("Collection", str(s.get("collection_name")))
     table.add_row("Chunks indexed", str(s.get("count")))
     table.add_row("Vector DB path", str(s.get("persist_dir")))
@@ -600,6 +619,14 @@ def stats(config: Path = ConfigOption) -> None:
     table.add_row("Chat provider", f"{cfg.chat.provider} / {cfg.chat.model}")
     table.add_row("Chunk size / overlap", f"{cfg.chunking.chunk_size} / {cfg.chunking.chunk_overlap}")
     table.add_row("Chunk strategy", cfg.chunking.strategy)
+    table.add_row(
+        "Contextual ingest",
+        "on" if cfg.chunking.contextual else "off",
+    )
+    table.add_row(
+        "OCR",
+        f"on ({cfg.ocr.lang})" if cfg.ocr.enabled else "off",
+    )
     table.add_row("top_k", str(cfg.retrieval.top_k))
     table.add_row("Hybrid search", "on" if cfg.retrieval.hybrid else "off")
     table.add_row("HyDE", "on" if cfg.retrieval.use_hyde else "off")
@@ -638,6 +665,25 @@ def stats(config: Path = ConfigOption) -> None:
     table.add_row(
         "Neighbor expansion",
         f"on (radius {cfg.retrieval.neighbor_radius})" if cfg.retrieval.neighbor_radius else "off",
+    )
+    table.add_row(
+        "Multi-hop",
+        (
+            f"on (max {cfg.retrieval.multi_hop_max_hops} hops)"
+            if cfg.retrieval.multi_hop
+            else "off"
+        ),
+    )
+    table.add_row(
+        "Embedding cache",
+        f"on (max {cfg.cache.max_entries})" if cfg.cache.embedding else "off",
+    )
+    table.add_row(
+        "Answer cache",
+        f"on (max {cfg.cache.max_entries})" if cfg.cache.answer else "off",
+    )
+    table.add_row(
+        "Timing log", "on" if cfg.observability.log_timings else "off",
     )
     console.print(table)
 
@@ -973,14 +1019,39 @@ def _print_debug(debug: DebugInfo) -> None:
     info.add_row("Embedding", f"{debug.embedding_provider} / {debug.embedding_model}")
     info.add_row("Chat",      f"{debug.chat_provider} / {debug.chat_model}")
     info.add_row("Chunks retrieved", str(len(debug.retrieved_chunks)))
+    if debug.hop_queries:
+        info.add_row("Hops", f"{len(debug.hop_queries)} follow-up(s)")
     info.add_row("Prompt chars",     str(debug.prompt_char_count))
+    info.add_row(
+        "Answer cache", "HIT" if debug.answer_cache_hit else "miss",
+    )
     console.print(info)
 
+    if debug.timings:
+        timings_table = Table(title="Per-stage timing", border_style="magenta")
+        timings_table.add_column("stage")
+        timings_table.add_column("ms", justify="right")
+        for stage, ms in debug.timings.items():
+            timings_table.add_row(stage, f"{ms:.1f}")
+        console.print(timings_table)
+
+    if debug.hop_queries:
+        hops_table = Table(title="Multi-hop follow-up queries", border_style="magenta")
+        hops_table.add_column("hop", justify="right")
+        hops_table.add_column("follow-up query")
+        for i, q in enumerate(debug.hop_queries, start=1):
+            hops_table.add_row(str(i), q)
+        console.print(hops_table)
+
     if debug.retrieved_chunks:
+        # Show a hop column only when multi-hop tagged the chunks.
+        show_hop = any("hop" in c.metadata for c in debug.retrieved_chunks)
         chunks_table = Table(title="Retrieved chunks", border_style="magenta")
         chunks_table.add_column("#", justify="right")
         chunks_table.add_column("file")
         chunks_table.add_column("chunk", justify="right")
+        if show_hop:
+            chunks_table.add_column("hop", justify="right")
         chunks_table.add_column("score", justify="right")
         chunks_table.add_column("preview")
         for i, chunk in enumerate(debug.retrieved_chunks, start=1):
@@ -988,13 +1059,15 @@ def _print_debug(debug: DebugInfo) -> None:
             if len(preview) > 100:
                 preview = preview[:97] + "..."
             score = f"{chunk.score:.4f}" if chunk.score is not None else "n/a"
-            chunks_table.add_row(
+            row = [
                 str(i),
                 str(chunk.metadata.get("source_file", "?")),
                 str(chunk.metadata.get("chunk_index", "?")),
-                score,
-                preview,
-            )
+            ]
+            if show_hop:
+                row.append(str(chunk.metadata.get("hop", "-")))
+            row += [score, preview]
+            chunks_table.add_row(*row)
         console.print(chunks_table)
 
     # Show the actual prompt we sent to the LLM.

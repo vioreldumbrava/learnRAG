@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from rag_app.config import load_config
-from rag_app.vectorstores.chroma_store import ChromaVectorStore
+from rag_app.vectorstores.factory import build_vector_store
 
 
 class StatsTab(QWidget):
@@ -39,6 +39,8 @@ class StatsTab(QWidget):
         self.topk_label = QLabel("-")
         self.features_label = QLabel("-")
         self.features_label.setWordWrap(True)
+        self.metrics_label = QLabel("-")
+        self.metrics_label.setWordWrap(True)
         for label, widget in (
             ("Collection:", self.collection_label),
             ("Chunks indexed:", self.count_label),
@@ -48,6 +50,7 @@ class StatsTab(QWidget):
             ("Chunk size / overlap:", self.chunk_label),
             ("top_k:", self.topk_label),
             ("Retrieval features:", self.features_label),
+            ("Runtime metrics:", self.metrics_label),
         ):
             form.addRow(label, widget)
         layout.addWidget(box)
@@ -77,10 +80,7 @@ class StatsTab(QWidget):
             return
         try:
             cfg = load_config(config_path)
-            store = ChromaVectorStore(
-                persist_dir=cfg.paths.chroma_dir,
-                collection_name=cfg.vector_store.collection_name,
-            )
+            store = build_vector_store(cfg)
             s = store.stats()
         except Exception as exc:
             self.status_label.setText(f"Stats failed: {exc}")
@@ -104,8 +104,19 @@ class StatsTab(QWidget):
             f"reranker: "
             f"{r.reranker_backend + ':' + r.reranker_model if r.reranker_model else 'off'} | "
             f"multi-query: {r.multi_query or 'off'} | "
-            f"neighbors: ±{r.neighbor_radius}"
+            f"neighbors: ±{r.neighbor_radius} | "
+            f"multi-hop: {'max ' + str(r.multi_hop_max_hops) if r.multi_hop else 'off'}"
         )
+
+        from rag_app.utils.metrics import COUNTERS
+
+        snap = COUNTERS.snapshot()
+        if snap:
+            self.metrics_label.setText(
+                " | ".join(f"{k}={v:g}" for k, v in snap.items())
+            )
+        else:
+            self.metrics_label.setText("(no queries yet this session)")
         self.status_label.setText("")
 
     def clear_store(self) -> None:

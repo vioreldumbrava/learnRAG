@@ -37,7 +37,7 @@ from rag_app.models import ChatMessage, RagAnswer
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
 from rag_app.retrieval.factory import build_rag_service, build_retriever
 from rag_app.retrieval.rag_service import DebugInfo
-from rag_app.vectorstores.chroma_store import ChromaVectorStore
+from rag_app.vectorstores.factory import build_vector_store
 
 
 class AskTab(QWidget):
@@ -207,10 +207,7 @@ class AskTab(QWidget):
             self._pipeline = (
                 build_embedding_provider(cfg.embeddings),
                 build_chat_provider(cfg.chat),
-                ChromaVectorStore(
-                    persist_dir=cfg.paths.chroma_dir,
-                    collection_name=cfg.vector_store.collection_name,
-                ),
+                build_vector_store(cfg),
             )
             self._pipeline_key = key
         embedding_provider, chat_provider, store = self._pipeline

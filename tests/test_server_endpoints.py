@@ -62,7 +62,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setenv("RAG_CONFIG_PATH", str(cfg_file))
     monkeypatch.setattr(server, "build_embedding_provider", lambda cfg: embedder)
     monkeypatch.setattr(server, "build_chat_provider", lambda cfg: chat)
-    monkeypatch.setattr(server, "ChromaVectorStore", lambda **kwargs: store)
+    monkeypatch.setattr(server, "build_vector_store", lambda cfg: store)
 
     with TestClient(server.app) as client:
         yield client, store, embedder, chat

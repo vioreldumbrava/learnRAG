@@ -63,10 +63,11 @@ class SettingsTab(QWidget):
         layout.addWidget(self.chat_panel)
         layout.addWidget(self.embed_panel)
 
-        # chunking / retrieval / vector store / ocr
+        # chunking / retrieval / vector store / ocr / performance
         layout.addWidget(self._build_chunking_box())
         layout.addWidget(self._build_retrieval_box())
         layout.addWidget(self._build_ocr_box())
+        layout.addWidget(self._build_performance_box())
 
         # save row + danger zone
         save_row = QHBoxLayout()
@@ -125,10 +126,12 @@ class SettingsTab(QWidget):
         chunking["chunk_size"] = int(self.chunk_size_spin.value())
         chunking["chunk_overlap"] = int(self.chunk_overlap_spin.value())
         chunking["strategy"] = self.strategy_combo.currentText()
+        chunking["contextual"] = self.contextual_check.isChecked()
 
         data["vector_store"] = {
-            "provider": "chroma",
+            "provider": self.store_provider_combo.currentText(),
             "collection_name": self.collection_edit.text() or "local_rag_docs",
+            "qdrant_url": self.qdrant_url_edit.text().strip() or None,
         }
 
         retrieval = data.setdefault("retrieval", {})
@@ -167,11 +170,21 @@ class SettingsTab(QWidget):
         )
         retrieval["multi_query"] = int(self.multi_query_spin.value())
         retrieval["neighbor_radius"] = int(self.neighbor_spin.value())
+        retrieval["multi_hop"] = self.multi_hop_check.isChecked()
+        retrieval["multi_hop_max_hops"] = int(self.multi_hop_max_spin.value())
 
         data["ocr"] = {
             "enabled": self.ocr_enabled_check.isChecked(),
             "min_chars_per_page": int(self.ocr_min_chars_spin.value()),
             "lang": self.ocr_lang_edit.text().strip() or "eng",
+        }
+        data["cache"] = {
+            "embedding": self.embed_cache_check.isChecked(),
+            "answer": self.answer_cache_check.isChecked(),
+            "max_entries": int(self.cache_max_spin.value()),
+        }
+        data["observability"] = {
+            "log_timings": self.log_timings_check.isChecked(),
         }
         return data
 
@@ -207,6 +220,7 @@ class SettingsTab(QWidget):
         self.chunk_size_spin.setValue(cfg.chunking.chunk_size)
         self.chunk_overlap_spin.setValue(cfg.chunking.chunk_overlap)
         self.strategy_combo.setCurrentText(cfg.chunking.strategy)
+        self.contextual_check.setChecked(cfg.chunking.contextual)
         self.top_k_spin.setValue(cfg.retrieval.top_k)
         self.candidate_k_spin.setValue(cfg.retrieval.candidate_k or 0)
         self.score_threshold_spin.setValue(cfg.retrieval.score_threshold or 0.0)
@@ -224,10 +238,18 @@ class SettingsTab(QWidget):
         self._reranker_name = cfg.retrieval.reranker_model
         self.multi_query_spin.setValue(cfg.retrieval.multi_query)
         self.neighbor_spin.setValue(cfg.retrieval.neighbor_radius)
+        self.multi_hop_check.setChecked(cfg.retrieval.multi_hop)
+        self.multi_hop_max_spin.setValue(cfg.retrieval.multi_hop_max_hops)
+        self.store_provider_combo.setCurrentText(cfg.vector_store.provider)
+        self.qdrant_url_edit.setText(cfg.vector_store.qdrant_url or "")
         self.collection_edit.setText(cfg.vector_store.collection_name)
         self.ocr_enabled_check.setChecked(cfg.ocr.enabled)
         self.ocr_min_chars_spin.setValue(cfg.ocr.min_chars_per_page)
         self.ocr_lang_edit.setText(cfg.ocr.lang)
+        self.embed_cache_check.setChecked(cfg.cache.embedding)
+        self.answer_cache_check.setChecked(cfg.cache.answer)
+        self.cache_max_spin.setValue(cfg.cache.max_entries)
+        self.log_timings_check.setChecked(cfg.observability.log_timings)
         self._base_config = cfg.model_dump(mode="json")
         settings_store.set_last_config_path(path)
         self.status_label.setText(f"Loaded {path}.")
@@ -331,6 +353,7 @@ class SettingsTab(QWidget):
         self.chunk_size_spin.setValue(900)
         self.chunk_overlap_spin.setValue(150)
         self.strategy_combo.setCurrentText("paragraph")
+        self.contextual_check.setChecked(False)
         self.top_k_spin.setValue(5)
         self.candidate_k_spin.setValue(0)
         self.score_threshold_spin.setValue(0.0)
@@ -345,10 +368,18 @@ class SettingsTab(QWidget):
         self.reranker_model_edit.setText("")
         self.multi_query_spin.setValue(0)
         self.neighbor_spin.setValue(0)
+        self.multi_hop_check.setChecked(False)
+        self.multi_hop_max_spin.setValue(2)
+        self.store_provider_combo.setCurrentText("chroma")
+        self.qdrant_url_edit.setText("")
         self.collection_edit.setText("local_rag_docs")
         self.ocr_enabled_check.setChecked(False)
         self.ocr_min_chars_spin.setValue(50)
         self.ocr_lang_edit.setText("eng")
+        self.embed_cache_check.setChecked(False)
+        self.answer_cache_check.setChecked(False)
+        self.cache_max_spin.setValue(1024)
+        self.log_timings_check.setChecked(False)
 
     # ----- secondary group boxes -------------------------------------------
 
@@ -372,6 +403,15 @@ class SettingsTab(QWidget):
             "Changing this requires clear + re-ingest to take effect."
         )
         form.addRow("Strategy:", self.strategy_combo)
+
+        self.contextual_check = QCheckBox("Contextual retrieval (LLM prefix per chunk)")
+        self.contextual_check.setToolTip(
+            "At ingest, ask the chat model to write 1-2 sentences situating each\n"
+            "chunk in its document, prepended before embedding.\n"
+            "COST: ~1 chat LLM call PER CHUNK at ingest — minutes per document\n"
+            "with a local model. Queries are unaffected. Requires re-ingest."
+        )
+        form.addRow("", self.contextual_check)
         return box
 
     def _build_retrieval_box(self) -> QGroupBox:
@@ -473,6 +513,38 @@ class SettingsTab(QWidget):
         )
         form.addRow("Neighbor radius:", self.neighbor_spin)
 
+        self.multi_hop_check = QCheckBox("Multi-hop (iterative) retrieval")
+        self.multi_hop_check.setToolTip(
+            "After the first retrieval, let the LLM look at what was found and\n"
+            "issue a follow-up search query, then merge the hops with RRF.\n"
+            "+1 LLM call and +1 retrieval round per hop."
+        )
+        form.addRow("", self.multi_hop_check)
+
+        self.multi_hop_max_spin = QSpinBox()
+        self.multi_hop_max_spin.setRange(1, 5)
+        self.multi_hop_max_spin.setToolTip(
+            "Maximum additional retrieval rounds beyond the first."
+        )
+        form.addRow("Max hops:", self.multi_hop_max_spin)
+
+        self.store_provider_combo = QComboBox()
+        self.store_provider_combo.addItems(["chroma", "qdrant"])
+        self.store_provider_combo.setToolTip(
+            "Vector store backend. Chroma is embedded and default; Qdrant needs\n"
+            "the [qdrant] extra. Switching backends is a separate index — you\n"
+            "must re-ingest after changing this."
+        )
+        form.addRow("Vector store:", self.store_provider_combo)
+
+        self.qdrant_url_edit = QLineEdit()
+        self.qdrant_url_edit.setPlaceholderText("(embedded — leave blank)")
+        self.qdrant_url_edit.setToolTip(
+            "Qdrant only: a server URL like http://localhost:6333.\n"
+            "Leave blank to run Qdrant embedded against paths.qdrant_dir."
+        )
+        form.addRow("Qdrant URL:", self.qdrant_url_edit)
+
         self.collection_edit = QLineEdit()
         self.collection_edit.setPlaceholderText("local_rag_docs")
         form.addRow("Collection name:", self.collection_edit)
@@ -513,5 +585,39 @@ class SettingsTab(QWidget):
 
         self.ocr_enabled_check.toggled.connect(_toggle)
         _toggle(self.ocr_enabled_check.isChecked())
+
+        return box
+
+    def _build_performance_box(self) -> QGroupBox:
+        box = QGroupBox("Performance & observability")
+        form = QFormLayout(box)
+
+        self.embed_cache_check = QCheckBox("Cache query embeddings")
+        self.embed_cache_check.setToolTip(
+            "Skip re-embedding a repeated question. Keyed on the embedding\n"
+            "model, so changing the model simply misses (no stale vectors)."
+        )
+        form.addRow("", self.embed_cache_check)
+
+        self.answer_cache_check = QCheckBox("Cache answers")
+        self.answer_cache_check.setToolTip(
+            "Reuse the answer for an identical question over the same retrieved\n"
+            "chunks. Editing a document changes chunk ids, so old entries stop\n"
+            "matching. Bypassed for multi-turn (history) and streaming."
+        )
+        form.addRow("", self.answer_cache_check)
+
+        self.cache_max_spin = QSpinBox()
+        self.cache_max_spin.setRange(1, 100000)
+        self.cache_max_spin.setSingleStep(128)
+        self.cache_max_spin.setToolTip("Max entries per cache (LRU eviction).")
+        form.addRow("Cache max entries:", self.cache_max_spin)
+
+        self.log_timings_check = QCheckBox("Log per-query timings")
+        self.log_timings_check.setToolTip(
+            "Emit one structured log line per query with per-stage timings.\n"
+            "Timings are always shown in the Ask tab's debug view regardless."
+        )
+        form.addRow("", self.log_timings_check)
 
         return box

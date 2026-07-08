@@ -18,7 +18,11 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 ## C
 
+- **Cache hit ratio** — hits / (hits + misses). The headline number for any cache; low ratios mean the cache isn't earning its memory.
+- **Cache invalidation** — Ensuring a cache never serves stale data. Here it's mostly structural: content-derived chunk ids make the answer cache self-invalidate when a document changes, and model-name keys invalidate the embedding cache on a model swap.
 - **Chunk** — A piece of a document, small enough to embed and store as a unit. Typically 200–2000 characters.
+- **Chunk context (contextual retrieval)** — 1-2 LLM-written sentences situating a chunk in its document, prepended before embedding at ingest so out-of-context chunks stay findable. Anthropic, Sep 2024. Toggle `chunking.contextual`.
+- **Contextual retrieval** — See *Chunk context*.
 - **Chunk overlap** — Characters/tokens repeated between consecutive chunks; defends against facts split across boundaries.
 - **Chunking strategy** — How the splitter decides where to cut. This project has `paragraph` (blank-line split + window fallback), `heading` (split on `1.2 Title` / `## md` / `CHAPTER N`), and `semantic` (recursive headings → paragraphs → sentences).
 - **Context window** — Maximum tokens the LLM can attend to in a single call (system + user + history + output).
@@ -74,6 +78,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 - **L2 distance** — Euclidean distance. `sqrt(sum((a_i - b_i)^2))`. Equivalent to cosine for unit-length vectors.
 - **LLM-as-judge** — Using a (usually stronger) LLM to score the output of your production LLM. Common in RAGAS.
+- **LRU (Least Recently Used)** — Eviction policy: when the cache is full, drop the entry untouched for the longest. Both query-path caches here are LRU-bounded.
 - **Lost in the middle** — LLMs attend less to the middle of long prompts than to start/end. Put highest-ranked chunks at edges of the context.
 
 ## M
@@ -81,7 +86,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 - **Metadata filter** — Constrain retrieval to chunks whose metadata satisfies a predicate (`module=CAN`, `file_type=pdf`). Cheaper than running search then post-filtering. This project auto-derives `module` from sub-folder names under `documents/`.
 - **MMR** — Maximal Marginal Relevance. Re-rank top-K to trade off relevance for diversity. Reduces near-duplicates.
 - **MRR** — Mean Reciprocal Rank. Average of `1/rank_of_first_correct`. Rewards putting the right answer at position 1. Reported by this project's `eval` command alongside recall@k.
-- **Multi-hop RAG** — Some answers need facts from multiple chunks that don't co-occur; retrieve → ask follow-up → retrieve again.
+- **Multi-hop RAG** — Some answers need facts from multiple chunks that don't co-occur; retrieve → LLM writes a follow-up query → retrieve again → merge hops with RRF. Implemented here via `retrieval.multi_hop`. Also called *iterative retrieval*. Contrast *query decomposition* (plans sub-questions up front vs. conditions each hop on the last).
 - **Multi-query** — LLM rephrases the question several ways, retrieve for each, merge with RRF. Fixes vocabulary mismatch between question and document. Toggle `retrieval.multi_query: 3` to enable in this project.
 - **Multi-turn** — Threading prior conversation turns into the prompt so the LLM can resolve pronouns and follow-ups. Retrieval typically re-runs per turn; only the LLM sees the history.
 
@@ -92,16 +97,19 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 ## O
 
+- **OCR (Optical Character Recognition)** — Converts scanned pages / images into text at ingest time so they can be chunked and embedded. Gated on `ocr.min_chars_per_page` so only image-only pages pay the cost. Toggle `ocr.enabled` (or `ingest --ocr`).
 - **Overlap** — See *Chunk overlap*.
 
 ## P
 
+- **Payload** — Qdrant's term for the arbitrary JSON stored alongside a point (vector). This project puts the real chunk id, text, and metadata there. Chroma calls the equivalent "documents + metadatas."
 - **PQ** — Product Quantisation. Compress vectors 8–32× by quantising sub-vectors. Used with IVF at billion-scale.
 - **Prompt injection** — Hostile content in retrieved chunk instructs the model to ignore its system prompt. Treat retrieved text as untrusted.
 - **Provider abstraction** — Wrapping LLM/embedding APIs behind a single interface so vendors are swappable.
 
 ## Q
 
+- **Qdrant** — Open-source vector database (embedded or server). This project's optional second `VectorStore` backend behind the `[qdrant]` extra; point ids are UUIDs and search returns similarity (converted to distance in the adapter).
 - **Query expansion** — General term for any technique that augments the user's literal question (multi-query, HyDE, decomposition).
 
 ## R
@@ -117,6 +125,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 ## S
 
+- **Scroll** — Qdrant's paginated "list all points matching a filter" call (no query vector). Used here for BM25 indexing and the inspect/list surfaces.
 - **Score threshold** — Drop retrieved chunks farther than X. Lets retrieval honestly return "nothing relevant."
 - **Sparse retrieval** — Retrieval based on exact tokens (BM25, TF-IDF). Complement to dense retrieval.
 - **SSE (Server-Sent Events)** — One-way HTTP streaming protocol: server pushes `data: ...` frames until `[DONE]`. This project's `stream: true` query responses send JSON payloads: one `{"sources": [...]}` event first, then one `{"token": "..."}` per token (JSON-encoding keeps multi-line tokens protocol-safe).
@@ -124,6 +133,7 @@ explanations live in [`01_RAG_CONCEPTS.md`](01_RAG_CONCEPTS.md).
 
 ## T
 
+- **Tesseract** — The open-source OCR engine this project shells out to for scanned pages/images. Language(s) set via `ocr.lang` (e.g. `eng`, `eng+deu`).
 - **Token** — The unit the LLM operates on (~3–4 characters of English). Context windows, costs, and rate limits are all in tokens.
 - **top_k** — Number of chunks to retrieve per query.
 

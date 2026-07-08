@@ -17,6 +17,7 @@ paths:
   documents_dir: "documents"
   storage_dir: "storage"
   chroma_dir: "storage/chroma"
+  qdrant_dir: "storage/qdrant"   # embedded-Qdrant data dir (when provider: qdrant)
   index_file: "storage/document_index.json"
 
 chunking:
@@ -27,6 +28,15 @@ chunking:
   #   heading   - split on section headings (good for datasheets / structured docs)
   #   semantic  - recursive: headings -> paragraphs -> sentences (highest quality)
   strategy: "paragraph"
+  # Contextual retrieval (Anthropic-style): at ingest, ask the chat model to
+  # write 1-2 sentences situating each chunk in its document and prepend that
+  # before embedding. Improves retrieval of context-dependent chunks.
+  #   COST: ~1 chat LLM call PER CHUNK at ingest. A 100-chunk doc at ~3 s/call
+  #   is ~5 minutes with a local model. Queries are unaffected.
+  #   Changing this requires a re-ingest (the chunking fingerprint handles it
+  #   automatically; `ingest --force` also works).
+  contextual: false
+  contextual_document_chars: 6000   # document truncated to this before the LLM sees it
 
 # ---------------------------------------------------------------------------
 # Default provider setup: LM Studio for both chat and embeddings.
@@ -65,8 +75,13 @@ embeddings:
 # ---------------------------------------------------------------------------
 
 vector_store:
-  provider: "chroma"
+  provider: "chroma"            # chroma | qdrant
   collection_name: "local_rag_docs"
+  # Qdrant alternative (needs the optional extra: pip install -e .[qdrant]).
+  # Switching backends is a separate index — clear + re-ingest after changing.
+  #   provider: "qdrant"
+  #   qdrant_url: "http://localhost:6333"   # omit for embedded (paths.qdrant_dir)
+  qdrant_url: null
 
 retrieval:
   top_k: 5
@@ -109,6 +124,14 @@ retrieval:
   # before and after usually finish the sentence/table the hit started).
   # No extra LLM calls — the prompt just gets wider. 0 = off.
   neighbor_radius: 0
+  # Multi-hop / iterative retrieval: after the first retrieval, show the LLM
+  # what was found and let it issue a follow-up search query for whatever is
+  # still missing, then merge the hops with RRF. Good for questions whose
+  # answer is spread across chunks that don't co-occur. Each hop costs +1 LLM
+  # call + 1 retrieval round; it stops early on a NONE reply, a repeated
+  # query, or a hop that finds nothing new. false = off.
+  multi_hop: false
+  multi_hop_max_hops: 2   # additional retrieval rounds beyond the first (1-5)
 
 prompt:
   answer_only_from_context: true
@@ -134,6 +157,26 @@ ocr:
   enabled: false
   min_chars_per_page: 50   # pages with fewer chars trigger OCR fallback
   lang: "eng"              # Tesseract language code(s), e.g. "eng+deu"
+
+# ---------------------------------------------------------------------------
+# Caching — optional, off by default. In-memory only (a restart clears them).
+#   embedding: cache hash(query) -> vector, so a repeated question skips
+#              re-embedding. Keyed on the embedding model (change model = miss).
+#   answer:    cache (question + retrieved chunk ids + chat model + prompt
+#              flags) -> answer. Because chunk ids are content-derived, editing
+#              a document changes the ids and stale entries stop matching — no
+#              TTL needed. Bypassed for multi-turn chat and streaming.
+# ---------------------------------------------------------------------------
+cache:
+  embedding: false
+  answer: false
+  max_entries: 1024        # LRU cap per cache
+
+# Observability: emit one structured log line per query with per-stage timings.
+# Timings are always collected and shown in `query --debug` regardless; this
+# only controls the log line (needs app.debug or a configured log level).
+observability:
+  log_timings: false
 
 server:
   # Used by `rag-app serve` (FastAPI REST API).

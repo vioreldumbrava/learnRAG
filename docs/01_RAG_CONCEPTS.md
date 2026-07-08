@@ -120,6 +120,33 @@ same config — embed model is read from a single source.
 
 ---
 
+## Ingestion
+
+### OCR (Optical Character Recognition)
+
+**What:** The step that turns a *scanned* PDF or an image (pixels) into
+text. Born-digital PDFs have a text layer you can read directly; scanned
+pages are photos, and normal extraction returns an empty string for them.
+OCR runs an image → text model (Tesseract in this project) to recover the
+characters so they can be chunked and embedded like any other document.
+
+**When it matters:** Any corpus with scanned manuals, faxes, screenshots,
+or photographed forms. OCR is an *ingest-time* concern only — you pay its
+cost once when the document enters the index; queries never touch it.
+
+**Gate it, don't blanket it:** OCR is slow and lossy, so route only the
+pages that need it. This project's heuristic: after normal extraction, a
+page with fewer than `ocr.min_chars_per_page` characters is treated as
+image-only and sent to OCR; born-digital pages skip it.
+
+**Where in this code:** [`OcrSection`](../src/rag_app/config.py) →
+[`extract_text`](../src/rag_app/ingestion/text_extractor.py), called from
+[`IngestService._ingest_one`](../src/rag_app/ingestion/ingest_service.py).
+Surfaced on the CLI (`ingest --ocr/--no-ocr`, `stats`), in the GUI Settings
+tab, and in Docker (`--build-arg WITH_OCR=true`).
+
+---
+
 ## Chunking
 
 ### Chunk
@@ -231,6 +258,32 @@ combined with IVF (`IVF-PQ`).
 
 **When it matters:** Small stores (< 10k vectors), or as a ground truth
 to measure ANN recall against.
+
+### Choosing a vector store (Chroma vs Qdrant vs …)
+
+**What:** The database that stores vectors + payload and does ANN search.
+This project ships two behind the same `VectorStore` ABC: **Chroma**
+(embedded, zero-config, great for local/dev) and **Qdrant** (embedded *or*
+a standalone server with filtering, quantisation, and horizontal scaling).
+
+**The interface hides the DB, but not its quirks.** Swapping backends is
+supposed to touch one file — and here it does — but the adapter still has to
+reconcile backend-specific rules. Two that bite in interviews:
+
+- **Id constraints.** Qdrant point ids must be UUID/int; string chunk ids get
+  mapped through `uuid5` with the real id kept in the payload.
+- **Score orientation.** Qdrant returns similarity (higher = better); Chroma
+  returns distance (lower = better). The adapter inverts one so the rest of
+  the app sees a single convention.
+
+**Rebuildable index, not source of truth:** switching stores is never a
+migration — you re-derive the index from the original documents. Same reason
+you re-ingest after changing the embedding model.
+
+**Where in this code:**
+[`chroma_store.py`](../src/rag_app/vectorstores/chroma_store.py),
+[`qdrant_store.py`](../src/rag_app/vectorstores/qdrant_store.py),
+[`vectorstores/factory.py`](../src/rag_app/vectorstores/factory.py).
 
 ---
 
@@ -538,6 +591,42 @@ spot-check with humans.
 
 ## Production
 
+### Caching (embedding + answer)
+
+**What:** Two in-memory LRU caches on the query path. The *embedding cache*
+maps `hash(query) → vector` so a repeated question skips re-embedding. The
+*answer cache* maps `(question + retrieved chunk ids + chat model + prompt
+flags) → answer` so an identical question over the same evidence skips the
+LLM call entirely.
+
+**Invalidation (the interesting part):** mostly structural. Chunk ids are
+content-derived (`<hash12>:<idx>`), so editing a document changes its ids,
+the retrieved id-set changes, and old answer-cache entries stop matching —
+no TTL required. The embedding cache is keyed on the model name, so a model
+swap misses instead of returning a stale vector. Both are LRU-bounded and
+in-memory (a restart clears them; a real deployment would front them with
+Redis/memcached).
+
+**Where in this code:** [`cache.py`](../src/rag_app/retrieval/cache.py)
+(`CachedEmbeddingProvider`, `AnswerCache`, `LruCache`), wired in
+`retrieval/factory.py` behind `cache.embedding` / `cache.answer`. The answer
+cache is bypassed for multi-turn (history) and streaming.
+
+### RAG observability
+
+**What:** Per-stage timings (embed, vector search, BM25, retrieve, generate)
+and counters (cache hits/misses, cumulative stage ms). Timings are always
+collected and shown in `query --debug`; `observability.log_timings` adds one
+structured log line per query.
+
+**When it matters:** You can't optimise what you don't measure. Logging the
+per-stage split is how you demonstrate that the LLM generate stage dominates
+before you spend a week tuning vector search.
+
+**Where in this code:** [`utils/metrics.py`](../src/rag_app/utils/metrics.py)
+(`StageTimings`, `COUNTERS`, `log_query`); counters surface at
+`GET /api/stats` and the GUI Stats tab.
+
 ### JIT model loading (Just-In-Time)
 
 **What:** Server-side feature (LM Studio, vLLM, llama.cpp server) that
@@ -689,11 +778,44 @@ retrievals, then synthesise.
 asks the LLM for focused sub-questions, searches them alongside the
 original query, and merges the lists with RRF.
 
-### Multi-hop RAG *(theory only — not implemented)*
+### Contextual retrieval *(implemented, ingest-time)*
+
+**What:** A chunk removed from its document loses context ("the register
+defaults to 0" — which register?). At *ingest*, ask the chat LLM to write
+1-2 sentences situating each chunk within the whole document, and prepend
+that before embedding. Both dense embeddings and BM25 benefit because the
+stored text carries the prefix too (Anthropic, Sep 2024 — the two compound).
+
+**Cost & trade-off:** one chat call **per chunk**, paid once at ingest
+(minutes per document with a local model); queries are unaffected. Storing
+the contextualized text lengthens prompts slightly and repeats prefixes in
+neighbor-stitched passages — the raw prefix is kept in
+`metadata["context_prefix"]` so it's recoverable.
+
+**Where in this code:** **Implemented.** Set `chunking.contextual: true`.
+[`contextualizer.py`](../src/rag_app/ingestion/contextualizer.py), called from
+[`IngestService._ingest_one`](../src/rag_app/ingestion/ingest_service.py).
+Changing the flag changes the stored chunks, so it requires a re-ingest — the
+hash tracker's chunking fingerprint triggers that automatically.
+
+### Multi-hop RAG *(implemented)*
 
 **What:** Some answers need facts spread across documents that don't
-co-occur in any single chunk. Solution: retrieve → let the LLM ask a
-follow-up question → retrieve again → answer.
+co-occur in any single chunk, so a single retrieval round misses one side.
+Solution: retrieve → show the LLM what was found → let it write a follow-up
+search query for what's missing → retrieve again → merge the hops with RRF.
+
+**vs query decomposition:** decomposition plans all sub-questions up front
+from the question text; multi-hop conditions hop *N+1* on what hop *N*
+actually retrieved (a feedback loop). More powerful for bridge questions,
+one LLM call per hop.
+
+**Loop safety:** a hard hop cap, a `NONE` stop signal, a repeated-query
+check, and a "no new chunks" check — any one ends the loop.
+
+**Where in this code:**
+[`Retriever._run_hops` / `_follow_up_query`](../src/rag_app/retrieval/retriever.py),
+behind `retrieval.multi_hop` (+ `multi_hop_max_hops`).
 
 ### Agentic RAG *(theory only — not implemented)*
 

@@ -38,6 +38,8 @@ def test_every_retrieval_field_reaches_the_retriever():
         use_mmr=False,
         mmr_lambda=0.3,
         neighbor_radius=2,
+        multi_hop=True,
+        multi_hop_max_hops=3,
     )
     chat = FakeChatProvider()
     retriever = build_retriever(cfg, FakeEmbeddingProvider(), FakeVectorStore(), chat)
@@ -54,6 +56,8 @@ def test_every_retrieval_field_reaches_the_retriever():
     assert retriever.use_mmr is False
     assert retriever.mmr_lambda == 0.3
     assert retriever.neighbor_radius == 2
+    assert retriever.multi_hop is True
+    assert retriever.multi_hop_max_hops == 3
     assert retriever.chat_provider is chat  # needs_llm techniques are on
 
 
@@ -114,6 +118,47 @@ def test_top_k_override_and_where_passthrough():
     )
     assert retriever.top_k == 2
     assert retriever.where == where
+
+
+def _cfg_with(**sections) -> AppConfig:
+    base = {
+        "chat": {"model": "m", "base_url": "http://x"},
+        "embeddings": {"model": "e", "base_url": "http://x"},
+    }
+    base.update(sections)
+    return AppConfig.model_validate(base)
+
+
+def test_cache_off_does_not_wrap_provider_or_set_answer_cache():
+    from rag_app.retrieval.cache import CachedEmbeddingProvider, reset_caches
+
+    reset_caches()
+    cfg = _cfg_with()  # cache defaults off
+    ep, vs, chat = FakeEmbeddingProvider(), FakeVectorStore(), FakeChatProvider()
+    retriever = build_retriever(cfg, ep, vs, chat)
+    service = build_rag_service(cfg, retriever, chat)
+
+    assert not isinstance(retriever.embedding_provider, CachedEmbeddingProvider)
+    assert service._answer_cache is None
+    assert service._log_timings is False
+
+
+def test_cache_on_wraps_provider_and_sets_answer_cache():
+    from rag_app.retrieval.cache import CachedEmbeddingProvider, reset_caches
+
+    reset_caches()
+    cfg = _cfg_with(
+        cache={"embedding": True, "answer": True, "max_entries": 4},
+        observability={"log_timings": True},
+    )
+    ep, vs, chat = FakeEmbeddingProvider(), FakeVectorStore(), FakeChatProvider()
+    retriever = build_retriever(cfg, ep, vs, chat)
+    service = build_rag_service(cfg, retriever, chat)
+
+    assert isinstance(retriever.embedding_provider, CachedEmbeddingProvider)
+    assert service._answer_cache is not None
+    assert service._log_timings is True
+    reset_caches()
 
 
 def test_build_rag_service_wires_chat_and_reranker():

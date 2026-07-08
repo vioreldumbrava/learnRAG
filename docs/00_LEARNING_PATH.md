@@ -1,6 +1,6 @@
 # RAG Learning Path
 
-A 10-stage walkthrough that takes you from "what is RAG?" to "I can answer
+An 11-stage walkthrough that takes you from "what is RAG?" to "I can answer
 mid-level interview questions about it." Each stage uses the running code in
 this repo as its lab.
 
@@ -18,10 +18,33 @@ this repo as its lab.
 - **Concept** — the theory, in plain English.
 - **In this code** — pointers to the exact file/symbol that implements it.
 - **Try it** — one or two commands you should run.
+- **Exercises** — hands-on tasks (with collapsible solutions) that make the
+  concept stick. This is where the old `03_RAG_MILESTONES_AND_EXERCISES.md`
+  milestones now live, next to the stage they belong to.
+- **Checkpoint** — a `- [ ]` checklist. You're done with a stage when you can
+  tick every box. (GitHub renders these as checkboxes; tick them by editing
+  the file, or just track them in your own notes.)
 - **Interview check** — short Q&A to lock the stage in your head.
 
 Before you start: make sure `.\run.bat ingest` has succeeded at least once
 (verify with `.\run.bat inspect`).
+
+## Progress tracker
+
+Tick a stage once you've cleared its **Checkpoint**:
+
+- [ ] Stage 1 — What is RAG?
+- [ ] Stage 2 — Text → Vectors (Embeddings)
+- [ ] Stage 3 — Chunking (incl. text extraction & OCR)
+- [ ] Stage 4 — The Vector Store (incl. swapping to Qdrant)
+- [ ] Stage 5 — Retrieval
+- [ ] Stage 6 — Prompt Construction & Generation
+- [ ] Stage 7 — Provider Abstraction
+- [ ] Stage 8 — Evaluation
+- [ ] Stage 9 — Beyond Naïve RAG (hybrid, rerank, HyDE, multi-query, MMR,
+      neighbors, multi-hop, contextual retrieval)
+- [ ] Stage 10 — Production Concerns (incl. caching & observability)
+- [ ] Stage 11 — Operating the System (CLI / GUI / Web / REST / Docker)
 
 ---
 
@@ -82,6 +105,15 @@ RAG has two distinct phases that run on different cadences:
   No. The documents live in the vector store. The LLM only ever sees the
   small subset that retrieval pulled in for the current question.
 
+### Checkpoint
+
+- [ ] I ran ingest then query and watched an answer come back grounded in a
+      retrieved chunk.
+- [ ] I can state, in one sentence each, why RAG beats fine-tuning for facts
+      and why it beats stuffing everything into the context window.
+- [ ] I asked a question with no answer in the docs and observed what the
+      system did.
+
 ---
 
 ## Stage 2 — Text → Vectors (Embeddings)
@@ -137,6 +169,13 @@ Two non-obvious points that matter in interviews:
 - **Q: What's the typical dimensionality?** 384 (small open models) up to
   3072 (`text-embedding-3-large`). Higher dim ≠ better quality; it just
   costs more storage and slower search.
+
+### Checkpoint
+
+- [ ] I ran `inspect` and read off the embedding dimension for my model.
+- [ ] I can explain why swapping the embedding model forces a full re-ingest.
+- [ ] I can define "embedding" in one sentence without saying "vector of
+      numbers" and nothing else (say what the direction *encodes*).
 
 ---
 
@@ -223,6 +262,91 @@ section together when it fits, which usually beats both for technical PDFs.
   embedded as semantic fragments and neither retrieves well for the
   original concept.
 
+### Before chunking: text extraction and OCR
+
+Chunking assumes you *have* text. But a huge fraction of real corpora are
+**scanned** PDFs or images — pixels, not characters. A born-digital PDF has a
+text layer you can read directly; a scanned one is a photo of a page and
+`pypdf` returns an empty string for it. **OCR** (Optical Character
+Recognition) is the bridge: it runs an image → text model (Tesseract here) to
+recover the characters.
+
+Key design points, all interview-relevant:
+
+- **OCR is an *ingest-time* concern, never a query-time one.** You pay the OCR
+  cost once, when the document enters the index; queries just search the text
+  that OCR produced. Getting this boundary right is the whole game.
+- **Gate it, don't blanket it.** OCR is slow and lossy, so you only want it on
+  pages that actually need it. This repo's heuristic: after normal extraction,
+  any page with fewer than `ocr.min_chars_per_page` characters is treated as
+  "image-only" and sent to OCR. Born-digital pages skip it entirely.
+
+**In this code:** [`OcrSection`](../src/rag_app/config.py) (`enabled`,
+`min_chars_per_page`, `lang`) drives
+[`extract_text`](../src/rag_app/ingestion/text_extractor.py), which is called
+from [`IngestService._ingest_one`](../src/rag_app/ingestion/ingest_service.py).
+It's surfaced in the desktop GUI (Settings → OCR box), on the CLI (`ingest
+--ocr/--no-ocr`, and the `stats` OCR row), and in Docker via the
+`--build-arg WITH_OCR=true` image (see README §10).
+
+**Try it:**
+
+```powershell
+# Drop a scanned PDF or a PNG of text into documents/, then:
+.\run.bat ingest --ocr           # force OCR on for this run
+.\run.bat inspect --file scan.pdf # confirm text was actually recovered
+.\run.bat stats                   # the OCR row shows on/off + language
+```
+
+**Interview check:**
+
+- **Q: How do you ingest scanned documents into a RAG system?** Detect the
+  image-only pages (near-zero extracted text), run them through an OCR engine
+  at ingest time, then chunk/embed the recovered text like any other document.
+- **Q: Why gate OCR on a `min_chars_per_page` threshold instead of always
+  running it?** OCR is slow and introduces recognition errors. Born-digital
+  pages already have perfect text, so OCR'ing them wastes time and can *lower*
+  quality. The threshold routes only the pages that need it.
+
+### Exercises
+
+#### Exercise 3.1 — Chunk size vs. answer quality (~15 min)
+
+**Goal:** feel the small-chunks-vs-large-chunks trade-off first-hand.
+**Steps:** for each of `chunk_size` = 300 / 900 / 1500 (keep `strategy:
+paragraph`): edit `config.yaml`, then `.\run.bat clear --yes; .\run.bat
+ingest; .\run.bat retrieve "What happens if NBRP and DBRP are different?"`.
+Compare the retrieved chunks and their distances.
+
+<details>
+<summary>What you should have seen</summary>
+
+Small chunks return a tight, on-topic sentence but may miss surrounding
+context; large chunks return a wall of text where the relevant sentence is
+diluted by neighbours. For this datasheet-style corpus, ~900 with the
+`heading` strategy usually reads best. There is no universal winner — that's
+the point, and it's why you tune with an eval set (Stage 8).
+</details>
+
+#### Exercise 3.2 — Strategy swap on a structured doc (~10 min)
+
+**Goal:** see `heading` chunking beat `paragraph` on a doc with numbered
+sections. **Steps:** with a datasheet in `documents/`, run the same
+`retrieve` query under `strategy: paragraph` then `strategy: heading`
+(clear + re-ingest between). **Expected:** `heading` keeps a whole numbered
+section together, so the section that answers the question arrives intact
+instead of split across two chunks.
+
+### Checkpoint
+
+- [ ] I ran the same query under at least two chunk sizes and can describe the
+      trade-off in one sentence.
+- [ ] I know which config keys control chunking (`chunk_size`,
+      `chunk_overlap`, `strategy`) and that changing any of them requires a
+      re-ingest.
+- [ ] I can explain what OCR does, that it runs at ingest time only, and why
+      it's gated on `min_chars_per_page`.
+
 ---
 
 ## Stage 4 — The Vector Store
@@ -295,6 +419,66 @@ show the auto-derived `module` field on each chunk.
   IVF (inverted file with cell partitioning), PQ (product quantisation
   for memory-bound stores), DiskANN. HNSW is the modern default for
   in-memory stores up to ~100M vectors.
+
+### Swapping the backend: Qdrant
+
+The whole point of the [`VectorStore`](../src/rag_app/vectorstores/base.py)
+ABC is that the rest of the app never knows which database is underneath.
+This repo ships a second backend, **Qdrant**, to prove it — and to show what
+an interface *doesn't* hide. Two backend quirks the adapter has to paper over:
+
+- **Point ids.** Qdrant requires UUID or integer ids; our chunk ids are the
+  string `<hash12>:<index>`. The adapter stores each point under
+  `uuid5(namespace, chunk_id)` — still deterministic, so re-ingest upserts in
+  place — and keeps the real id in the payload. Every returned chunk's id
+  comes from the payload, so neighbor expansion (which asks for `abc:8` by
+  string) and RRF de-duplication keep working.
+- **Score orientation.** Qdrant returns cosine *similarity* (higher = better);
+  the rest of the app assumes a *distance* (lower = better, like Chroma). The
+  adapter converts `score = 1 - similarity`, so `score_threshold` and the
+  debug tables mean the same thing on both backends.
+
+Also note Qdrant needs the vector *dimension* at collection-creation time
+(Chroma infers it) — the adapter creates the collection lazily on the first
+upsert from `len(embeddings[0])`.
+
+**In this code:** [`qdrant_store.py`](../src/rag_app/vectorstores/qdrant_store.py),
+selected by [`vectorstores/factory.py`](../src/rag_app/vectorstores/factory.py)
+from `vector_store.provider`.
+
+**Try it** (needs the extra: `pip install -e .[qdrant]`):
+
+```powershell
+# Edit config.yaml: vector_store.provider = "qdrant"
+.\run.bat clear --yes            # a different backend is a separate, empty index
+.\run.bat ingest                 # no migration — you re-derive from the source docs
+.\run.bat retrieve "What happens if NBRP and DBRP are different?"
+.\run.bat stats                  # the "Vector store" row now reads "qdrant"
+```
+
+### Exercises
+
+#### Exercise 4.1 — Inspect what's stored (~10 min)
+
+**Goal:** confirm the store holds derived data, not the source. **Steps:**
+`.\run.bat inspect`, then `--sample 1`, then `--id <id>`. **Expected:** you
+see ids, the embedding dimension, chunk text, and metadata — but the original
+files still live on disk as the source of truth.
+
+#### Exercise 4.2 — Prove the ABC is real (~15 min)
+
+**Goal:** run the *same* corpus on both backends. **Steps:** ingest under
+`provider: chroma`, run a query; switch to `provider: qdrant`, `clear`,
+re-ingest, run the same query. **Expected:** comparable top results — the
+retrieval code didn't change, only the storage behind the interface did.
+
+### Checkpoint
+
+- [ ] I can list what a chunk record stores (id, vector, text, metadata) and
+      say why the vector store is a rebuildable index, not the source of truth.
+- [ ] I can explain what HNSW buys over a flat index.
+- [ ] I ran the corpus on both Chroma and Qdrant and understand the two quirks
+      the Qdrant adapter hides (id mapping, similarity→distance).
 
 ---
 
@@ -379,6 +563,33 @@ separate.
   "answer only from context; if it isn't there, say 'I don't know.'"
   Both layers are needed.
 
+### Exercises
+
+#### Exercise 5.1 — Metadata filters (~10 min)
+
+**Goal:** stop a query about CAN from pulling SPI chunks that share
+vocabulary. **Steps:** organise `documents/` into sub-folders (`documents/CAN/`,
+`documents/SPI/`), re-ingest, then compare `.\run.bat retrieve "bit timing"`
+with and without `--filter "module=CAN"`. **Expected:** the folder name
+becomes the `module` metadata, and the filter confines results to that module.
+
+<details>
+<summary>What you should have seen</summary>
+
+Without the filter, "bit timing" retrieves chunks from both datasheets
+because both use the phrase. `--filter "module=CAN"` builds a Chroma
+`where={"module": "CAN"}` clause and constrains the search, eliminating the
+cross-document false positives.
+</details>
+
+### Checkpoint
+
+- [ ] I ran `retrieve` on a close question, an opaque-identifier question, and
+      an out-of-domain question, and can explain each result's distances.
+- [ ] I used a `--filter` and understand how `module` metadata gets derived.
+- [ ] I can name pure dense retrieval's core failure mode (rare/opaque tokens)
+      and the two-layer "I don't know" defence.
+
 ---
 
 ## Stage 6 — Prompt Construction & Generation
@@ -462,6 +673,14 @@ production":
   end of long prompts than the middle. Practical fix: put the highest-
   ranked chunk first, second-ranked last.
 
+### Checkpoint
+
+- [ ] I ran `query --debug` and read the exact prompt sent to the LLM.
+- [ ] I asked an out-of-domain question and watched the "answer only from
+      context" instruction do its job.
+- [ ] I ran `chat` with a pronoun-only follow-up and saw multi-turn history
+      supply the missing referent.
+
 ---
 
 ## Stage 7 — Provider Abstraction
@@ -522,6 +741,14 @@ Re-ingest (because the embedding model changed!) and query again.
 - **Q: What stops you from mixing two embedding providers in one store?**
   Embeddings from different models live in different geometries — they
   aren't comparable. One store, one embedding model.
+
+### Checkpoint
+
+- [ ] I swapped the chat and/or embedding provider in `config.yaml` and
+      re-ran a query (re-ingesting when the embedding model changed).
+- [ ] I can name the two provider interfaces and one production reason to
+      abstract them (vendor risk, cost, A/B testing).
+- [ ] I can explain the common "hosted chat + self-hosted embeddings" split.
 
 ---
 
@@ -595,6 +822,32 @@ source file, re-run, see the FAIL row. Then put it back.
 - **Q: Why a gold-standard set rather than vibes?**
   Without ground truth you can't tell whether your chunk-size change
   helped or hurt. Eval set + CI = the only way to iterate confidently.
+
+### Exercises
+
+#### Exercise 8.1 — Break the eval to trust it (~10 min)
+
+**Goal:** confirm the harness actually fails when retrieval is wrong.
+**Steps:** run `.\run.bat eval --file eval/questions.json --skip-llm` (all
+green), then edit one question's `expected_sources` to a file that doesn't
+contain the answer and re-run. **Expected:** that row flips to FAIL and the
+process exits non-zero (so it can gate CI). Put it back afterwards.
+
+<details>
+<summary>What you should have seen</summary>
+
+The tampered question's recall drops and `first_relevant_rank` becomes a
+miss, so `report.all_passed` is False and the CLI exits 1. This is why an
+eval set beats "it worked when I tried it" — it turns a regression into a red
+build instead of a surprise in production.
+</details>
+
+### Checkpoint
+
+- [ ] I ran eval with `--skip-llm` (retrieval only) and full (with the LLM).
+- [ ] I deliberately broke a question and watched it FAIL, then fixed it.
+- [ ] I can define recall@k and MRR, and explain why answer-faithfulness is
+      the harder second layer that usually needs an LLM judge.
 
 ---
 
@@ -682,13 +935,55 @@ candidate set to balance relevance to query against dissimilarity to
 already-picked chunks. Set `retrieval.use_mmr: true`; tune the
 relevance/diversity trade-off with `retrieval.mmr_lambda`.
 
-#### F. Advanced architectures — *not implemented*
+#### F. Multi-hop / iterative retrieval — *implemented*
 
-- **Multi-hop RAG**: the answer needs facts from chunks A and B, but
-  neither alone is enough to surface in retrieval. Solution: retrieve →
-  let the LLM ask a follow-up → retrieve again.
+Some questions need facts from chunks A and B, but neither alone is a
+strong match for the *original* query — so a single retrieval round misses
+one of them. **Multi-hop** retrieval fixes this: retrieve once, show the LLM
+what came back, let it write a **follow-up search query** for whatever is
+still missing, retrieve again, and merge the hops with RRF.
+
+How it differs from query decomposition (Stage 9-C): decomposition plans all
+sub-questions up front, from the question text alone. Multi-hop conditions
+hop *N+1* on what hop *N* actually found — it's a feedback loop, not a plan.
+That's more powerful for "bridge" questions ("who is the CEO of the company
+that makes X?") but costs an LLM round-trip per hop.
+
+Four guards keep the loop finite: a hard `multi_hop_max_hops` cap, stopping
+on a `NONE` reply ("nothing else needed"), stopping when a follow-up repeats
+an earlier query, and stopping when a hop finds no new chunks. Set
+`retrieval.multi_hop: true` (default `multi_hop_max_hops: 2`).
+
+#### G. Contextual retrieval — *implemented*
+
+The failure mode: a chunk pulled out of a long document loses the context
+that made it findable. "The register defaults to 0x00" — which register?
+which mode? The embedding of that sentence in isolation matches almost
+nothing useful. **Contextual retrieval** (Anthropic, Sep 2024) fixes it at
+*ingest* time: for each chunk, the chat LLM writes 1-2 sentences situating it
+within the whole document, and that prefix is prepended to the chunk *before
+embedding*. Because the stored text also carries the prefix, both dense
+embeddings and BM25 benefit (Anthropic reports the two compound).
+
+This is the only technique in Stage 9 that runs at ingest, not query — and it
+is *expensive there*: one chat call **per chunk**. A 100-chunk document with a
+local model is minutes, not seconds. Queries are unaffected. Set
+`chunking.contextual: true` (note it's a *chunking* flag: changing it changes
+the stored chunks, so it requires a re-ingest — the ingest hash tracker's
+chunking fingerprint triggers that automatically). Failure on any chunk falls
+back to the raw text, so a flaky model never blocks ingestion.
+
+**Store the contextualized text or the original?** This repo stores the
+contextualized text (prefix + original) so BM25 indexes it too, and keeps the
+raw prefix in `metadata["context_prefix"]` so you can always recover or strip
+it. The trade-off: prompts get slightly longer and neighbor-stitched passages
+repeat prefixes.
+
+#### H. Advanced architectures — *not implemented*
+
 - **Agentic RAG**: LLM decides whether/how/when to retrieve, possibly
-  multiple times, possibly with tools.
+  multiple times, possibly with tools. (Multi-hop above is a constrained,
+  non-tool-using special case of this.)
 - **GraphRAG (Microsoft)**: build a knowledge graph from the corpus,
   retrieve subgraphs instead of chunks. Better for "what's the
   relationship between X and Y?" questions; much more infra.
@@ -711,22 +1006,29 @@ exactly once:
 | MMR | `retrieval.use_mmr: true` | [`mmr.py`](../src/rag_app/retrieval/mmr.py) (diverse final top-k from a candidate pool) |
 | Neighbor expansion | `retrieval.neighbor_radius: 1` | [`Retriever._expand_neighbors`](../src/rag_app/retrieval/retriever.py) (stitch +/-N adjacent chunks by id) |
 | Reranker | `retrieval.reranker_model: "llm-rerank"` or `retrieval.reranker_backend: "sentence-transformers"` | [`reranker.py`](../src/rag_app/retrieval/reranker.py) + [`RagService._retrieve_and_rerank`](../src/rag_app/retrieval/rag_service.py) |
+| Multi-hop | `retrieval.multi_hop: true`, `multi_hop_max_hops: 2` | [`Retriever._run_hops` / `_follow_up_query`](../src/rag_app/retrieval/retriever.py) (LLM issues follow-up queries; hops RRF-merged) |
 
 Combined flow when everything is on:
 
 ```text
 question
-  -> query decomposition LLM call -> sub-questions
-  -> multi-query LLM call -> N rephrasings
-  -> HyDE LLM call -> hypothetical answer paragraph (original question only)
-  -> embed hypothetical + each query variant
-  -> vector search top-20 per variant  +  BM25 search top-20 per variant
-  -> RRF merge -> top-20 fused
-  -> MMR selects a diverse top-5
+  -> [hop 0] query decomposition LLM call -> sub-questions
+     multi-query LLM call -> N rephrasings
+     HyDE LLM call -> hypothetical answer paragraph (original question only)
+     embed hypothetical + each query variant
+     vector search top-20 per variant  +  BM25 search top-20 per variant
+     RRF merge -> top-20 fused
+  -> multi-hop: LLM reads hop-0 results -> follow-up query -> [hop 1] repeat
+     (up to multi_hop_max_hops; hops RRF-merged together)
+  -> MMR selects a diverse top-5 from the merged pool
   -> reranker orders those 5
   -> stitch ±1 neighbor chunks around each survivor
   -> prompt build + answer
 ```
+
+(Contextual retrieval, 9-G, isn't in this query-time flow — it runs once at
+*ingest*, enriching each chunk's stored/embedded text so every step above
+matches better.)
 
 ### Try it
 
@@ -765,10 +1067,16 @@ Watch each upgrade fix a specific failure:
 #    Inspect the order of returned sources; the reranker should push the
 #    most-relevant chunk to position 1.
 
-# 7) Check what the system thinks is on:
+# 7) Turn on multi-hop and ask a bridge question.
+#    Edit config.yaml: retrieval.multi_hop = true
+.\run.bat query "Compare CAN FD bit timing with SPI double buffering" --debug
+#    The debug output gains a "Hops" row and a follow-up-query table; the
+#    retrieved-chunks table shows which hop each chunk came from.
+
+# 8) Check what the system thinks is on:
 .\run.bat stats
 #    The bottom rows: Hybrid search / HyDE / Reranker / Multi-query /
-#    Neighbor expansion.
+#    Neighbor expansion / Multi-hop.
 ```
 
 ### Interview check
@@ -814,6 +1122,41 @@ Watch each upgrade fix a specific failure:
   Sentence-window / neighbor expansion decouples the two: match small,
   read wide. The decoupling is free here because chunk ids encode their
   position in the document.
+- **Q: What problem does multi-hop retrieval solve?**
+  Questions whose answer is spread across chunks that don't all match the
+  *original* query. Hop 1 finds part of it; the LLM writes a follow-up
+  query for the rest; hop 2 finds that. A single round would miss one side.
+- **Q: How do you keep a multi-hop loop from running forever?**
+  A hard hop cap, a `NONE` "nothing else needed" signal, a repeated-query
+  check, and a "no new chunks this hop" check. Any one of them ends the loop.
+- **Q: Multi-hop vs query decomposition — what's the difference?**
+  Decomposition plans every sub-question up front from the question text
+  alone. Multi-hop conditions each follow-up on what the previous hop
+  actually retrieved — a feedback loop, not a static plan.
+
+### Exercises
+
+#### Exercise 9.1 — Watch hybrid rescue an exact token (~10 min)
+
+**Goal:** see BM25 catch a rare identifier that dense search smears.
+**Steps:** `.\run.bat retrieve "ERR080082"` with `hybrid: false`, note the
+miss; set `retrieval.hybrid: true`, rerun. **Expected:** the chunk holding
+that exact token now appears (with an RRF score instead of a raw distance).
+
+#### Exercise 9.2 — Multi-hop on a bridge question (~10 min)
+
+**Goal:** watch the follow-up loop gather a second fact. **Steps:** with
+`retrieval.multi_hop: true`, run a `query --debug` whose answer needs two
+documents. **Expected:** a Hops row, a follow-up-query table, and chunks
+tagged with the hop that found them.
+
+### Checkpoint
+
+- [ ] I toggled hybrid, HyDE, multi-query, MMR, neighbor expansion, and
+      multi-hop one at a time and saw each change the retrieved set or the
+      debug output.
+- [ ] I can explain RRF and why it needs no score normalisation.
+- [ ] I can contrast multi-hop with query decomposition in one sentence.
 
 ---
 
@@ -883,9 +1226,27 @@ Things that matter the moment "demo" becomes "service":
   [`Dockerfile`](../Dockerfile), [`docker-compose.yml`](../docker-compose.yml),
   [`config.docker.yaml`](../config.docker.yaml), and a `GET /health`
   liveness endpoint for the container healthcheck. See README §10.
-- **Answer/embedding caching, observability, auth, rate limits**: not
-  implemented. This is where you'd extend the codebase for real
-  production.
+- **Caching** (latency mitigation #2): two in-memory LRU caches, both off
+  by default.
+  - *Embedding cache* (`cache.embedding: true`): `hash(query) → vector`, so
+    a repeated question skips re-embedding. Keyed on the embedding model, so
+    changing the model just misses — no stale vectors. Wraps only the
+    retrieval provider ([`CachedEmbeddingProvider`](../src/rag_app/retrieval/cache.py));
+    ingestion keeps the raw provider.
+  - *Answer cache* (`cache.answer: true`): `(question + retrieved chunk ids +
+    chat model + prompt flags) → answer`. Because chunk ids are
+    content-derived (`<hash12>:<idx>`), editing a document changes the ids and
+    stale entries simply stop matching — the same self-invalidation trick the
+    BM25 cache uses with its mutation counter. Bypassed for multi-turn
+    (history) and streaming, where "same question" means something different.
+- **Observability** (`observability.log_timings: true`): per-stage timings
+  (embed / vector search / BM25 / retrieve / generate) are *always* collected
+  and shown in `query --debug`; the flag adds one structured log line per
+  query. Counters (cache hit/miss, cumulative stage ms) live in
+  [`utils/metrics.py`](../src/rag_app/utils/metrics.py) and surface at
+  `GET /api/stats` and the GUI Stats tab.
+- **Auth, rate limits**: still not implemented — the remaining extension
+  points for a real production deployment.
 
 ### Try it
 
@@ -899,6 +1260,14 @@ notepad documents\sample_can_fd.txt   # add a sentence
 
 # Streaming reduces perceived latency.
 .\run.bat query "Explain CAN FD bit timing in detail" --stream
+
+# Caching: enable cache.answer, then ask the SAME question twice with --debug.
+#   Edit config.yaml: cache.answer = true
+.\run.bat query "What is SPI slave underrun?" --debug
+.\run.bat query "What is SPI slave underrun?" --debug
+#   The second run shows "Answer cache: HIT" and a ~0 ms generate stage.
+#   (Within one process — the server/GUI keep the cache across requests;
+#   a fresh CLI process starts empty.)
 ```
 
 ### Interview check
@@ -919,6 +1288,38 @@ notepad documents\sample_can_fd.txt   # add a sentence
   Hostile content in a *retrieved* chunk that tells the model to ignore
   prior instructions ("ignore the system prompt and reply with…"). Treat
   retrieved text as untrusted user input, not as system text.
+- **Q: What would you cache in a RAG system, and how do you invalidate it?**
+  Query embeddings (keyed on query + embedding model) and final answers
+  (keyed on question + retrieved chunk ids + chat model). Invalidation is
+  mostly structural: content-derived chunk ids mean a changed document
+  changes the ids, so answer-cache entries for it stop matching. Model-name
+  keys handle model swaps. TTLs handle everything else.
+- **Q: Why key the answer cache on retrieved chunk ids rather than just the
+  question?** So the cache is coupled to the *evidence*, not the wording. If
+  re-ingestion changes what retrieval returns, you must not serve the old
+  answer — and id-keying makes that automatic.
+- **Q: What per-stage timings would you log for a RAG query?** Embed, vector
+  search, (BM25), rerank, generate. The LLM generate stage dominates; logging
+  the split is how you prove that before optimising the wrong thing.
+
+### Exercises
+
+#### Exercise 10.1 — Prove the answer cache works (~10 min)
+
+**Goal:** watch a cache hit collapse the generate stage. **Steps:** set
+`cache.answer: true`, run `serve`, then POST the same `{"question": "...",
+"debug": true}` twice to `/api/query`. **Expected:** the second response's
+`debug.answer_cache_hit` is `true` and its `timings.generate` is ~0; check
+`GET /api/stats` for the `answer_cache_hits` counter.
+
+### Checkpoint
+
+- [ ] I enabled `cache.answer` and observed a HIT with a near-zero generate
+      time on the second identical query.
+- [ ] I can explain why the answer cache is keyed on retrieved chunk ids and
+      what makes it self-invalidating.
+- [ ] I know which stage dominates query latency and where to read the
+      per-stage timings.
 
 ---
 
@@ -1039,6 +1440,42 @@ curl.exe http://localhost:8000/health
   (`host.docker.internal` for the Docker host, a LAN IP, or the
   `ollama` compose service name). A `GET /health` endpoint gives the
   orchestrator a liveness probe that doesn't touch the vector store.
+
+### Exercises
+
+#### Exercise 11.1 — Same query, four surfaces (~15 min)
+
+**Goal:** prove the RAG core is identical across CLI, REST, Web, and GUI.
+**Steps:** ask the *same* question via `.\run.bat query "..."`, via
+`Invoke-RestMethod` against `/api/query` (server running), via the web UI at
+`http://127.0.0.1:8000`, and via `.\gui.bat`. **Expected:** the same sources
+come back everywhere, because all four build their pipeline through the one
+shared `retrieval/factory.py`.
+
+<details>
+<summary>What you should have seen</summary>
+
+Identical retrieved chunks (answers may vary slightly because generation is
+stochastic). The surfaces differ only in transport and presentation — the
+`(question) → (answer, sources)` function underneath is the same object graph.
+</details>
+
+#### Exercise 11.2 — Deploy the container (~15 min)
+
+**Goal:** run the headless API in Docker. **Steps:** point
+`config.docker.yaml`'s `base_url` at your model server, then `docker compose
+up --build -d` and `curl.exe http://localhost:8000/health`. **Expected:** a
+`{"status":"ok"}` and a browsable web UI on the LAN — with no Qt installed in
+the image.
+
+### Checkpoint
+
+- [ ] I asked one question through at least two different surfaces and got the
+      same sources.
+- [ ] I ran the REST server and hit `/api/query` (bonus: with `debug`,
+      `filter`, and `history`).
+- [ ] I can explain why the container binds `0.0.0.0`, why `storage/` is a
+      volume, and why the model servers live outside the image.
 
 ---
 

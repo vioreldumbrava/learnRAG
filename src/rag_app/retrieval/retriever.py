@@ -7,14 +7,21 @@ Supports:
     - HyDE (Hypothetical Document Embeddings): expand query via LLM (#7)
     - Multi-query retrieval: LLM rephrasings merged via RRF (#11)
     - Query decomposition: sub-questions merged via RRF
+    - Multi-hop / iterative retrieval: LLM issues follow-up queries, hops
+      merged via RRF
     - MMR diversity selection: de-duplicate the final top-k
     - Neighbor expansion: stitch in the chunks around each hit (#12)
+
+A single query flows through two internal steps that multi-hop reuses:
+    _gather()   — variants + HyDE + vector + BM25, RRF-merged into one pool
+    _finalize() — score threshold, MMR / top-k cut, neighbor expansion
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from time import perf_counter
 
 from rag_app.models import ChatMessage, RetrievedChunk
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
@@ -48,6 +55,14 @@ _DECOMPOSE_SYSTEM = (
     "sub-questions, one per line, no numbering, no explanations."
 )
 
+_MULTI_HOP_SYSTEM = (
+    "You are helping a search system gather evidence to answer a question. "
+    "Given the question and the passages found so far, decide what is still "
+    "missing and output ONE short follow-up search query that would retrieve "
+    "it. If the passages already contain everything needed, output exactly "
+    "NONE. Output only the query (or NONE) — no numbering, no explanation."
+)
+
 
 class Retriever:
     def __init__(
@@ -68,6 +83,8 @@ class Retriever:
         mmr_lambda: float = 0.5,
         return_candidates: bool = False,
         neighbor_radius: int = 0,
+        multi_hop: bool = False,
+        multi_hop_max_hops: int = 2,
         chat_provider: ChatProvider | None = None,
         where: dict | None = None,
     ) -> None:
@@ -86,15 +103,43 @@ class Retriever:
         self.mmr_lambda = mmr_lambda
         self.return_candidates = return_candidates
         self.neighbor_radius = neighbor_radius
+        self.multi_hop = multi_hop
+        self.multi_hop_max_hops = multi_hop_max_hops
         self.chat_provider = chat_provider
         self.where = where
 
         # BM25 index — built lazily on first hybrid query.
         self._bm25: BM25Index | None = None
+        # Follow-up queries issued on the last multi-hop retrieve() (for debug).
+        self.last_hop_queries: list[str] = []
+        # Per-stage timings (ms) from the last retrieve() (for --debug / metrics).
+        self.last_timings: dict[str, float] = {}
 
     def retrieve(self, question: str) -> list[RetrievedChunk]:
         if not question or not question.strip():
             return []
+
+        self.last_hop_queries = []
+        self.last_timings = {}
+        pool, primary_query_embedding, merged = self._gather(question)
+
+        # --- Multi-hop: let the LLM chase missing evidence, merge the hops ---
+        if self.multi_hop and self.chat_provider is not None:
+            pool, merged = self._run_hops(question, pool, merged)
+
+        return self._finalize(pool, primary_query_embedding, merged, question)
+
+    # ----- candidate generation (shared by every hop) ----------------------
+
+    def _gather(
+        self, question: str,
+    ) -> tuple[list[RetrievedChunk], list[float] | None, bool]:
+        """One retrieval round: variants + HyDE + vector + BM25, RRF-merged.
+
+        Returns (ranked pool capped to target_k, primary query embedding,
+        whether an RRF merge happened). The score-threshold filter is only
+        valid on raw distances, so `_finalize` skips it when merged is True.
+        """
 
         # --- Query variants: original + optional decomposition/multi-query ---
         variants = [question]
@@ -121,20 +166,25 @@ class Retriever:
         result_lists: list[list[RetrievedChunk]] = []
         primary_query_embedding: list[float] | None = None
         for text in embed_texts:
+            t0 = perf_counter()
             query_embedding = self.embedding_provider.embed_query(text)
+            self._add_timing("embed_ms", (perf_counter() - t0) * 1000.0)
             if primary_query_embedding is None:
                 primary_query_embedding = query_embedding
-            result_lists.append(
-                self.vector_store.search(
-                    query_embedding, top_k=fetch_k, where=self.where,
-                )
+            t0 = perf_counter()
+            hits = self.vector_store.search(
+                query_embedding, top_k=fetch_k, where=self.where,
             )
+            self._add_timing("vector_search_ms", (perf_counter() - t0) * 1000.0)
+            result_lists.append(hits)
         n_vector_lists = len(result_lists)
 
         # --- Hybrid: add a BM25 list per variant (#2) ---
         if self.hybrid:
             for text in variants:
+                t0 = perf_counter()
                 bm25_results = self._bm25_search(text, top_k=fetch_k)
+                self._add_timing("bm25_ms", (perf_counter() - t0) * 1000.0)
                 if bm25_results:
                     result_lists.append(bm25_results)
 
@@ -154,8 +204,19 @@ class Retriever:
         else:
             results = result_lists[0][:target_k]
 
+        return results, primary_query_embedding, merging
+
+    # ----- final selection (score threshold, MMR, neighbors) ---------------
+
+    def _finalize(
+        self,
+        results: list[RetrievedChunk],
+        primary_query_embedding: list[float] | None,
+        merged: bool,
+        question: str,
+    ) -> list[RetrievedChunk]:
         # --- Score threshold filter (raw distances only, not RRF scores) ---
-        if self.score_threshold is not None and not merging:
+        if self.score_threshold is not None and not merged:
             results = [
                 r for r in results
                 if r.score is None or r.score <= self.score_threshold
@@ -183,6 +244,101 @@ class Retriever:
             results = self.expand_neighbors(results)
 
         return results
+
+    # ----- Multi-hop / iterative retrieval ---------------------------------
+
+    def _run_hops(
+        self,
+        question: str,
+        pool: list[RetrievedChunk],
+        merged: bool,
+    ) -> tuple[list[RetrievedChunk], bool]:
+        """Iteratively ask the LLM for follow-up queries and merge the hops.
+
+        Guards against runaway loops four ways: a hard `multi_hop_max_hops`
+        cap, stopping on a NONE/empty reply, stopping when a follow-up repeats
+        an already-searched query, and stopping when a hop finds no new chunks.
+        """
+
+        # Hop 0 is the original retrieval; stamp it so debug always has a hop.
+        # Copy-on-write: some backends alias the stored metadata dict, so never
+        # mutate it in place.
+        for chunk in pool:
+            chunk.metadata = {**chunk.metadata, "hop": 0}
+
+        hop_lists = [pool]
+        searched = {self._normalize_query(question)}
+        seen_ids = {c.id for c in pool}
+        evidence = list(pool)
+
+        for hop in range(1, self.multi_hop_max_hops + 1):
+            follow_up = self._follow_up_query(question, evidence)
+            if not follow_up:
+                break
+            norm = self._normalize_query(follow_up)
+            if norm in searched:
+                logger.info("Multi-hop stop: follow-up repeats a prior query")
+                break
+            searched.add(norm)
+            self.last_hop_queries.append(follow_up)
+
+            hop_pool, _, _ = self._gather(follow_up)
+            for chunk in hop_pool:
+                chunk.metadata = {**chunk.metadata, "hop": hop}
+
+            new_ids = {c.id for c in hop_pool} - seen_ids
+            if not new_ids:
+                logger.info("Multi-hop stop: hop %d found no new chunks", hop)
+                break
+            seen_ids |= {c.id for c in hop_pool}
+            evidence.extend(hop_pool)
+            hop_lists.append(hop_pool)
+
+        if len(hop_lists) == 1:
+            return pool, merged  # no follow-ups ran; leave the pool untouched
+
+        fused = reciprocal_rank_fusion(*hop_lists)[: self._target_k()]
+        return fused, True
+
+    def _follow_up_query(
+        self, question: str, evidence: list[RetrievedChunk],
+    ) -> str | None:
+        """Ask the LLM for one follow-up search query, or None to stop."""
+
+        assert self.chat_provider is not None
+        context = "\n\n".join(
+            f"[{i + 1}] {c.text[:300]}" for i, c in enumerate(evidence[:8])
+        )
+        user = f"Question: {question}\n\nPassages found so far:\n{context}"
+        messages = [
+            ChatMessage(role="system", content=_MULTI_HOP_SYSTEM),
+            ChatMessage(role="user", content=user),
+        ]
+        try:
+            raw = self.chat_provider.generate(
+                messages, temperature=0.2, max_tokens=80,
+            )
+        except Exception:
+            logger.warning("Multi-hop follow-up failed — stopping hops")
+            return None
+
+        lines = self._parse_generated_lines(raw, question)
+        if not lines:
+            return None
+        follow_up = lines[0]
+        if follow_up.strip().rstrip(".").upper() == "NONE":
+            return None
+        logger.info("Multi-hop follow-up: %s", follow_up)
+        return follow_up
+
+    @staticmethod
+    def _normalize_query(query: str) -> str:
+        return " ".join(query.lower().split())
+
+    def _add_timing(self, stage: str, ms: float) -> None:
+        """Accumulate a per-stage timing across all hops of one retrieve()."""
+
+        self.last_timings[stage] = self.last_timings.get(stage, 0.0) + ms
 
     # ----- BM25 (#2) -------------------------------------------------------
 

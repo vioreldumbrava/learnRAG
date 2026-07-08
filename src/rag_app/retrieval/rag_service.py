@@ -22,8 +22,10 @@ from typing import Iterator
 
 from rag_app.models import ChatMessage, RagAnswer, RetrievedChunk
 from rag_app.providers.base import ChatProvider
+from rag_app.retrieval.cache import AnswerCache
 from rag_app.retrieval.prompt_builder import PromptBuilder
 from rag_app.retrieval.retriever import Retriever
+from rag_app.utils.metrics import COUNTERS, StageTimings, log_query
 
 
 @dataclass
@@ -36,6 +38,9 @@ class DebugInfo:
     chat_model: str
     retrieved_chunks: list[RetrievedChunk] = field(default_factory=list)
     prompt_messages: list[ChatMessage] = field(default_factory=list)
+    hop_queries: list[str] = field(default_factory=list)
+    timings: dict[str, float] = field(default_factory=dict)
+    answer_cache_hit: bool = False
 
     @property
     def prompt_char_count(self) -> int:
@@ -55,6 +60,8 @@ class RagService:
         reranker_top_k: int | None = None,
         reranker_model: str | None = None,
         reranker_backend: str = "llm",
+        answer_cache: AnswerCache | None = None,
+        log_timings: bool = False,
     ) -> None:
         self.retriever = retriever
         self.prompt_builder = prompt_builder
@@ -67,6 +74,8 @@ class RagService:
             reranker_model or ("llm-rerank" if reranker_chat_provider else None)
         )
         self._reranker_backend = reranker_backend
+        self._answer_cache = answer_cache
+        self._log_timings = log_timings
 
     def answer(
         self,
@@ -75,12 +84,14 @@ class RagService:
     ) -> RagAnswer:
         """Single-shot answer with optional conversation history (#1)."""
 
-        chunks = self._retrieve_and_rerank(question)
+        timings = StageTimings()
+        with timings.stage("retrieve"):
+            chunks = self._retrieve_and_rerank(question)
         messages = self.prompt_builder.build(question, chunks, history=history)
-        text = self.chat_provider.generate(
-            messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+        text, cache_hit = self._generate(question, chunks, messages, history, timings)
+        log_query(
+            question, [c.id for c in chunks], timings.as_dict(),
+            enabled=self._log_timings, answer_cache_hit=cache_hit,
         )
         return RagAnswer(answer=text, sources=chunks)
 
@@ -89,8 +100,14 @@ class RagService:
         question: str,
         history: list[ChatMessage] | None = None,
     ) -> tuple[RagAnswer, DebugInfo]:
-        chunks = self._retrieve_and_rerank(question)
+        timings = StageTimings()
+        with timings.stage("retrieve"):
+            chunks = self._retrieve_and_rerank(question)
         messages = self.prompt_builder.build(question, chunks, history=history)
+        text, cache_hit = self._generate(question, chunks, messages, history, timings)
+
+        # Fold in the retriever's own per-stage breakdown (embed / search / bm25).
+        timings.merge(getattr(self.retriever, "last_timings", None))
 
         debug = DebugInfo(
             embedding_provider=getattr(
@@ -103,12 +120,13 @@ class RagService:
             chat_model=getattr(self.chat_provider, "model_name", "unknown"),
             retrieved_chunks=chunks,
             prompt_messages=messages,
+            hop_queries=list(getattr(self.retriever, "last_hop_queries", [])),
+            timings=timings.as_dict(),
+            answer_cache_hit=cache_hit,
         )
-
-        text = self.chat_provider.generate(
-            messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+        log_query(
+            question, [c.id for c in chunks], timings.as_dict(),
+            enabled=self._log_timings, answer_cache_hit=cache_hit,
         )
         return RagAnswer(answer=text, sources=chunks), debug
 
@@ -133,6 +151,46 @@ class RagService:
         return token_iter, chunks
 
     # ----- internals -------------------------------------------------------
+
+    def _generate(
+        self,
+        question: str,
+        chunks: list[RetrievedChunk],
+        messages: list[ChatMessage],
+        history: list[ChatMessage] | None,
+        timings: StageTimings,
+    ) -> tuple[str, bool]:
+        """Generate the answer, consulting the answer cache when eligible.
+
+        The cache is bypassed for multi-turn (history-bearing) queries: the
+        same question means something different mid-conversation.
+        """
+
+        cacheable = self._answer_cache is not None and not history
+        key = None
+        if cacheable:
+            key = self._answer_cache.make_key(
+                question,
+                [c.id for c in chunks],
+                chat_model=getattr(self.chat_provider, "model_name", "unknown"),
+                answer_only_from_context=self.prompt_builder.answer_only_from_context,
+                include_sources=self.prompt_builder.include_sources,
+            )
+            cached = self._answer_cache.get(key)
+            if cached is not None:
+                COUNTERS.hit("answer_cache")
+                return cached, True
+            COUNTERS.miss("answer_cache")
+
+        with timings.stage("generate"):
+            text = self.chat_provider.generate(
+                messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        if cacheable and key is not None:
+            self._answer_cache.put(key, text)
+        return text, False
 
     def _retrieve_and_rerank(self, question: str) -> list[RetrievedChunk]:
         """Retrieve chunks and optionally rerank them (#6)."""

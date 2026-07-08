@@ -15,10 +15,14 @@ from rag_app.ingestion.document_loader import (
     load_single,
     scan_folder,
 )
-from rag_app.ingestion.hash_tracker import HashTracker, compute_file_hash
+from rag_app.ingestion.hash_tracker import (
+    HashTracker,
+    compute_chunking_fingerprint,
+    compute_file_hash,
+)
 from rag_app.ingestion.text_extractor import extract_text
 from rag_app.models import DocumentChunk
-from rag_app.providers.base import EmbeddingProvider
+from rag_app.providers.base import ChatProvider, EmbeddingProvider
 from rag_app.vectorstores.base import VectorStore
 
 
@@ -80,16 +84,21 @@ class IngestService:
         config: AppConfig,
         embedding_provider: EmbeddingProvider,
         vector_store: VectorStore,
+        chat_provider: ChatProvider | None = None,
     ) -> None:
         self.config = config
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        # Only needed when chunking.contextual is on (contextual retrieval
+        # calls the chat model per chunk at ingest time).
+        self.chat_provider = chat_provider
         self.chunker = Chunker(
             chunk_size=config.chunking.chunk_size,
             chunk_overlap=config.chunking.chunk_overlap,
             strategy=config.chunking.strategy,
         )
         self.hash_tracker = HashTracker(config.paths.index_file)
+        self._chunking_fingerprint = compute_chunking_fingerprint(config.chunking)
 
     def run(
         self,
@@ -146,7 +155,9 @@ class IngestService:
         path = doc.path
         current_hash = compute_file_hash(path)
 
-        if not force and self.hash_tracker.is_unchanged(path, current_hash):
+        if not force and self.hash_tracker.is_unchanged(
+            path, current_hash, self._chunking_fingerprint,
+        ):
             logger.info("Unchanged, skipping: %s", path)
             return False
 
@@ -176,22 +187,33 @@ class IngestService:
         # Derive folder-based metadata for filtering (#4).
         folder_meta = _derive_folder_metadata(doc, self.config.paths.documents_dir)
 
-        chunks = [
-            DocumentChunk(
-                id=f"{current_hash[:12]}:{i}",
-                text=chunk_text,
-                metadata={
-                    "source_file": doc.source_file,
-                    "source_path": doc.source_path,
-                    "chunk_index": i,
-                    "document_hash": current_hash,
-                    "file_type": doc.file_type,
-                    "section": _extract_section(chunk_text),
-                    **folder_meta,
-                },
+        # Contextual retrieval: prepend an LLM-written "situating" sentence to
+        # each chunk before embedding (one chat call per chunk).
+        prefixes = self._contextualize(text, chunk_texts)
+
+        chunks = []
+        for i, chunk_text in enumerate(chunk_texts):
+            prefix = prefixes[i] if prefixes else ""
+            stored_text = f"{prefix}\n\n{chunk_text}" if prefix else chunk_text
+            metadata = {
+                "source_file": doc.source_file,
+                "source_path": doc.source_path,
+                "chunk_index": i,
+                "document_hash": current_hash,
+                "file_type": doc.file_type,
+                "section": _extract_section(chunk_text),
+                **folder_meta,
+            }
+            if prefix:
+                metadata["contextualized"] = True
+                metadata["context_prefix"] = prefix
+            chunks.append(
+                DocumentChunk(
+                    id=f"{current_hash[:12]}:{i}",
+                    text=stored_text,
+                    metadata=metadata,
+                )
             )
-            for i, chunk_text in enumerate(chunk_texts)
-        ]
 
         embeddings = self.embedding_provider.embed_texts([c.text for c in chunks])
         if summary.embedding_dim is None and embeddings:
@@ -208,10 +230,37 @@ class IngestService:
             current_hash,
             chunks=len(chunks),
             document_hash=current_hash,
+            chunking_fingerprint=self._chunking_fingerprint,
         )
         summary.total_chunks += len(chunks)
         logger.info("Indexed %d chunks from %s", len(chunks), path)
         return True
+
+    def _contextualize(
+        self, document_text: str, chunk_texts: list[str],
+    ) -> list[str] | None:
+        """Return per-chunk context prefixes, or None when contextual is off.
+
+        Requires a chat provider; if the flag is on but none was supplied we
+        warn and fall back to raw text so ingestion still succeeds.
+        """
+
+        if not self.config.chunking.contextual:
+            return None
+        if self.chat_provider is None:
+            logger.warning(
+                "chunking.contextual is on but no chat provider was supplied — "
+                "ingesting without contextualization."
+            )
+            return None
+        from rag_app.ingestion.contextualizer import contextualize_chunks
+
+        return contextualize_chunks(
+            document_text,
+            chunk_texts,
+            self.chat_provider,
+            max_doc_chars=self.config.chunking.contextual_document_chars,
+        )
 
 
 def _derive_folder_metadata(doc: LoadedDocument, documents_dir: str) -> dict[str, str]:

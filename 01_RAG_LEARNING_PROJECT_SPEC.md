@@ -1,5 +1,11 @@
 # Local RAG Learning Project Specification
 
+> **Historical spec (frozen).** This is the original project specification and
+> is kept for reference. The living curriculum is
+> [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md); the living
+> feature/config reference is README §7/§8. Most "Future features" listed here
+> have since been implemented (see README §7).
+
 ## 1. Goal
 
 Build a local Retrieval-Augmented Generation system from scratch enough to understand every important layer:

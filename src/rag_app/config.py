@@ -26,6 +26,7 @@ class PathsSection(BaseModel):
     documents_dir: str = "documents"
     storage_dir: str = "storage"
     chroma_dir: str = "storage/chroma"
+    qdrant_dir: str = "storage/qdrant"
     index_file: str = "storage/document_index.json"
 
 
@@ -36,6 +37,14 @@ class ChunkingSection(BaseModel):
     chunk_size: int = 900
     chunk_overlap: int = 150
     strategy: ChunkingStrategy = "paragraph"
+    # Contextual retrieval (Anthropic-style): at ingest time, ask the chat LLM
+    # to write 1-2 sentences situating each chunk within its document, and
+    # prepend that to the chunk before embedding. Improves retrieval of
+    # context-dependent chunks at the cost of one LLM call PER CHUNK at ingest.
+    contextual: bool = False
+    # The document is truncated to this many characters before being shown to
+    # the LLM as context (local models have small windows).
+    contextual_document_chars: int = Field(default=6000, ge=500)
 
     @field_validator("chunk_size")
     @classmethod
@@ -67,8 +76,11 @@ class EmbeddingsSection(BaseModel):
 
 
 class VectorStoreSection(BaseModel):
-    provider: Literal["chroma"] = "chroma"
+    provider: Literal["chroma", "qdrant"] = "chroma"
     collection_name: str = "local_rag_docs"
+    # Qdrant only: set to a server URL (http://host:6333) for server mode.
+    # Left null, Qdrant runs embedded against paths.qdrant_dir.
+    qdrant_url: str | None = None
 
 
 class RetrievalSection(BaseModel):
@@ -91,6 +103,12 @@ class RetrievalSection(BaseModel):
     # After ranking, stitch in the ±N adjacent chunks of each hit so the LLM
     # sees the surrounding context (0 = off).
     neighbor_radius: int = Field(default=0, ge=0, le=5)
+    # Multi-hop / iterative retrieval: after the first retrieval, let the LLM
+    # look at what was found and issue a follow-up search query, then merge
+    # the hops with RRF. Each hop = +1 LLM call + 1 retrieval round.
+    multi_hop: bool = False
+    # Maximum number of ADDITIONAL retrieval rounds beyond the first.
+    multi_hop_max_hops: int = Field(default=2, ge=1, le=5)
 
 
 class PromptSection(BaseModel):
@@ -105,6 +123,25 @@ class OcrSection(BaseModel):
     min_chars_per_page: int = 50
     # Tesseract language code(s), e.g. "eng", "eng+deu".
     lang: str = "eng"
+
+
+class CacheSection(BaseModel):
+    # Cache query embeddings: hash(query) -> vector. Skips re-embedding a
+    # repeated question. Keyed on the embedding model, so changing the model
+    # simply misses (no stale vectors).
+    embedding: bool = False
+    # Cache answers: (question + retrieved chunk ids + chat model + prompt
+    # flags) -> answer. Because chunk ids are content-derived, editing a
+    # document changes the ids and old entries stop matching (self-invalidating).
+    answer: bool = False
+    # Upper bound on entries per cache (LRU eviction beyond this).
+    max_entries: int = Field(default=1024, ge=1)
+
+
+class ObservabilitySection(BaseModel):
+    # Emit one structured log line per query with per-stage timings. Timings
+    # are always collected and shown in --debug; this only controls the log.
+    log_timings: bool = False
 
 
 class ServerSection(BaseModel):
@@ -122,6 +159,8 @@ class AppConfig(BaseModel):
     retrieval: RetrievalSection = Field(default_factory=RetrievalSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
     ocr: OcrSection = Field(default_factory=OcrSection)
+    cache: CacheSection = Field(default_factory=CacheSection)
+    observability: ObservabilitySection = Field(default_factory=ObservabilitySection)
     server: ServerSection = Field(default_factory=ServerSection)
 
 

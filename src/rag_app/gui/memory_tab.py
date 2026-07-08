@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 
 from rag_app.config import load_config
 from rag_app.ingestion.hash_tracker import HashTracker
-from rag_app.vectorstores.chroma_store import ChromaVectorStore
+from rag_app.vectorstores.factory import build_vector_store
 
 
 logger = logging.getLogger(__name__)
@@ -259,10 +259,7 @@ class MemoryTab(QWidget):
             QMessageBox.critical(self, "Invalid config", str(exc))
             return
 
-        store = ChromaVectorStore(
-            persist_dir=cfg.paths.chroma_dir,
-            collection_name=cfg.vector_store.collection_name,
-        )
+        store = build_vector_store(cfg)
         tracker = HashTracker(cfg.paths.index_file)
         removed = 0
         failed: list[tuple[str, str]] = []
@@ -336,10 +333,7 @@ class MemoryTab(QWidget):
             self.status_label.setText(f"Failed to load config: {exc}")
             return None
         try:
-            store = ChromaVectorStore(
-                persist_dir=cfg.paths.chroma_dir,
-                collection_name=cfg.vector_store.collection_name,
-            )
+            store = build_vector_store(cfg)
             return store.list_chunks(where=where, limit=2000)
         except Exception as exc:
             self.status_label.setText(f"Failed to read store: {exc}")

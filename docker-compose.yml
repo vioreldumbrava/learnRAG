@@ -42,5 +42,19 @@ services:
       - ollama-models:/root/.ollama
     restart: unless-stopped
 
+  # Optional Qdrant server. Off by default; enable with `--profile qdrant`.
+  # Then set in config.docker.yaml:
+  #   vector_store: { provider: "qdrant", qdrant_url: "http://qdrant:6333" }
+  # and build the API image with --build-arg WITH_QDRANT=true.
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["qdrant"]
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
 volumes:
   ollama-models:
+  qdrant-data:

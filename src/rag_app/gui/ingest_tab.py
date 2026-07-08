@@ -29,8 +29,8 @@ from PySide6.QtWidgets import (
 from rag_app.config import load_config
 from rag_app.gui.workers import run_in_thread
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
-from rag_app.providers.factory import build_embedding_provider
-from rag_app.vectorstores.chroma_store import ChromaVectorStore
+from rag_app.providers.factory import build_chat_provider, build_embedding_provider
+from rag_app.vectorstores.factory import build_vector_store
 
 
 _STATUS_COLOURS = {
@@ -144,11 +144,11 @@ class IngestTab(QWidget):
         def task() -> IngestSummary:
             cfg = load_config(config_path)
             embedding_provider = build_embedding_provider(cfg.embeddings)
-            store = ChromaVectorStore(
-                persist_dir=cfg.paths.chroma_dir,
-                collection_name=cfg.vector_store.collection_name,
+            store = build_vector_store(cfg)
+            ingest_chat = (
+                build_chat_provider(cfg.chat) if cfg.chunking.contextual else None
             )
-            service = IngestService(cfg, embedding_provider, store)
+            service = IngestService(cfg, embedding_provider, store, ingest_chat)
 
             # Folder case: scan ourselves so we know the total up-front, then
             # ingest one file at a time so progress events arrive incrementally.

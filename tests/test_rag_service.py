@@ -71,6 +71,11 @@ def test_debug_flow_returns_debug_info(
     assert len(debug.retrieved_chunks) == 1
     assert debug.prompt_char_count > 0
     assert any(m.role == "user" for m in debug.prompt_messages)
+    # Per-stage timings are always collected (retrieve + generate at least).
+    assert "retrieve" in debug.timings
+    assert "generate" in debug.timings
+    assert all(v >= 0 for v in debug.timings.values())
+    assert debug.answer_cache_hit is False
 
 
 def test_empty_question_returns_no_sources(

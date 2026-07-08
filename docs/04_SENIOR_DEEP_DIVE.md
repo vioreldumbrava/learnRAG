@@ -279,6 +279,11 @@ Things that landed in 2023–2025 that you should know exist:
 
 ### Contextual Retrieval (Anthropic, Sep 2024)
 
+> **Now implemented in this repo** — `chunking.contextual: true`
+> ([`contextualizer.py`](../src/rag_app/ingestion/contextualizer.py)). The
+> notes below are the senior framing; the mechanics are in
+> [00_LEARNING_PATH.md](00_LEARNING_PATH.md) Stage 9-G.
+
 Before embedding each chunk, prepend a 50–100-token "context paragraph"
 LLM-generated to summarise how the chunk fits in the overall doc.
 Anthropic reports ~40% reduction in retrieval failures.

@@ -4,6 +4,7 @@
 #
 # Build:            docker build -t rag-api .
 # Build with OCR:   docker build -t rag-api --build-arg WITH_OCR=true .
+# Build with Qdrant client: docker build -t rag-api --build-arg WITH_QDRANT=true .
 # Run (compose):    docker compose up --build -d
 
 FROM python:3.12-slim
@@ -17,12 +18,21 @@ RUN if [ "$WITH_OCR" = "true" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# Optional Qdrant backend (vector_store.provider: qdrant). Only the client is
+# needed in the image; run Qdrant itself as the compose `qdrant` service or
+# point qdrant_url at an external server.
+ARG WITH_QDRANT=false
+
 WORKDIR /app
 
 # README.md is referenced by pyproject metadata, so it must be present.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir . \
+RUN if [ "$WITH_QDRANT" = "true" ]; then \
+        pip install --no-cache-dir ".[qdrant]"; \
+    else \
+        pip install --no-cache-dir .; \
+    fi \
     && if [ "$WITH_OCR" = "true" ]; then \
         pip install --no-cache-dir pytesseract pdf2image Pillow; \
     fi

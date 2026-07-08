@@ -36,6 +36,9 @@ gui = [
 reranker = [
     "sentence-transformers>=3.0",
 ]
+qdrant = [
+    "qdrant-client>=1.9",
+]
 
 [project.scripts]
 rag-app = "rag_app.cli:app"

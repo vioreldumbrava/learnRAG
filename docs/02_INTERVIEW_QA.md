@@ -142,6 +142,47 @@ aware → recursive (try big separator, fall back to smaller) →
 semantic (embed sentences, group by similarity). Strategy choice
 matters more than chunk size in most cases.
 
+### 15a. How do you ingest scanned PDFs or images?
+
+Detect the image-only pages — after normal text extraction they come
+back near-empty — and run *those* through an OCR engine (Tesseract in
+this project) at ingest time. The recovered text is then chunked and
+embedded like any other document. OCR is an ingest-time step only; it
+never runs during a query. See `ocr.enabled` /
+[`extract_text`](../src/rag_app/ingestion/text_extractor.py).
+
+### 15b. Why gate OCR on `min_chars_per_page` instead of always running it?
+
+OCR is slow and introduces recognition errors. Born-digital pages
+already have perfect text, so OCR'ing them wastes time and can *lower*
+quality. Thresholding the extracted character count routes only the
+pages that actually need it to the OCR path.
+
+### 15c. What is contextual retrieval and what failure does it fix?
+
+A chunk lifted out of a long document loses the context that makes it
+findable — "the company reported a 3% rise" loses *which* company. At
+ingest, the chat LLM writes 1-2 sentences situating each chunk in its
+document; that prefix is prepended before embedding, so the chunk's
+vector (and its BM25 tokens) carry the missing context. Anthropic's
+result (Sep 2024) is that contextual embeddings + contextual BM25
+compound. Set `chunking.contextual: true`.
+
+### 15d. Why is contextual retrieval an ingest-time technique, and what's the cost?
+
+Because the enrichment is a property of the *stored* chunk, not the
+query — pay it once, not on every search. The cost is one chat-LLM call
+**per chunk** at ingest (minutes per document with a local model).
+Queries are completely unaffected.
+
+### 15e. Do you store the original chunk text or the contextualized text?
+
+This project stores the contextualized text (prefix + original) so BM25
+indexes it too, and keeps the raw prefix in `metadata["context_prefix"]`.
+Storing only the original would make the sparse index miss the added
+context; storing both (as text + recoverable metadata) is the pragmatic
+middle, at the cost of slightly longer prompts.
+
 ---
 
 ## Vector stores & indexes
@@ -181,6 +222,23 @@ No — it's derived data. Keep the original docs; treat the store as a
 cache that you can rebuild any time (and *must* rebuild if you change
 the embedding model). This project enforces that mental model by
 keeping `documents/` separate from `storage/chroma/`.
+
+### 20a. What breaks when you swap vector databases?
+
+Not the retrieval logic — it talks to a `VectorStore` interface. What
+breaks are the backend rules the adapter must reconcile: id formats
+(Qdrant needs UUID/int, so string chunk ids get uuid5-mapped), score
+orientation (similarity vs distance), and when the vector dimension must
+be declared (Qdrant up front, Chroma inferred). Swapping is a re-ingest,
+never a data migration.
+
+### 20b. Similarity vs distance — why does orientation matter?
+
+Higher-is-better (cosine similarity) and lower-is-better (cosine
+distance) are the same information inverted. If half your code assumes
+one and half assumes the other, thresholds and sort orders silently
+flip. This project standardises on *distance* (lower = closer), so the
+Qdrant adapter converts `1 - similarity` at the boundary.
 
 ---
 
@@ -252,6 +310,30 @@ hypothetical *answer* to the question, embed that, retrieve with the
 hypothetical's embedding. Often beats the literal question because
 "answers look like answers" in embedding space. Extra LLM call adds
 latency.
+
+### 29a. What is multi-hop (iterative) retrieval and what does it solve?
+
+Some answers need facts spread across chunks that don't all match the
+original query, so one retrieval round misses a side. Multi-hop
+retrieves, shows the LLM the results, lets it write a follow-up search
+query for what's still missing, retrieves again, and merges the hops
+with RRF. It's the fix for "bridge" questions. Implemented here via
+`retrieval.multi_hop`.
+
+### 29b. Multi-hop vs query decomposition?
+
+Decomposition plans all sub-questions up front from the question text
+alone. Multi-hop conditions each follow-up on what the previous hop
+*actually retrieved* — a feedback loop rather than a static plan. Both
+merge with RRF; multi-hop is strictly more adaptive and strictly more
+LLM calls.
+
+### 29c. How do you stop a multi-hop loop from running forever?
+
+Four guards, any of which ends it: a hard hop cap
+(`multi_hop_max_hops`), a `NONE` reply meaning "nothing else needed", a
+check that the follow-up isn't a repeat of an earlier query, and a check
+that the hop actually found new chunks.
 
 ---
 
@@ -353,6 +435,31 @@ Per query: the question, top-K IDs + scores, retrieval latency,
 generation latency, model used, prompt token count, the answer, and
 ideally a faithfulness score from an offline LLM judge. Without this,
 you can't debug retrieval misses or hallucinations after the fact.
+This project collects per-stage timings + cache counters in
+[`utils/metrics.py`](../src/rag_app/utils/metrics.py), shown in
+`query --debug` and at `GET /api/stats`.
+
+### 41a. What would you cache in a RAG system?
+
+Query embeddings (`hash(query) → vector`, keyed on the embedding model)
+and final answers (`question + retrieved chunk ids + chat model → answer`).
+Embeddings are cheap but repeated; answers are expensive and often
+repeated verbatim. Both are implemented here behind `cache.embedding` /
+`cache.answer`.
+
+### 41b. How do you invalidate a RAG answer cache?
+
+Mostly structurally. Because chunk ids are content-derived, re-ingesting a
+changed document changes its ids, so the retrieved id-set changes and old
+entries stop matching — no TTL needed. Keying on the chat model handles
+model swaps. You also bypass the cache for multi-turn and streaming, where
+"same question" isn't really the same request.
+
+### 41c. Why key the answer cache on retrieved chunk ids, not just the question?
+
+To couple the cache to the *evidence*. Two users asking the same question
+after a re-ingest should not get a pre-ingest answer. Id-keying makes the
+cache miss automatically the moment retrieval would return different chunks.
 
 ### 42. When would you build hybrid search vs add a reranker first?
 

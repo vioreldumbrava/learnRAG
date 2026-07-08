@@ -65,3 +65,24 @@ class VectorStore(ABC):
         result. Used by MMR so candidates don't have to be re-embedded.
         """
         raise NotImplementedError
+
+    def list_chunks(
+        self,
+        *,
+        where: dict | None = None,
+        limit: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """List stored chunks, optionally filtered/capped. Optional override.
+
+        Used by the `inspect` CLI command, the REST `/api/chunks` endpoint,
+        and the GUI. Not part of the minimal storage contract, but every
+        real backend supports it.
+        """
+        raise NotImplementedError
+
+    def peek_embedding_dim(self) -> int | None:
+        """Return the dimension of any one stored embedding, or None if empty.
+
+        Optional override — surfaced by `inspect` / `stats`.
+        """
+        raise NotImplementedError

@@ -633,6 +633,115 @@ retrieval:
 
 That uses `sentence_transformers.CrossEncoder` lazily on first query.
 
+### Multi-hop (iterative) retrieval
+
+```yaml
+retrieval:
+  multi_hop: true
+  multi_hop_max_hops: 2   # additional retrieval rounds beyond the first (1-5)
+```
+
+For questions whose answer is spread across chunks that don't co-occur, one
+retrieval round misses a side. Multi-hop retrieves, shows the LLM what came
+back, lets it write a **follow-up search query** for what's still missing,
+retrieves again, and merges the hops with RRF. Unlike query decomposition
+(which plans all sub-questions up front), each hop is conditioned on what the
+previous hop found.
+
+The loop is bounded four ways — the `multi_hop_max_hops` cap, a `NONE`
+"nothing else needed" reply, a repeated-query check, and a "no new chunks"
+check. Cost: one LLM call + one retrieval round per hop. `query --debug`
+shows the follow-up queries and tags each chunk with the hop that found it.
+Implementation:
+[`Retriever._run_hops`](src/rag_app/retrieval/retriever.py).
+
+### Contextual retrieval (ingest-time chunk enrichment)
+
+```yaml
+chunking:
+  contextual: true
+  contextual_document_chars: 6000
+```
+
+A chunk pulled out of a long document loses the context that made it findable.
+Contextual retrieval (Anthropic, Sep 2024) asks the chat model, **at ingest**,
+to write 1-2 sentences situating each chunk in its document, and prepends that
+before embedding — so both the dense vector and the BM25 tokens carry the
+context. The prefix is kept in `metadata["context_prefix"]`.
+
+**This runs one chat-LLM call per chunk at ingest** (minutes per document with
+a local model); queries are unaffected. It's a `chunking` flag, so changing it
+requires a re-ingest — the ingest hash tracker's chunking fingerprint triggers
+that automatically (or use `ingest --force`). Failure on any chunk falls back
+to the raw text. Implementation:
+[`contextualizer.py`](src/rag_app/ingestion/contextualizer.py).
+
+### OCR ingestion (scanned PDFs and images)
+
+Not every document arrives as text. Scanned PDFs and image files are pixels;
+normal extraction returns nothing for them. Turn on OCR to recover their text
+**at ingest time** (never during queries):
+
+```yaml
+ocr:
+  enabled: true
+  min_chars_per_page: 50    # a page with fewer chars is treated as image-only
+  lang: "eng"               # Tesseract language(s), e.g. "eng+deu"
+```
+
+Only pages that come back near-empty are sent to Tesseract, so born-digital
+pages pay no cost. Requires `pip install pdf2image pytesseract Pillow` plus
+Tesseract on PATH (or use the `--build-arg WITH_OCR=true` Docker image, §10).
+Override per run with `rag-app ingest --ocr` / `--no-ocr`.
+
+### Caching and observability
+
+```yaml
+cache:
+  embedding: true          # cache hash(query) -> vector (skip re-embedding)
+  answer: true             # cache (question + chunk ids + model) -> answer
+  max_entries: 1024
+observability:
+  log_timings: true        # one structured log line per query
+```
+
+Two in-memory LRU caches on the query path, both off by default. The
+embedding cache is keyed on the embedding model (a model swap misses instead
+of returning a stale vector); the answer cache is keyed on the retrieved
+chunk ids, so editing a document changes its content-derived ids and stale
+entries stop matching — no TTL needed. The answer cache is bypassed for
+multi-turn and streaming.
+
+Per-stage timings (embed / vector search / BM25 / retrieve / generate) are
+always collected and shown in `query --debug`; `log_timings` adds a log line.
+Counters (cache hits/misses, cumulative stage ms) surface at `GET /api/stats`
+and the GUI Stats tab. Implementation:
+[`cache.py`](src/rag_app/retrieval/cache.py),
+[`metrics.py`](src/rag_app/utils/metrics.py).
+
+### Swapping the vector store (Chroma ↔ Qdrant)
+
+```powershell
+pip install -e .[qdrant]
+```
+
+```yaml
+vector_store:
+  provider: "qdrant"
+  collection_name: "local_rag_docs"
+  qdrant_url: "http://localhost:6333"   # omit for embedded (paths.qdrant_dir)
+```
+
+The whole app talks to the `VectorStore` ABC, so the backend switch touches
+only [`vectorstores/factory.py`](src/rag_app/vectorstores/factory.py). The
+Qdrant adapter handles two backend quirks internally: point ids must be
+UUIDs (chunk ids are stored under a deterministic `uuid5`, real id in the
+payload — so neighbor expansion and RRF still work), and Qdrant returns
+cosine *similarity* which is inverted to a *distance* so `score_threshold`
+behaves the same. It's a **separate index** — `clear` and re-ingest after
+switching; there is no migration. Implementation:
+[`qdrant_store.py`](src/rag_app/vectorstores/qdrant_store.py).
+
 ### Combining them
 
 A "production" pipeline turns everything on:
@@ -648,28 +757,34 @@ retrieval:
   use_mmr: true
   mmr_lambda: 0.5
   neighbor_radius: 1
+  multi_hop: true
   reranker_backend: "sentence-transformers"
   reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# and, at ingest / cross-cutting:
+# chunking.contextual: true   cache.answer: true   observability.log_timings: true
 ```
 
 Flow becomes:
 
 ```text
 question
-  -> query decomposition LLM call -> focused sub-questions
-  -> multi-query LLM call -> 3 rephrasings
-  -> HyDE LLM call -> hypothetical paragraph (for the original question)
-  -> embed hypothetical + each query variant
-  -> [vector top-20 per variant] + [BM25 top-20 per variant]
-  -> RRF merge -> top-20 fused
-  -> MMR selects a diverse top-5
+  -> [hop 0] query decomposition LLM call -> focused sub-questions
+             multi-query LLM call -> 3 rephrasings
+             HyDE LLM call -> hypothetical paragraph (original question)
+             embed hypothetical + each query variant
+             [vector top-20 per variant] + [BM25 top-20 per variant]
+             RRF merge -> top-20 fused
+  -> multi-hop: LLM writes a follow-up query -> [hop 1] repeat -> RRF-merge hops
+  -> MMR selects a diverse top-5 from the merged pool
   -> cross-encoder reranker orders those 5
   -> stitch ±1 neighbors around each survivor
   -> prompt build + answer
 ```
 
-Read the same trace in code at [`Retriever.retrieve`](src/rag_app/retrieval/retriever.py)
-and [`RagService._retrieve_and_rerank`](src/rag_app/retrieval/rag_service.py).
+(Contextual retrieval and OCR aren't shown — they run at *ingest*, shaping the
+chunks every step above searches.) Read the same trace in code at
+[`Retriever.retrieve`](src/rag_app/retrieval/retriever.py) and
+[`RagService._retrieve_and_rerank`](src/rag_app/retrieval/rag_service.py).
 
 ---
 
@@ -692,6 +807,7 @@ paths:
   documents_dir: "documents"             # where to scan for source files
   storage_dir: "storage"
   chroma_dir: "storage/chroma"           # ChromaDB persistent files
+  qdrant_dir: "storage/qdrant"           # embedded-Qdrant data (provider: qdrant)
   index_file: "storage/document_index.json"  # HashTracker JSON
 ```
 
@@ -701,10 +817,13 @@ paths:
 chunking:
   chunk_size: 900
   chunk_overlap: 150
-  strategy: "paragraph"   # paragraph | heading | semantic
+  strategy: "paragraph"          # paragraph | heading | semantic
+  contextual: false              # LLM chunk-context prefix at ingest (per-chunk cost)
+  contextual_document_chars: 6000
 ```
 
-See [section 7 → Chunking strategies](#chunking-strategies).
+See [section 7 → Chunking strategies](#chunking-strategies) and
+[Contextual retrieval](#contextual-retrieval-ingest-time-chunk-enrichment).
 
 ### `chat`
 
@@ -730,9 +849,13 @@ embeddings:
 
 ```yaml
 vector_store:
-  provider: "chroma"               # only chroma supported today
+  provider: "chroma"               # chroma | qdrant
   collection_name: "local_rag_docs"
+  qdrant_url: null                 # qdrant only: http://host:6333 (null = embedded)
 ```
+
+Qdrant needs the optional extra (`pip install -e .[qdrant]`) and uses
+`paths.qdrant_dir` for its embedded data. See §7 (Swapping the vector store).
 
 ### `retrieval`
 
@@ -752,6 +875,8 @@ retrieval:
   reranker_model: null             # any non-empty string enables reranker
   multi_query: 0                   # N LLM rephrasings searched + RRF-merged (0 = off)
   neighbor_radius: 0               # stitch ±N adjacent chunks per hit (0 = off)
+  multi_hop: false                 # LLM issues follow-up queries; hops RRF-merged
+  multi_hop_max_hops: 2            # additional retrieval rounds beyond the first (1-5)
 ```
 
 ### `prompt`
@@ -761,6 +886,39 @@ prompt:
   answer_only_from_context: true   # strict "say I don't know" system prompt
   include_sources: true            # include [Source N] block in the prompt
 ```
+
+### `ocr`
+
+```yaml
+ocr:
+  enabled: false            # OCR scanned PDFs / image files at ingest time
+  min_chars_per_page: 50    # pages with fewer chars trigger the OCR fallback
+  lang: "eng"               # Tesseract language code(s), e.g. "eng+deu"
+```
+
+OCR runs at ingest time only. See §7 (OCR ingestion) and §10 (OCR-enabled
+image). The CLI can override it per run with `ingest --ocr` / `--no-ocr`.
+
+### `cache`
+
+```yaml
+cache:
+  embedding: false                 # cache query embeddings (hash -> vector)
+  answer: false                    # cache answers (question + chunk ids -> answer)
+  max_entries: 1024                # LRU cap per cache
+```
+
+In-memory only; a restart clears them. See §7 (Caching and observability).
+
+### `observability`
+
+```yaml
+observability:
+  log_timings: false               # one structured log line per query
+```
+
+Per-stage timings are always shown in `query --debug`; this flag only adds
+the log line.
 
 ### `server`
 
@@ -914,6 +1072,20 @@ docker build -t rag-api --build-arg WITH_OCR=true .
 
 and set `ocr.enabled: true` in `config.docker.yaml`.
 
+### Qdrant backend
+
+To use Qdrant instead of embedded Chroma, build the client into the image
+and run a Qdrant server alongside the API:
+
+```powershell
+docker build -t rag-api --build-arg WITH_QDRANT=true .
+docker compose --profile qdrant up -d
+```
+
+Then in `config.docker.yaml` set
+`vector_store: { provider: "qdrant", qdrant_url: "http://qdrant:6333" }`
+and restart. Qdrant's data persists in the `qdrant-data` named volume.
+
 ### Smoke test
 
 ```powershell
@@ -974,12 +1146,15 @@ RAG_system/
     vectorstores/
       base.py                  # VectorStore ABC + all_chunks() for BM25
       chroma_store.py          # ChromaDB PersistentClient + inspection helpers
+      qdrant_store.py          # Qdrant backend ([qdrant] extra): uuid5 ids + similarity->distance
+      factory.py               # THE vector-store build site (chroma | qdrant)
     retrieval/
       factory.py               # THE Retriever/RagService build site shared by CLI, server, GUI, eval
-      retriever.py             # vector + hybrid + HyDE + decomposition + multi-query + MMR + metadata filter
+      retriever.py             # vector + hybrid + HyDE + decomposition + multi-query + MMR + multi-hop + filter
       bm25.py                  # BM25Index + reciprocal_rank_fusion + cross-request index cache
       mmr.py                   # Maximal Marginal Relevance diversity selection
       reranker.py              # LLM or sentence-transformers cross-encoder reranker
+      cache.py                 # LRU embedding + answer caches (query path)
       prompt_builder.py        # system + history + user message assembly
       rag_service.py           # full query flow: answer / answer_with_debug / answer_stream
     eval/
@@ -997,6 +1172,7 @@ RAG_system/
       settings_store.py        # QSettings-backed URL history
     utils/
       logging.py               # rich-based logging setup
+      metrics.py               # per-stage timings + cache/counter bag (observability)
   tests/
     conftest.py                # FakeEmbeddingProvider / FakeChatProvider / FakeVectorStore
     test_chunker.py
@@ -1007,8 +1183,14 @@ RAG_system/
     test_mmr.py                # MMR diversity selection
     test_reranker.py           # LLM/cross-encoder reranker helpers
     test_eval_runner.py        # recall/MRR/nDCG scoring
-    test_factory.py            # every retrieval flag reaches the Retriever
+    test_factory.py            # every retrieval flag reaches the Retriever + cache wiring
     test_bm25_cache.py         # BM25 cache reuse + invalidation
+    test_multi_hop.py          # multi-hop follow-up loop + guards
+    test_cache.py              # LRU + embedding/answer caches
+    test_qdrant_store.py       # Qdrant backend (skipped without the [qdrant] extra)
+    test_vectorstore_factory.py# chroma/qdrant selection + missing-dep error
+    test_contextual_ingest.py  # contextual retrieval at ingest time
+    test_config_docs.py        # every config field is documented (drift guard)
     test_server_endpoints.py   # FastAPI endpoints, SSE streaming, web UI serving
 ```
 
@@ -1034,11 +1216,12 @@ small classes in `retrieval/` are the seams where new features bolt on:
 | add this                       | touch this                                |
 |---|---|
 | Another LLM/embedding backend  | new file in `providers/` + `factory.py`   |
-| Qdrant or another vector DB    | new file in `vectorstores/` implementing `VectorStore` + a config knob |
+| Another vector DB              | new file in `vectorstores/` implementing `VectorStore` + a branch in `vectorstores/factory.py` (see `qdrant_store.py` for a worked example) |
 | A new file format              | add extractor in `text_extractor.py` + extension in `document_loader.SUPPORTED_EXTENSIONS` |
 | A custom chunking strategy     | new `ChunkStrategy` in `chunker.py` + register in `_STRATEGIES` |
 | Another reranker backend       | add a backend branch in `reranker.py` |
 | Different fusion algorithm     | new function next to `reciprocal_rank_fusion` in `bm25.py` |
+| A shared/persistent cache      | swap the in-memory `LruCache` in `retrieval/cache.py` for Redis/memcached |
 | Authentication on the REST API | FastAPI middleware in `server.py` |
 | A web UI                       | call the REST endpoints from any frontend |
 

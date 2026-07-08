@@ -40,7 +40,8 @@ from rag_app.providers.factory import build_chat_provider, build_embedding_provi
 from rag_app.retrieval.factory import build_rag_service, build_retriever
 from rag_app.retrieval.rag_service import RagService
 from rag_app.retrieval.retriever import Retriever
-from rag_app.vectorstores.chroma_store import ChromaVectorStore
+from rag_app.vectorstores.base import VectorStore
+from rag_app.vectorstores.factory import build_vector_store
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ class _State:
     cfg: AppConfig
     embedding_provider: EmbeddingProvider
     chat_provider: ChatProvider
-    vector_store: ChromaVectorStore
+    vector_store: VectorStore
 
 
 _state = _State()
@@ -63,10 +64,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     _state.cfg = load_config(config_path)
     _state.embedding_provider = build_embedding_provider(_state.cfg.embeddings)
     _state.chat_provider = build_chat_provider(_state.cfg.chat)
-    _state.vector_store = ChromaVectorStore(
-        persist_dir=_state.cfg.paths.chroma_dir,
-        collection_name=_state.cfg.vector_store.collection_name,
-    )
+    _state.vector_store = build_vector_store(_state.cfg)
     yield
 
 
@@ -121,6 +119,7 @@ class StatsResponse(BaseModel):
     chunks_indexed: int
     persist_dir: str
     embedding_dim: int | None = None
+    metrics: dict | None = None
 
 
 class DocumentEntry(BaseModel):
@@ -238,6 +237,9 @@ async def api_query(req: QueryRequest):
                 "chat_model": debug_info.chat_model,
                 "chunks_retrieved": len(debug_info.retrieved_chunks),
                 "prompt_chars": debug_info.prompt_char_count,
+                "hop_queries": debug_info.hop_queries,
+                "timings": debug_info.timings,
+                "answer_cache_hit": debug_info.answer_cache_hit,
             },
         )
 
@@ -280,7 +282,11 @@ async def api_ingest(req: IngestRequest):
     """Trigger document ingestion."""
 
     cfg = _state.cfg
-    service = IngestService(cfg, _state.embedding_provider, _state.vector_store)
+    # Contextual retrieval needs the chat model at ingest time.
+    ingest_chat = _state.chat_provider if cfg.chunking.contextual else None
+    service = IngestService(
+        cfg, _state.embedding_provider, _state.vector_store, ingest_chat,
+    )
     summary: IngestSummary = service.run(
         force=req.force,
         single_path=req.path,
@@ -298,6 +304,8 @@ async def api_ingest(req: IngestRequest):
 async def api_stats():
     """Return vector store statistics."""
 
+    from rag_app.utils.metrics import COUNTERS
+
     s = _state.vector_store.stats()
     dim = _state.vector_store.peek_embedding_dim()
     return StatsResponse(
@@ -305,6 +313,7 @@ async def api_stats():
         chunks_indexed=s.get("count", 0),
         persist_dir=s.get("persist_dir", ""),
         embedding_dim=dim,
+        metrics=COUNTERS.snapshot() or None,
     )
 
 

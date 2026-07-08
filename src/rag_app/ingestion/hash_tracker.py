@@ -34,6 +34,26 @@ def compute_file_hash(path: str | Path) -> str:
     return h.hexdigest()
 
 
+def compute_chunking_fingerprint(chunking) -> str:
+    """Stable hash of the chunking settings that change a file's chunks.
+
+    Lets us re-ingest a file whose *bytes* are unchanged when the chunk
+    parameters (size / overlap / strategy / contextual) changed — otherwise
+    those config edits would silently do nothing until you `--force`.
+    """
+
+    parts = "|".join(
+        str(x)
+        for x in (
+            chunking.chunk_size,
+            chunking.chunk_overlap,
+            chunking.strategy,
+            chunking.contextual,
+        )
+    )
+    return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
+
+
 class HashTracker:
     def __init__(self, index_path: str | Path) -> None:
         self.index_path = Path(index_path)
@@ -42,9 +62,22 @@ class HashTracker:
 
     # ----- lookup / mutate -------------------------------------------------
 
-    def is_unchanged(self, path: str | Path, current_hash: str) -> bool:
+    def is_unchanged(
+        self,
+        path: str | Path,
+        current_hash: str,
+        chunking_fingerprint: str | None = None,
+    ) -> bool:
         entry = self._index.get(str(path))
-        return entry is not None and entry.get("hash") == current_hash
+        if entry is None or entry.get("hash") != current_hash:
+            return False
+        # If the caller tracks a chunking fingerprint, a change to it (e.g.
+        # toggling `contextual` or changing `chunk_size`) counts as changed.
+        # Entries written before fingerprints existed have no key — treat those
+        # as unchanged so old indexes don't force a full re-ingest.
+        if chunking_fingerprint is not None and "chunking_fingerprint" in entry:
+            return entry.get("chunking_fingerprint") == chunking_fingerprint
+        return True
 
     def previous_hash(self, path: str | Path) -> str | None:
         entry = self._index.get(str(path))
@@ -56,14 +89,18 @@ class HashTracker:
         file_hash: str,
         chunks: int,
         document_hash: str | None = None,
+        chunking_fingerprint: str | None = None,
     ) -> None:
         p = Path(path)
-        self._index[str(p)] = {
+        entry: dict[str, Any] = {
             "hash": file_hash,
             "chunks": chunks,
             "document_hash": document_hash or file_hash,
             "source_file": p.name,
         }
+        if chunking_fingerprint is not None:
+            entry["chunking_fingerprint"] = chunking_fingerprint
+        self._index[str(p)] = entry
 
     def remove(self, path: str | Path) -> None:
         self._index.pop(str(path), None)
