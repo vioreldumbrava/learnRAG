@@ -601,61 +601,429 @@ one. Full mapping + runnable examples are in
 
 ## 13. Senior interview questions
 
+Every question has a collapsible answer. **Cover it, answer out loud, then
+check** — reading the answers straight through is the least useful way to use
+this section. The answers are the spine of a good response, not a script; where
+this codebase demonstrates the point, the file is named so you can go look.
+
+For the open-ended ones, the 4-beat structure in the Closing below (clarify →
+happy path → hard parts → how you'd measure it) matters more than any specific
+technique you name.
+
 ### System design
 
 - "Design a RAG system for our 100M-document corpus across 1000
   customer tenants with sub-1s P95 latency. Walk me through your stack."
+
+<details>
+<summary>Answer</summary>
+
+Clarify first: read/write ratio, tenant size skew, and whether any tenant may
+ever see another's data. Then object storage for sources, ingestion as an offline
+queue-plus-workers pipeline (never in a request path), a managed ANN store,
+hybrid retrieval, and a cross-encoder reranker over only the top ~50. Isolate
+tenants by collection or namespace, **not** by metadata filter — a filter is one
+bug away from a cross-tenant leak, and at 1000 tenants the size skew means a
+shared index gets dominated by your largest customer. For sub-1s P95 the reranker
+is the whole risk: give it a latency budget and a bypass path, because a p99
+reranker stall shouldn't become a p99 outage.
+</details>
+
 - "If cost is the dominant constraint, where do you cut and why?"
+
+<details>
+<summary>Answer</summary>
+
+Cut generation before retrieval — output tokens cost more than input tokens, and
+reranker plus LLM calls dominate the bill. In order: cache answers (keyed on
+question + chunk ids, as `cache.answer` does here), self-host embeddings while
+keeping hosted chat (you embed far more text than you generate), swap a
+prompt-based reranker for a local cross-encoder, then lower `candidate_k`. Cut
+`top_k` last; it's the cheapest quality you own. Never cut the eval set — it's
+how you learn which cut actually hurt.
+</details>
+
 - "How do you handle the cold-start problem for a new tenant with 100 docs?"
+
+<details>
+<summary>Answer</summary>
+
+At 100 docs the corpus, not the stack, is the constraint: recall is trivial and
+precision is nearly meaningless because everything is a near neighbour. So skip
+the reranker (nothing to rerank), raise `top_k` since the corpus almost fits
+anyway, and lean hard on the strict "answer only from context" prompt — the
+realistic failure is confidently answering something those 100 docs don't cover.
+Don't build a tenant-specific gold set at that size; watch refusal rate as the
+leading indicator instead, and revisit once the corpus grows an order of
+magnitude.
+</details>
+
 - "Your customer says: 'our docs change hourly'. How does that change
   your design?"
+
+<details>
+<summary>Answer</summary>
+
+It makes invalidation the central design problem rather than an afterthought.
+Ingestion must be incremental and content-hashed so an hourly run touches only
+what changed (`hash_tracker.py` here), chunk ids must be deterministic so
+re-ingesting a file replaces rather than duplicates its chunks, and every cache
+must key on content so it self-invalidates — an answer cache keyed on the
+question alone would serve hour-old answers forever. Watch out for anything
+holding a derived index in process memory: this repo's BM25 index is cached
+per-process and an out-of-process re-ingest won't invalidate it, which is exactly
+the class of bug hourly updates expose.
+</details>
 
 ### Trade-offs
 
 - "When would you NOT use hybrid search?"
+
+<details>
+<summary>Answer</summary>
+
+When queries are natural-language and paraphrastic rather than identifier-bearing
+— BM25 adds latency and a second index to keep in sync while contributing
+nothing. Also when the corpus is tiny (dense already returns everything), when
+your queries and documents share almost no surface vocabulary (a
+translation-style mismatch, where lexical overlap is noise), or when your
+threshold logic depends on raw distances, since fusing produces RRF scores and
+silently invalidates any absolute threshold. Exercise 9.1 in the learning path
+shows a case where hybrid helps and one where it doesn't.
+</details>
+
 - "Given a budget for *either* a reranker *or* moving from BGE-small to
   BGE-large embeddings, which is more impactful and why?"
+
+<details>
+<summary>Answer</summary>
+
+Usually the reranker. A bigger bi-encoder still has to compress a whole passage
+into one vector independent of the query; a cross-encoder sees query and passage
+together and can express interactions no dot product can. It also applies only
+to the top ~50, so you pay at query time for exactly what you use — whereas a
+larger embedding model forces a full re-index, permanently raises storage and
+search cost, and re-embedding is the expensive irreversible move. The exception:
+if recall@50 is already poor, reranking can't fix what retrieval never
+retrieved, and you fix the first stage first.
+</details>
+
 - "HyDE, multi-query, query decomposition — pick one for a given
   workload. Justify."
+
+<details>
+<summary>Answer</summary>
+
+They fix different failures. HyDE fixes *question-shaped queries against
+answer-shaped documents* — short, terse queries where an answer's embedding
+matches better than the question's. Multi-query fixes *vocabulary mismatch* — the
+user says "speed", the doc says "baud rate prescaler". Decomposition fixes
+*compound questions* that name two or more things needing separate retrieval.
+Pick by diagnosing which your failures actually are: all three cost LLM calls per
+query, so stacking them is how you turn a 200 ms retrieval into 2 s. If forced to
+guess blind, multi-query — vocabulary mismatch is the most common of the three.
+</details>
+
 - "When would you NOT use RAG at all, even if the user is asking
   about your data?"
+
+<details>
+<summary>Answer</summary>
+
+When the question needs *aggregation or computation* over the whole corpus rather
+than a few passages — "how many tickets mentioned X last quarter?" is a SQL query,
+and retrieval of five chunks structurally cannot answer it. Also when the corpus
+fits comfortably in context and latency allows (just send it), when the task is
+style or format rather than facts (fine-tuning), or when answers must be exact and
+auditable, where a deterministic lookup beats a generative layer that might
+paraphrase. Recognising the aggregation case is the main thing being tested here.
+</details>
+
 - "Self-host or hosted embeddings? What about chat? Why differently?"
+
+<details>
+<summary>Answer</summary>
+
+The common production split is **hosted chat, self-hosted embeddings**, and the
+asymmetry is about volume and quality sensitivity. You embed vastly more text than
+you generate — every chunk at ingest, every query forever — so per-token
+embedding costs dominate, and embedding quality differences between a good open
+model and a frontier one are small. Chat is the opposite: called once per query,
+and the quality gap is large and user-visible. Embeddings also carry a lock-in
+cost hosted chat doesn't: changing the provider means re-indexing everything,
+whereas swapping chat providers is a config change. This repo splits
+`EmbeddingProvider` from `ChatProvider` for exactly that reason.
+</details>
 
 ### Debugging
 
 - "Users complain RAG can't find answers that are clearly in the docs.
   Walk me through your diagnostic playbook."
+
+<details>
+<summary>Answer</summary>
+
+Work down the pipeline and stop at the first stage that's already wrong. Was the
+document **ingested** at all (extraction silently yields nothing for scanned
+PDFs)? Is the answer inside a **single chunk**, or did chunking split it across
+two so neither matches? Does **retrieval** return it if you query the exact
+phrasing — if yes it's a query-understanding problem (multi-query, HyDE), if no
+it's an indexing problem. Is it retrieved but **not in top-k** (raise `top_k`,
+add a reranker)? Is it retrieved and top-ranked but the **prompt** still refused,
+or a **filter** excluded it? In this repo `retrieve` isolates the retrieval half
+from generation, which is the single most useful debugging affordance — always
+bisect the pipeline before theorising.
+</details>
+
 - "You ship a new chunking strategy, gold-set recall@5 improves 5%, but
   user feedback gets worse. What's happening?"
+
+<details>
+<summary>Answer</summary>
+
+Your metric and your users are measuring different things. The usual cause: recall
+is scored at *source-file* or "did a relevant chunk appear" granularity, so
+smaller chunks improve the odds of *something* matching while delivering less
+usable context to the LLM — retrieval got better, answers got worse. Related
+possibilities: the gold set is unrepresentative of real traffic, or it's stale and
+now overfit. Fix by measuring what users experience (answer-level faithfulness
+and relevance, not just retrieval), and by refreshing the gold set from real
+queries. Exercise 8.2 in the learning path shows the inverse of this — a technique
+whose improvement the metric structurally cannot see.
+</details>
+
 - "Recall@5 = 0.9 but faithfulness drops to 0.7. Where do you look?"
+
+<details>
+<summary>Answer</summary>
+
+Retrieval is fine, so the problem is between the chunks and the answer. Look at
+the prompt: is the "answer only from context" instruction present and is the model
+actually obeying it? Are chunks arriving with enough surrounding context to be
+interpretable, or are they fragments the model has to guess around (the case
+contextual retrieval and neighbour expansion address)? Is the context so large
+that the relevant passage is lost in the middle? Are two retrieved chunks
+*contradictory*, so any answer is unfaithful to one of them? And check whether the
+model is strong enough for extraction under constraint — small models leak
+training knowledge when the context is thin. High recall with low faithfulness is
+almost always a generation-side or context-quality problem, not a search one.
+</details>
+
 - "Same query, same corpus, different answers on consecutive runs.
   What's non-deterministic and how do you fix it?"
+
+<details>
+<summary>Answer</summary>
+
+Sampling is the first suspect — `temperature > 0` makes generation stochastic;
+set it to 0 for reproducibility. Then the parts people forget: ANN search is
+*approximate*, so HNSW can return different neighbours across index states; any
+LLM-in-the-loop retrieval step (HyDE, multi-query, reranking, multi-hop
+follow-ups) is itself sampled, so the retrieved set varies before generation even
+starts; ties in RRF or equal scores may break by iteration order; and concurrent
+ingestion changes the index underneath you. Fix by pinning temperature, pinning
+model versions, and making eval runs use `--skip-llm` where you only care about
+retrieval. Distinguish "non-deterministic" from "flaky": the former is a design
+property you choose, the latter is a bug.
+</details>
 
 ### Edges of the field
 
 - "What's wrong with naïve RAG that Contextual Retrieval fixes?"
+
+<details>
+<summary>Answer</summary>
+
+A chunk extracted from a long document loses the context that made it findable.
+"The register defaults to 0x00" — which register, which mode, which peripheral?
+Embedded in isolation that sentence matches almost nothing useful, and pronouns
+and implicit subjects make it worse. Contextual Retrieval (Anthropic, 2024) fixes
+it at *ingest* time: an LLM writes one or two sentences situating each chunk in
+its parent document, and that prefix is prepended before embedding. Because the
+stored text carries the prefix, dense and BM25 both benefit and the gains compound.
+The cost is one chat call **per chunk** at ingest — real money on a large corpus,
+and zero query-time cost. It's `chunking.contextual` here, and being a *chunking*
+flag it forces a re-ingest, which the chunking fingerprint handles automatically.
+</details>
+
 - "When would you reach for ColBERT over hybrid search?"
+
+<details>
+<summary>Answer</summary>
+
+When you need term-level matching *with* semantic understanding, and hybrid's
+"two systems fused by rank" is losing information. ColBERT-style late interaction
+keeps a vector per token and scores via MaxSim, so it gets BM25's precision on
+specific terms and an embedding's tolerance for paraphrase in one model, rather
+than fusing two rankings. The price is storage and complexity — per-token vectors
+are an order of magnitude larger than one vector per chunk, and the serving story
+is much less turnkey. So: reach for it when hybrid has plateaued and retrieval
+quality is genuinely your bottleneck, not as a default. Hybrid gets you most of
+the way for a fraction of the operational cost.
+</details>
+
 - "Prompt caching changes RAG cost economics — how would you redesign
   your prompt to maximise hit rate?"
+
+<details>
+<summary>Answer</summary>
+
+Caching keys on a *prefix*, so order everything by how stable it is: system
+instructions and few-shot examples first (identical across all queries), then
+slow-changing shared context, then retrieved chunks, then the user's question
+last. Anything varying per request that sits early in the prompt destroys the
+cache for everything after it — a timestamp or request id in the system message
+is the classic own-goal. This tension is worth naming: "lost in the middle" wants
+the best chunk first or last, while caching wants variable content last. Also
+consider stabilising retrieval output itself — a consistent chunk order across
+similar queries extends the cacheable prefix.
+</details>
+
 - "Walk me through how you'd add query routing to this codebase."
+
+<details>
+<summary>Answer</summary>
+
+Routing means classifying the query first, then choosing a retrieval strategy —
+send identifier-like queries to keyword-weighted hybrid, conceptual ones to dense
+with multi-query, aggregation ones away from RAG entirely, and trivial ones
+straight to the model with no retrieval. Concretely here: a classifier step ahead
+of `Retriever.retrieve`, then per-route config overrides applied in
+`build_retriever` — which works precisely because `factory.py` is the single
+construction point, so a route is a config variation rather than a parallel code
+path. Add `retrieval.route` to `RetrievalSection` and the existing drift-guard
+tests force you to document it. Two things to get right: the classifier must be
+cheap (a small model or heuristics, not another frontier call), and every route
+needs its own eval slice — a router that improves the mean while destroying one
+query class is the standard failure.
+</details>
 
 ### Production
 
 - "Walk me through a RAG incident you've been on call for."
+
+<details>
+<summary>Answer</summary>
+
+They want a real narrative with root cause and a fix, not a technique list.
+Structure it: symptom → what you first believed → how you disproved it → actual
+root cause → immediate mitigation → durable prevention. The canonical RAG incident
+is an **embedding model change without re-indexing**: answer quality collapses
+silently, nothing errors, and if the dimension happens to match there's no
+exception at all — just meaningless distances. Mitigation is roll back the model;
+prevention is storing the embedding model and dimension *with* the index and
+refusing to start on mismatch. Whatever you pick, name the thing you got wrong
+first — false certainty is the senior anti-pattern.
+</details>
+
 - "Your retrieval recall has degraded 10% in two weeks. What's the
   diagnostic playbook?"
+
+<details>
+<summary>Answer</summary>
+
+Gradual degradation over weeks points at drift, not a deploy — but check deploys
+first because it's cheap to rule out. Then ask what changed on each axis: **corpus**
+(new documents diluting the index, or ingestion silently failing on a new file
+type), **queries** (users asking about new topics the corpus doesn't cover — often
+not a regression at all but a coverage gap), **infrastructure** (index rebuilt with
+different ANN parameters, a stale cached index in a long-lived process), and
+**measurement** (is the gold set still representative, or did *it* drift?). Isolate
+by replaying the fixed gold set against the current index: if it degrades too, the
+index changed; if it holds, your traffic changed.
+</details>
+
 - "How do you do A/B tests on RAG quality without rolling out broken
   answers to users?"
+
+<details>
+<summary>Answer</summary>
+
+Stage it. First offline on the gold set — most bad ideas die here for free. Then
+**shadow mode**: run the candidate pipeline alongside production, log both
+answers, serve only the control, and diff them offline; this catches regressions
+with zero user exposure. Then a small live percentage with automated guardrails
+(refusal-rate and latency alarms) and a fast rollback. Measure retrieval metrics
+and answer-level quality separately, since they move independently, and hold both
+arms on the same model version so you're testing the pipeline change and not model
+drift. The honest caveat: offline metrics and user satisfaction correlate
+imperfectly, which is why shadow-then-canary exists rather than trusting the gold
+set alone.
+</details>
+
 - "How do you upgrade an embedding model in production with zero
   downtime?"
+
+<details>
+<summary>Answer</summary>
+
+Build the new index alongside the old one and cut over atomically — never mutate
+in place. Concretely: stand up a second collection, re-embed the whole corpus with
+the new model into it (offline, at whatever pace you like), validate it against the
+gold set, then flip reads via a config or alias change, keeping the old collection
+until you're confident enough to delete it. That gives instant rollback. During
+the backfill, dual-write new documents to both indexes so the new one isn't stale
+at cutover. Never serve queries embedded with model B against vectors from model
+A: they're incomparable, and if the dimensions match it fails *silently*. Store
+the model name and dimension with the index so a mismatch is a startup error
+rather than a quality mystery.
+</details>
 
 ### Security / privacy
 
 - "A user uploads a PDF that turns out to contain prompt-injection text.
   How does your system handle it?"
+
+<details>
+<summary>Answer</summary>
+
+Assume retrieved content is untrusted input, because that's exactly what it is —
+this is the RAG-specific attack surface. Defences layer: keep instructions and
+data structurally separated in the prompt (retrieved chunks arrive as labelled
+`[Source N]` data, never as system-role text), instruct the model that context is
+reference material and not instructions, constrain what a compromised answer can
+*do* (no tool calls or side effects driven by retrieved text), and scan or quarantine
+at ingest. Then contain the blast radius: per-tenant isolation means a poisoned
+document can only reach queries that were already allowed to see it. Be honest
+that no prompt-level defence is complete — which is why the real control is
+limiting the model's authority, not out-arguing the injection.
+</details>
+
 - "Can the vector store leak source content if compromised?"
+
+<details>
+<summary>Answer</summary>
+
+Yes, and more completely than people expect. This codebase stores the chunk text
+inline alongside its vector — so the store *is* a copy of your corpus, and reading
+it needs no inversion at all. Even without stored text, embeddings are not
+anonymised: inversion attacks reconstruct substantial parts of the source, so
+vectors should be treated as sensitive data in their own right. Metadata leaks too
+(file paths and folder names carry structure and often customer identity).
+Practical consequences: encrypt at rest, apply the same access controls and
+retention rules as the source documents, don't ship a vector DB to a lower-trust
+environment because "it's only numbers", and remember that deleting a document
+means deleting its chunks *and* any cache entries derived from them.
+</details>
+
 - "How do you handle PII in retrieval? (Both in the source docs and in
   the user's query.)"
+
+<details>
+<summary>Answer</summary>
+
+Two different problems. **In documents**: decide before ingest, because embedding
+is a one-way copy — redact or tokenise at extraction time, or classify and
+partition so PII-bearing chunks are only retrievable by authorised principals via
+enforced-at-search filters. Retrofitting is painful: you must re-ingest, and purge
+every derived artifact including caches. **In queries**: queries are usually logged
+and often sent to a third-party model, so a query containing PII leaks by default —
+scrub before logging, and be deliberate about what leaves your network (this is a
+strong argument for self-hosted embeddings, since every query gets embedded).
+Also note the deletion requirement: "delete my data" must reach source, chunks,
+vectors, caches, and logs, which is much easier if you designed for it than if
+you're discovering it during an audit.
+</details>
 
 ---
 

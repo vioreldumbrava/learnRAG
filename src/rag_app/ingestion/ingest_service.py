@@ -271,7 +271,12 @@ def _derive_folder_metadata(doc: LoadedDocument, documents_dir: str) -> dict[str
     """
 
     try:
-        relative = doc.path.relative_to(Path(documents_dir).resolve())
+        # Both sides must be resolved before comparing: `scan_folder` builds
+        # `doc.path` from the configured `documents_dir` as-is, so with the
+        # default relative "documents" it yields a relative path. Comparing a
+        # relative path against a resolved absolute one always raises, which
+        # silently dropped `module` for every file. See tests/test_ingest_metadata.py.
+        relative = doc.path.resolve().relative_to(Path(documents_dir).resolve())
     except ValueError:
         # File is outside the configured documents dir (e.g. absolute path
         # passed via --path); no folder metadata available.

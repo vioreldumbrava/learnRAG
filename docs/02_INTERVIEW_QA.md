@@ -1,6 +1,6 @@
 # RAG Interview Q&A
 
-~55 questions you should be able to answer confidently for a mid-level
+74 questions you should be able to answer confidently for a mid-level
 engineering interview. Each answer is short by design (≤ 4 sentences) —
 that's how you'd answer in a real interview. File pointers anchor
 answers to this codebase so you can demo / explain on the spot.

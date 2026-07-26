@@ -7,7 +7,7 @@ this repo as its lab.
 **Companion docs**
 
 - [01_RAG_CONCEPTS.md](01_RAG_CONCEPTS.md) — concept-by-concept reference.
-- [02_INTERVIEW_QA.md](02_INTERVIEW_QA.md) — ~55 mid-level interview questions.
+- [02_INTERVIEW_QA.md](02_INTERVIEW_QA.md) — 74 mid-level interview questions.
 - [03_GLOSSARY.md](03_GLOSSARY.md) — one-line definitions.
 - [04_SENIOR_DEEP_DIVE.md](04_SENIOR_DEEP_DIVE.md) — senior-level deep dive:
   trade-offs, system design, war stories, newer techniques (Contextual
@@ -15,21 +15,35 @@ this repo as its lab.
 - [05_FRAMEWORKS.md](05_FRAMEWORKS.md) — LangChain & LlamaIndex mapped onto
   everything you built here, with runnable [`examples/`](../examples/).
 
-**Each stage has the same shape:**
+**Each stage has the same shape, in this order:**
 
 - **Concept** — the theory, in plain English.
 - **In this code** — pointers to the exact file/symbol that implements it.
 - **Try it** — one or two commands you should run.
-- **Exercises** — hands-on tasks (with collapsible solutions) that make the
-  concept stick. This is where the old `03_RAG_MILESTONES_AND_EXERCISES.md`
+- **Interview check** — short Q&A to lock the stage in your head.
+- **Exercises** — hands-on tasks (each with a collapsible solution) that make
+  the concept stick. This is where the old `03_RAG_MILESTONES_AND_EXERCISES.md`
   milestones now live, next to the stage they belong to.
 - **Checkpoint** — a `- [ ]` checklist. You're done with a stage when you can
   tick every box. (GitHub renders these as checkboxes; tick them by editing
   the file, or just track them in your own notes.)
-- **Interview check** — short Q&A to lock the stage in your head.
+
+So you read, then run, then self-quiz, then practise, then tick off.
+[tests/test_learning_path_docs.py](../tests/test_learning_path_docs.py) enforces
+that every stage really has all six sections, so this list cannot drift again.
 
 Before you start: make sure `.\run.bat ingest` has succeeded at least once
-(verify with `.\run.bat inspect`).
+(verify with `.\run.bat inspect` — you should see 34 chunks from the six files
+in `documents/`).
+
+**About the corpus.** `documents/` ships a small synthetic corpus about two
+invented peripherals (a CAN FD controller and an SPI peripheral). It is
+deliberately engineered so the exercises can actually demonstrate their point:
+numbered sections for the `heading` chunker, `CAN/` and `SPI/` sub-folders for
+metadata filtering, shared vocabulary across both modules, rare identifiers that
+only keyword search finds, and one fact split across two documents. Every
+register name and error code in it is invented — it is teaching material, not
+engineering reference.
 
 ## Progress tracker
 
@@ -108,6 +122,43 @@ RAG has two distinct phases that run on different cadences:
   No. The documents live in the vector store. The LLM only ever sees the
   small subset that retrieval pulled in for the current question.
 
+### Exercises
+
+#### Exercise 1.1 — Find the edge of the corpus (~10 min)
+
+**Goal:** see the difference between "grounded", "refused", and "hallucinated"
+before you know how any of the machinery works. **Steps:** ask three questions
+and read the `sources` block each time:
+
+```powershell
+.\run.bat query "What is SPI slave underrun?"                        # in the corpus
+.\run.bat query "What is the maximum ambient temperature of the CHX-2000?"  # plausible, absent
+.\run.bat query "Who won the 2024 Champions League?"                 # nowhere near the corpus
+```
+
+<details>
+<summary>What you should have seen</summary>
+
+The first answers cleanly and cites a chunk you can go read.
+
+The second is the interesting one. It is a perfectly reasonable datasheet
+question about a peripheral the corpus *does* describe — the corpus simply never
+states a temperature. Retrieval still returns five chunks, because vector search
+always returns its nearest neighbours; there is no "no results" state. With
+`prompt.answer_only_from_context: true` the model should refuse. This is the
+failure mode that matters in production: not absurd questions, but *reasonable
+questions about documents you almost have*.
+
+The third gets refused easily — it is so far from the corpus that the retrieved
+chunks are obviously unrelated.
+
+Two lessons for later stages: retrieval returning something is not evidence the
+answer is in there (Stage 5's score threshold), and the refusal came from the
+prompt, not from the retriever (Stage 6). Question 16 in
+[`eval/questions.json`](../eval/questions.json) is the second question above,
+kept as a permanent regression test for refusal.
+</details>
+
 ### Checkpoint
 
 - [ ] I ran ingest then query and watched an answer come back grounded in a
@@ -172,6 +223,49 @@ Two non-obvious points that matter in interviews:
 - **Q: What's the typical dimensionality?** 384 (small open models) up to
   3072 (`text-embedding-3-large`). Higher dim ≠ better quality; it just
   costs more storage and slower search.
+
+### Exercises
+
+#### Exercise 2.1 — Prove the embedding model is part of the index (~15 min)
+
+**Goal:** trigger the single most common RAG production incident on purpose, in
+a safe place. **Steps:**
+
+- `.\run.bat inspect` and note the reported embedding dimension.
+- In `config.yaml`, change `embeddings.model` to a different embedding model your
+  provider has available (ideally one with a *different* dimension).
+- Now run `.\run.bat query "What is SPI slave underrun?"` **without** clearing or
+  re-ingesting. Observe what happens.
+- Then `.\run.bat clear --yes; .\run.bat ingest; .\run.bat inspect` and query
+  again.
+
+<details>
+<summary>What you should have seen</summary>
+
+Querying without re-ingesting gives you one of two failures, and which one you
+get is itself the lesson:
+
+- **Different dimension** → a hard error from the vector store. The query vector
+  has 1024 components, the stored vectors have 768, and the distance calculation
+  is undefined. Loud, immediate, easy to diagnose.
+- **Same dimension, different model** → *no error at all*, and quietly worse
+  results. The arithmetic is valid but meaningless, because the two models place
+  the same text in different regions of their own spaces. This is the dangerous
+  case: nothing alerts, recall just degrades, and the cause is invisible unless
+  you have a gold set (Stage 8) watching for it.
+
+After clear + re-ingest, `inspect` reports the new dimension and answers are
+good again. The dimension is logged on the first embed call in
+[`ingest_service._ingest_one`](../src/rag_app/ingestion/ingest_service.py) —
+that log line is worth keeping in production for exactly this reason.
+
+Note what the tooling does and does not protect you from: changing `chunk_size`
+or `chunking.strategy` *does* invalidate the index automatically, via the
+chunking fingerprint in
+[`hash_tracker.py`](../src/rag_app/ingestion/hash_tracker.py). Changing the
+embedding model does **not** — that invalidation is on you. Worth remembering as
+an answer to "what would you add to this codebase next?"
+</details>
 
 ### Checkpoint
 
@@ -318,27 +412,56 @@ It's surfaced in the desktop GUI (Settings → OCR box), on the CLI (`ingest
 **Goal:** feel the small-chunks-vs-large-chunks trade-off first-hand.
 **Steps:** for each of `chunk_size` = 300 / 900 / 1500 (keep `strategy:
 paragraph`): edit `config.yaml`, then `.\run.bat clear --yes; .\run.bat
-ingest; .\run.bat retrieve "What happens if NBRP and DBRP are different?"`.
-Compare the retrieved chunks and their distances.
+ingest; .\run.bat retrieve "Why would writing a new prescaler value have no
+effect at all?"`. Note the chunk count that `ingest` reports each time, and
+compare the retrieved chunks and their distances.
 
 <details>
 <summary>What you should have seen</summary>
 
-Small chunks return a tight, on-topic sentence but may miss surrounding
-context; large chunks return a wall of text where the relevant sentence is
-diluted by neighbours. For this datasheet-style corpus, ~900 with the
-`heading` strategy usually reads best. There is no universal winner — that's
-the point, and it's why you tune with an eval set (Stage 8).
+The corpus yields **108 chunks at 300, 34 at 900, and 19 at 1500** — chunk size
+is really an index-size dial. At 300 you get a tight, on-topic fragment that
+often stops before the reason ("...are silently discarded"), so the answer is
+retrieved but incomplete. At 1500 the right sentence is in there but buried
+among two neighbouring sections, and `top_k: 5` now pulls in ~40% of the whole
+corpus. 900 is the compromise for this material.
+
+There is no universal winner — that's the point, and it's why you tune against
+an eval set (Stage 8) instead of by eye. Note also that changing `chunk_size`
+changes the *chunking fingerprint*, so the next `ingest` re-chunks everything
+even without `--force`.
 </details>
 
 #### Exercise 3.2 — Strategy swap on a structured doc (~10 min)
 
 **Goal:** see `heading` chunking beat `paragraph` on a doc with numbered
-sections. **Steps:** with a datasheet in `documents/`, run the same
-`retrieve` query under `strategy: paragraph` then `strategy: heading`
-(clear + re-ingest between). **Expected:** `heading` keeps a whole numbered
-section together, so the section that answers the question arrives intact
-instead of split across two chunks.
+sections. **Steps:** `documents/CAN/can_fd_bit_timing.md` has seven numbered
+`## N.` sections. Ingest it under `strategy: paragraph`, then under `strategy:
+heading` (clear + re-ingest between), and each time run
+`.\run.bat inspect --file can_fd_bit_timing.md` to read the stored chunks back.
+
+<details>
+<summary>What you should have seen</summary>
+
+Under `paragraph` the file becomes 10 chunks and **not one of them starts with a
+heading**. Nine of the ten begin mid-sentence — `'nfiguration is'`, `'e rejected
+at configuration time'`, `'per bit, the arbitration bit'`, `'N0 at run time'`.
+That is the overlap tail being prepended, and each chunk straddles a section
+boundary, so the `## 3. Nominal Baud Rate Prescaler (NBRP)` heading ends up
+buried in the *middle* of a chunk.
+
+Under `heading` the file becomes 11 chunks and **seven of them start with their
+own `## N.` heading**, so each section arrives intact and self-labelled. The
+extra chunks are overflow tails from sections longer than `chunk_size`, where
+the strategy falls back to paragraph splitting inside the section.
+
+Why it matters for retrieval: a chunk that begins with "## 4. Data Baud Rate
+Prescaler (DBRP)" embeds as a passage *about DBRP*. A chunk that begins
+mid-sentence embeds as a passage about nothing in particular, and it also reads
+badly when it lands in the prompt as `[Source N]`. This is also what populates
+the `section` metadata field — see
+[`_extract_section`](../src/rag_app/ingestion/ingest_service.py).
+</details>
 
 ### Checkpoint
 
@@ -468,12 +591,60 @@ from `vector_store.provider`.
 see ids, the embedding dimension, chunk text, and metadata — but the original
 files still live on disk as the source of truth.
 
+<details>
+<summary>What you should have seen</summary>
+
+34 chunks across six files, each with an id shaped
+`<document_hash[:12]>:<chunk_index>` — twelve hex characters, a colon, then the
+chunk's position in its file. (The hash is of the file's *content*, so it changes
+whenever the file does.) Everything
+in the record is *derived*: the vector from the embedding model, the text from
+the chunker, the metadata from the file's path and content. Delete `storage/` and
+you lose nothing you can't rebuild with one `ingest`; delete `documents/` and
+you've lost the actual data.
+
+Look at the metadata keys on a CAN chunk and an SPI chunk versus one of the two
+flat sample files. The nested ones carry `module: "CAN"` / `module: "SPI"`; the
+flat ones have no `module` key at all. `section` comes from
+`_extract_section`, `document_hash` is what the incremental-ingest tracker
+compares against, and `chunk_index` is what makes neighbour expansion possible
+in Stage 9-D — "the chunk after `79a315baa861:4`" is just `79a315baa861:5`.
+
+That id scheme is doing more work than it looks. Because it is deterministic, a
+re-ingest of an unchanged file produces the *same* ids, so upserts are idempotent
+and the answer cache (Stage 10) can key on chunk ids and self-invalidate when
+content changes.
+</details>
+
 #### Exercise 4.2 — Prove the ABC is real (~15 min)
 
 **Goal:** run the *same* corpus on both backends. **Steps:** ingest under
 `provider: chroma`, run a query; switch to `provider: qdrant`, `clear`,
 re-ingest, run the same query. **Expected:** comparable top results — the
 retrieval code didn't change, only the storage behind the interface did.
+
+<details>
+<summary>What you should have seen</summary>
+
+The same top chunks, in roughly the same order, with *differently scaled scores*
+— and not one line of retrieval, prompt-building, or CLI code changed. Only
+`vector_store.provider` moved. That is what an abstract base class buys you, and
+it is the concrete answer to "how would you migrate vector databases?": you write
+one new class implementing [`VectorStore`](../src/rag_app/vectorstores/base.py)
+and register it in [the factory](../src/rag_app/vectorstores/factory.py).
+
+Two things that are easy to miss:
+
+- Scores are **not** comparable across backends. Chroma is configured here with
+  `hnsw:space: cosine` and returns a *distance* (lower is better); Qdrant returns
+  a *similarity* (higher is better). Any absolute `score_threshold` you tuned on
+  one backend is meaningless on the other — a genuine migration hazard.
+- The ABC has required methods and optional overrides. `embeddings_for_ids` is
+  one of the optional ones, and MMR (Stage 9-E) uses it to avoid re-embedding
+  candidates it already has vectors for. A backend that doesn't implement it
+  still works; MMR just costs more.
+
+</details>
 
 ### Checkpoint
 
@@ -571,18 +742,57 @@ separate.
 #### Exercise 5.1 — Metadata filters (~10 min)
 
 **Goal:** stop a query about CAN from pulling SPI chunks that share
-vocabulary. **Steps:** organise `documents/` into sub-folders (`documents/CAN/`,
-`documents/SPI/`), re-ingest, then compare `.\run.bat retrieve "bit timing"`
-with and without `--filter "module=CAN"`. **Expected:** the folder name
-becomes the `module` metadata, and the filter confines results to that module.
+vocabulary. **Steps:** the corpus is already organised into `documents/CAN/`
+and `documents/SPI/`. Both peripherals genuinely talk about a "sample point" —
+that is the point. Compare:
+
+```powershell
+.\run.bat retrieve "sample point"
+.\run.bat retrieve "sample point" --filter "module=CAN"
+```
 
 <details>
 <summary>What you should have seen</summary>
 
-Without the filter, "bit timing" retrieves chunks from both datasheets
-because both use the phrase. `--filter "module=CAN"` builds a Chroma
-`where={"module": "CAN"}` clause and constrains the search, eliminating the
-cross-document false positives.
+Unfiltered, **four of the five results are SPI** — only rank 1 is the CAN chunk
+you wanted:
+
+```text
+[CAN] can_fd_bit_timing.md#2     dist 0.6341
+[SPI] spi_dma_driver.md#3        dist 0.7246
+[SPI] spi_troubleshooting.md#4   dist 0.7324
+[SPI] spi_dma_driver.md#0        dist 0.7343
+[SPI] spi_troubleshooting.md#0   dist 0.7357
+```
+
+Nothing is malfunctioning: `documents/SPI/spi_dma_driver.md` §4 is literally
+titled "Bit timing and clock polarity" and discusses where the receiver samples
+the line. Those are *true* semantic matches and *false* positives for someone
+debugging CAN. With 80% of the context window spent on the wrong peripheral, the
+answer will be diluted at best and wrong at worst.
+
+With `--filter "module=CAN"` all five come from `documents/CAN/`, and notice the
+distances of the newly-promoted chunks (0.7385, 0.7435, …) are *worse* than the
+SPI chunks they replaced. That's the trade you're making: you are deliberately
+accepting less semantically similar results in exchange for guaranteed topical
+correctness. Filtering isn't free relevance — it's relevance you've constrained.
+
+The filter becomes a Chroma `where={"module": "CAN"}` clause applied *inside* the
+vector search, so it constrains the candidate set rather than post-filtering it
+— which matters, because post-filtering would have left you with just one result
+here instead of five.
+
+Two things worth knowing:
+
+- `module` is derived from the sub-folder path by
+  [`_derive_folder_metadata`](../src/rag_app/ingestion/ingest_service.py), and
+  nested folders join with `/` (`documents/SPI/dma/` → `module: "SPI/dma"`).
+- The two flat files at the top of `documents/` have **no** `module` key at all,
+  so `--filter "module=CAN"` silently excludes them. A metadata filter is a
+  filter on *present* metadata; absent keys never match. That asymmetry is a
+  classic production bug — a document uploaded to the wrong place becomes
+  invisible to every filtered query without erroring.
+
 </details>
 
 ### Checkpoint
@@ -676,6 +886,46 @@ production":
   end of long prompts than the middle. Practical fix: put the highest-
   ranked chunk first, second-ranked last.
 
+### Exercises
+
+#### Exercise 6.1 — Make the guardrail fail (~15 min)
+
+**Goal:** measure what one line of system prompt is actually worth. **Steps:**
+use the plausible-but-absent question from Exercise 1.1 and run it both ways,
+reading the full prompt each time:
+
+```powershell
+# prompt.answer_only_from_context: true
+.\run.bat query "What is the maximum ambient temperature of the CHX-2000?" --debug
+# then flip it to false in config.yaml and repeat
+.\run.bat query "What is the maximum ambient temperature of the CHX-2000?" --debug
+```
+
+Diff the two system messages in the `--debug` output, then diff the two answers.
+
+<details>
+<summary>What you should have seen</summary>
+
+The retrieved chunks are **identical** in both runs — you changed nothing about
+retrieval. The only difference is the system message, and the answers diverge
+completely: strict mode refuses, loose mode invents a plausible automotive
+temperature range (`-40 °C to +125 °C` is the usual guess) because that is what
+datasheets for real parts say.
+
+That is hallucination with a clean audit trail: same context, same model, one
+instruction different. It is also why the strict prompt is the default here, and
+why "we told the model not to" is a real engineering control rather than
+hand-waving — see `PromptBuilder.build`'s two system-prompt flavours in
+[prompt_builder.py](../src/rag_app/retrieval/prompt_builder.py).
+
+The limit of the control is worth stating too: it is a *request*, not a
+guarantee. A strong model complies reliably, a weak one leaks anyway, and neither
+gives you a signal you can alarm on. That is why Stage 5's score threshold and a
+faithfulness metric (Stage 8) exist — three weak layers, no single strong one.
+
+Put the flag back to `true` when you're done.
+</details>
+
 ### Checkpoint
 
 - [ ] I ran `query --debug` and read the exact prompt sent to the LLM.
@@ -745,6 +995,49 @@ Re-ingest (because the embedding model changed!) and query again.
   Embeddings from different models live in different geometries — they
   aren't comparable. One store, one embedding model.
 
+### Exercises
+
+#### Exercise 7.1 — Swap one provider without touching the other (~15 min)
+
+**Goal:** prove the abstraction is real by exercising the mixed configuration
+that production actually uses. (This is the old milestone 4.) **Steps:**
+
+- Note your current `chat.provider` and `embeddings.provider`.
+- Change **only** `chat.provider` (and its `base_url`/`model`) to the other
+  backend — Ollama if you were on LM Studio, or the reverse. Leave `embeddings`
+  untouched.
+- Query. Do **not** re-ingest.
+- Now do the opposite: restore chat, and change only `embeddings.provider`.
+  Query again, still without re-ingesting. Then fix it properly.
+
+<details>
+<summary>What you should have seen</summary>
+
+Swapping **chat** needs no re-ingest and just works. Nothing in the index depends
+on which model writes the prose — the stored vectors are untouched. That
+asymmetry is the whole payoff of splitting `ChatProvider` from
+`EmbeddingProvider` in [providers/base.py](../src/rag_app/providers/base.py)
+instead of having one "LLM" interface.
+
+Swapping **embeddings** breaks retrieval immediately, exactly as in Exercise 2.1,
+and needs `clear` + `ingest`. Same two interfaces, completely different blast
+radius — which is the answer to "why abstract the provider?" in operational rather
+than architectural terms.
+
+Two things you may hit on the way, both real operational lessons:
+
+- **LM Studio JIT loading.** If the model isn't loaded,
+  [`_ensure_model_loaded`](../src/rag_app/providers/lmstudio_provider.py) asks
+  the server to load it on first use and retries — so the first call after a
+  swap can be slow, and a cold model can look like a hang rather than an error.
+  Local model servers have cold starts; budget for them.
+- **Model discovery.** [`providers/discovery.py`](../src/rag_app/providers/discovery.py)
+  lists what each server actually has, which is how the desktop GUI populates its
+  model dropdowns. Handy for finding out that the model name in your config
+  isn't on the server at all — a much more common failure than a wrong `base_url`.
+
+</details>
+
 ### Checkpoint
 
 - [ ] I swapped the chat and/or embedding provider in `config.yaml` and
@@ -785,15 +1078,37 @@ actually mention the fact?").
 
 - [`src/rag_app/eval/runner.py`](../src/rag_app/eval/runner.py) —
   `run_eval()` runs a list of questions and scores recall@k, **MRR**
-  (1/rank of the first relevant chunk, averaged), and keyword presence.
-  It takes the whole `AppConfig` and builds its pipeline through the
+  (1/rank of the first relevant chunk, averaged), **nDCG@k**, and keyword
+  presence. It takes the whole `AppConfig` and builds its pipeline through the
   shared [`retrieval/factory.py`](../src/rag_app/retrieval/factory.py),
   so eval scores *exactly* the pipeline the CLI/server/GUI run — no
   drift between what you measure and what you ship.
   The CLI report shows each question's first-relevant rank in the
   `1st rank` column and the aggregate MRR in the summary panel.
-- [`eval/questions.json`](../eval/questions.json) — starter set covering
-  the sample docs. Schema is in
+- **Graded relevance** —
+  [`_ndcg_at_k`](../src/rag_app/eval/runner.py) is not limited to
+  relevant/irrelevant. A question can supply `expected_relevance`, a map of
+  source file → gain, so you can say "this document is the real answer, that one
+  is background, that third one is actively wrong":
+
+  ```json
+  "expected_relevance": {
+    "can_diagnostics.md": 2.0,
+    "can_fd_bit_timing.md": 1.0,
+    "spi_dma_driver.md": 0.0
+  }
+  ```
+
+  A gain of `0.0` means **explicitly irrelevant**: it counts for nDCG
+  bookkeeping but is deliberately *not* promoted into a recall/MRR requirement
+  (see the `float(gain) > 0.0` filter in `score_question`). That is how you
+  encode a known false positive without demanding the retriever return it.
+  Rows with only `expected_sources` fall back to a flat gain of 1.0.
+- [`eval/questions.json`](../eval/questions.json) — the shipped gold set: 16
+  questions over the corpus in `documents/`, four of them graded. Each row
+  isolates one thing — an exact-token case, a vocabulary-mismatch case, two
+  multi-source cases, and one deliberately **unanswerable** question that has
+  `expected_sources: []` and expects the model to refuse. Schema is in
   [`eval/models.py`](../src/rag_app/eval/models.py).
 
 ### Try it
@@ -831,10 +1146,10 @@ source file, re-run, see the FAIL row. Then put it back.
 #### Exercise 8.1 — Break the eval to trust it (~10 min)
 
 **Goal:** confirm the harness actually fails when retrieval is wrong.
-**Steps:** run `.\run.bat eval --file eval/questions.json --skip-llm` (all
-green), then edit one question's `expected_sources` to a file that doesn't
-contain the answer and re-run. **Expected:** that row flips to FAIL and the
-process exits non-zero (so it can gate CI). Put it back afterwards.
+**Steps:** run `.\run.bat eval --file eval/questions.json --skip-llm`, then pick
+a row that currently PASSes, edit its `expected_sources` to a file that doesn't
+contain the answer, and re-run. **Expected:** that row flips to FAIL. Put it
+back afterwards.
 
 <details>
 <summary>What you should have seen</summary>
@@ -843,6 +1158,79 @@ The tampered question's recall drops and `first_relevant_rank` becomes a
 miss, so `report.all_passed` is False and the CLI exits 1. This is why an
 eval set beats "it worked when I tried it" — it turns a regression into a red
 build instead of a surprise in production.
+
+Note the baseline is **not** all green: with every advanced flag off you should
+see roughly `13/16` passing. That is deliberate. A gold set where everything
+already passes cannot measure an improvement — it has no headroom, so every
+change you make looks free. The three baseline failures are the material for
+Exercise 8.2.
+</details>
+
+#### Exercise 8.2 — Capstone: tune the pipeline against the gold set (~40 min)
+
+**Goal:** stop guessing. Produce a measured before/after for the Stage 9
+techniques instead of eyeballing retrieved chunks.
+
+**Steps:**
+
+- Record a baseline with every advanced flag off:
+  `.\run.bat eval --file eval/questions.json --skip-llm`. Write down mean
+  recall, MRR, and nDCG@k, plus *which row numbers fail*.
+- Then change **one flag at a time**, re-running eval after each and keeping a
+  table. Try at least: `retrieval.hybrid: true`, `retrieval.neighbor_radius: 1`,
+  `retrieval.use_mmr: true`, and `retrieval.top_k: 8`.
+- For each change, ask not just "did the mean move?" but "*which row* moved, and
+  does the reason make sense?"
+- Finally combine the two that helped most and confirm the gain compounds.
+- Turn on `observability.log_timings: true` and note what each winning flag cost
+  you in latency.
+
+<details>
+<summary>What you should have seen</summary>
+
+Measured on this corpus with a 768-dim embedding model (your absolute numbers
+will differ — the *directions* are the point):
+
+| config | recall | MRR | nDCG@k | passing |
+|---|---|---|---|---|
+| baseline, all off | 0.867 | 0.761 | 0.718 | 13/16 |
+| `hybrid: true` | 0.933 | 0.828 | 0.789 | 14/16 |
+| `neighbor_radius: 1` | 0.867 | 0.761 | 0.718 | 13/16 |
+| `use_mmr: true` | 0.900 | 0.758 | 0.729 | 14/16 |
+| `top_k: 8` | 0.967 | 0.771 | 0.754 | 15/16 |
+| `hybrid: true` + `top_k: 8` | 0.967 | 0.828 | 0.803 | 15/16 |
+
+Four things in that table are worth more than the numbers:
+
+1. **Hybrid fixed exactly the row you'd predict** — the `QR-4471-B`
+   exact-token question from Exercise 9.1, which went from `miss` to rank 1.
+   A flag that improves the mean *for the reason you expected* is a real win; a
+   flag that improves the mean for reasons you can't explain is a coincidence
+   waiting to reverse.
+2. **Neighbor expansion moved nothing at all.** It genuinely widens the context
+   the LLM sees — but recall and nDCG here are scored at *source-file*
+   granularity, and a neighbour chunk comes from the same file as its hit. The
+   metric is structurally blind to the change. **Your metric must be able to see
+   the thing you are tuning**; otherwise you will conclude a useful technique is
+   worthless. To measure neighbours you need an answer-quality metric, not a
+   retrieval one.
+3. **MMR raised recall but lowered MRR**, and broke a row that previously
+   passed. That is the diversity/relevance trade-off made numeric: MMR pushed a
+   near-duplicate out of the top-K and let a different file in (recall up), at
+   the cost of demoting the single best chunk (MRR down). The corpus has four
+   near-identical "register defaults to 0x00" chunks specifically so you can see
+   this.
+4. **`top_k: 8` beat every clever technique on recall.** Retrieving more is the
+   cheapest recall win available and it is the first thing to try — but notice
+   MRR barely moved, because more candidates is not better *ranking*. It also
+   costs prompt tokens on every single query, which is why it is not free.
+
+One row never passes: the multi-hop bridge question from Exercise 9.2. No
+retrieval flag fixes it, because the failure is in the *planner*, not the search.
+Leaving a known-unfixable row in the gold set is deliberate — it stops you from
+tuning to 100% and declaring victory.
+
+The habit to take away: one change, one measurement, one recorded reason.
 </details>
 
 ### Checkpoint
@@ -851,6 +1239,10 @@ build instead of a surprise in production.
 - [ ] I deliberately broke a question and watched it FAIL, then fixed it.
 - [ ] I can define recall@k and MRR, and explain why answer-faithfulness is
       the harder second layer that usually needs an LLM judge.
+- [ ] I recorded a baseline, changed one flag at a time, and can name one
+      technique that improved the mean and one that the metric could not see.
+- [ ] I can explain what `expected_relevance` gains buy over pass/fail labels,
+      and what a gain of `0.0` means.
 
 ---
 
@@ -858,8 +1250,9 @@ build instead of a surprise in production.
 
 ### Concept
 
-Everything in Stages 1–8 is "naïve" or "vanilla" RAG. Six upgrades you
-should be able to discuss in an interview, in rough order of cost/benefit:
+Everything in Stages 1–8 is "naïve" or "vanilla" RAG. Seven upgrades are
+implemented here (A–G) and one more (H) is discussed but not built. All eight
+are fair game in an interview; they are listed in rough order of cost/benefit:
 
 #### A. Hybrid search (BM25 + dense vector) — *implemented*
 
@@ -879,8 +1272,30 @@ Merging strategies:
   weight (`w/(k+rank)` for BM25, `(1-w)/(k+rank)` for vector), which
   biases the merge without touching raw score scales.
 
-Hybrid search fixes the `ERR080082` / `NBRP` / `CHEN0` failure mode — any
-query with rare technical identifiers benefits.
+Why RRF needs no normalisation is worth being able to say out loud: it throws
+away the scores entirely and uses only **rank position**. Cosine distances and
+BM25 scores live on incomparable scales, so any linear blend needs you to
+normalise two distributions that shift with every corpus — whereas "you were 3rd
+in one list and 1st in the other" is directly combinable. The `k=60` constant
+just flattens the curve so the top rank doesn't dominate; it is a damping term,
+not a tuned parameter.
+
+`hybrid_keyword_weight` then biases the merge by scaling each list's
+contribution — `w/(k+rank)` for BM25, `(1-w)/(k+rank)` for vector — inside
+[`reciprocal_rank_fusion`](../src/rag_app/retrieval/bm25.py). So `0.5` is neutral,
+higher trusts keywords more, lower trusts embeddings more. You keep RRF's
+scale-independence and still get a dial.
+
+The consequence to remember: once a merge has happened, results carry **RRF
+scores, not distances**, so an absolute `retrieval.score_threshold` no longer
+means anything. `Retriever._finalize` tracks this with a `merged` flag and skips
+the threshold rather than silently filtering on the wrong units — see Exercise
+9.1.
+
+Hybrid search fixes the rare-identifier failure mode: any query whose
+discriminating token is a part number, error code, or report id — `QR-4471-B`,
+`ERR080082`, `NBRP` — where embeddings smear the exact string. Exercise 9.1 shows
+where it does and does not help.
 
 #### B. Reranking with cross-encoders — *implemented*
 
@@ -896,6 +1311,29 @@ reranker** asks the configured chat model to score each chunk's
 relevance to the query on a 0–10 scale. The optional
 `sentence-transformers` backend runs a local `CrossEncoder` model such
 as `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+
+**Where the "50 candidates" come from — `candidate_k`.** A reranker can only
+reorder what it is given, so a two-stage pipeline is worthless if stage one
+already returned exactly the five chunks you wanted. You have to
+**oversample**: retrieve ~20–50, rerank, then cut to `top_k`. That is what
+`retrieval.candidate_k` controls, and
+[`Retriever._target_k`](../src/rag_app/retrieval/retriever.py) is where the
+decision lands — it retrieves `candidate_k` when a candidate pool was requested
+and `top_k` otherwise.
+
+Who requests the pool is handled once, in
+[`factory.py`](../src/rag_app/retrieval/factory.py): `return_candidates=None`
+means *auto*, i.e. "hand over an oversized pool if a reranker is configured and
+MMR isn't." Callers that never rerank — the `retrieve` CLI command and
+`/api/retrieve` — pass `False` explicitly so they get exactly `top_k` back
+instead of a confusing 50-row dump. This is the single most common way a
+hand-rolled reranker gets built wrong: the reranker runs, the numbers barely
+move, and the reason is that it was only ever shown the five results it was
+supposed to be improving on.
+
+The cost is the obvious one: rerankers are `O(candidate_k)` model calls or
+cross-encoder passes. `candidate_k` is a straight recall-versus-latency dial, and
+the right value is the one your gold set stops rewarding.
 
 #### C. Query transformations — *HyDE implemented*
 
@@ -913,7 +1351,10 @@ Your user's literal question might not be a good search query.
   `retrieval.multi_query: 3` in `config.yaml`.
 - **Query decomposition**: break "What was X in year Y vs year Z?" into
   sub-questions, retrieve for each, then merge with RRF. **Implemented**
-  — set `retrieval.query_decomposition: true`.
+  — set `retrieval.query_decomposition: true`, capped by
+  `retrieval.query_decomposition_max_subquestions` (default 3). The cap matters:
+  each sub-question is another retrieval round, so an over-eager decomposition
+  multiplies latency for a question that only needed one search.
 
 #### D. Context expansion (neighbor / sentence-window) — *implemented*
 
@@ -967,6 +1408,14 @@ nothing useful. **Contextual retrieval** (Anthropic, Sep 2024) fixes it at
 within the whole document, and that prefix is prepended to the chunk *before
 embedding*. Because the stored text also carries the prefix, both dense
 embeddings and BM25 benefit (Anthropic reports the two compound).
+
+To write that prefix the LLM needs to see the surrounding document, but local
+models have small context windows — so the document is truncated to
+`chunking.contextual_document_chars` (default 6000) before being shown. That is a
+real quality ceiling worth naming: on a 200-page manual the "situating" sentence
+is written from only the first few thousand characters, so the prefix for a
+late-document chunk may be situated against the wrong section. Raise it if your
+model's window allows.
 
 This is the only technique in Stage 9 that runs at ingest, not query — and it
 is *expensive there*: one chat call **per chunk**. A 100-chunk document with a
@@ -1142,16 +1591,117 @@ Watch each upgrade fix a specific failure:
 #### Exercise 9.1 — Watch hybrid rescue an exact token (~10 min)
 
 **Goal:** see BM25 catch a rare identifier that dense search smears.
-**Steps:** `.\run.bat retrieve "ERR080082"` with `hybrid: false`, note the
-miss; set `retrieval.hybrid: true`, rerun. **Expected:** the chunk holding
-that exact token now appears (with an RRF score instead of a raw distance).
+**Steps:** `QR-4471-B` is a qualification-report number that appears exactly
+once in the whole corpus, inside a chunk of
+`documents/SPI/spi_troubleshooting.md` that is *about buffer sizing* — not about
+report numbers. Run these three queries with `hybrid: false`, then set
+`retrieval.hybrid: true` and run them again:
+
+```powershell
+.\run.bat retrieve "QR-4471-B"
+.\run.bat retrieve "qualification report QR-4471-B"
+.\run.bat retrieve "What is published in qualification report QR-4471-B?"
+```
+
+<details>
+<summary>What you should have seen</summary>
+
+The three queries behave completely differently, and the pattern is the lesson:
+
+| query | dense-only | hybrid |
+|---|---|---|
+| `QR-4471-B` | rank 1 ✅ | rank 1 |
+| `qualification report QR-4471-B` | rank 2 | **rank 1** |
+| `What is published in qualification report QR-4471-B?` | **miss** ❌ | rank 4 ✅ |
+
+Dense search handles the **bare token fine**. What breaks it is wrapping that
+token in a natural-language question: the embedding of a 9-word question is
+dominated by the question words, and the one distinctive identifier gets averaged
+away into a vector that means roughly "someone asking about documentation". The
+rare token is still *in* the text — it just stops driving the vector. So the
+chunk drops out of the top 5 entirely.
+
+This is the counter-intuitive part worth remembering: **dilution scales with
+query length, not with corpus size.** The failure mode isn't "embeddings can't
+represent rare strings", it's "embeddings average, and averaging buries the one
+term that mattered". Your users type questions, not tokens — so the realistic
+query is the one that fails.
+
+BM25 is immune because it scores the literal term and one chunk contains it,
+which is exactly why fusing the two ranked lists recovers the result.
+
+Two details to notice:
+
+- The scores change units. Dense results show a raw cosine distance; hybrid
+  results show an **RRF score**, because the two ranked lists were fused by
+  [`reciprocal_rank_fusion`](../src/rag_app/retrieval/bm25.py). This is also why
+  `retrieval.score_threshold` is skipped once a merge has happened — see the
+  `merged` flag in `Retriever._finalize`.
+- That third query is row 10 of [`eval/questions.json`](../eval/questions.json).
+  Miss → rank 4 is precisely the row that flips from FAIL to PASS in the
+  Exercise 8.2 capstone, and it accounts for most of hybrid's aggregate gain
+  there. A technique whose measured improvement you can trace to a specific
+  predicted row is a technique you actually understand.
+
+Also try `.\run.bat retrieve "ERR080082"`. Hybrid barely changes that one,
+because every error code lives in a document that is *about* error codes — dense
+already wins on topic. Hybrid earns its keep on identifiers stranded in
+topically unrelated text, not on identifiers in general.
+
+</details>
 
 #### Exercise 9.2 — Multi-hop on a bridge question (~10 min)
 
-**Goal:** watch the follow-up loop gather a second fact. **Steps:** with
-`retrieval.multi_hop: true`, run a `query --debug` whose answer needs two
-documents. **Expected:** a Hops row, a follow-up-query table, and chunks
-tagged with the hop that found them.
+**Goal:** watch the follow-up loop, and find out what it costs you when the
+planner is a small local model. **Steps:** the corpus contains a deliberate
+bridge. `documents/CAN/can_fd_bit_timing.md` §4–5 says a NBRP/DBRP time-quantum
+mismatch invokes errata `CHEN0` and explicitly refuses to say what CHEN0 costs;
+`documents/CAN/can_diagnostics.md` §3 says CHEN0 roughly halves throughput.
+Neither document answers the whole question alone.
+
+Run, with `retrieval.multi_hop: false` then `true`:
+
+```powershell
+.\run.bat query "What is the throughput impact of a prescaler mismatch between NBRP and DBRP?" --debug
+```
+
+**Expected:** with multi-hop off, the answer cannot state the throughput figure.
+With it on, `--debug` shows a Hops row and the follow-up queries the model
+generated.
+
+<details>
+<summary>What you should have seen</summary>
+
+Single-round retrieval returns five chunks that are all *about* NBRP and DBRP —
+and none of them contain the throughput figure. `can_diagnostics.md#3`, the
+chunk that holds the answer, is not retrieved, because the original question
+never mentions CHEN0.
+
+What happens with `multi_hop: true` **depends on your chat model**, and that is
+the real lesson:
+
+- A model that follows the lead writes a follow-up like `"CHEN0 errata
+  throughput"`, hop 2 retrieves `can_diagnostics.md#3`, and the merged pool now
+  contains both halves. The debug output tags each chunk with the `hop` that
+  found it.
+- Small local models frequently **do not** follow the lead. Measured on this
+  corpus, `gemma-4-12b` returned `NONE` (no follow-up at all) and
+  `gpt-oss-20b` produced only rephrasings of the original question
+  (`"CAN FD throughput impact when NBRP ≠ DBRP"`) — never the token `CHEN0`. In
+  both cases the answer chunk was still missed.
+
+Now prove the retriever was never the problem: run
+`.\run.bat retrieve "CHEN0"`. The answer chunk (`can_diagnostics.md#3`) comes
+back at rank 3 immediately. The retrieval layer could always find it; the
+*planner* failed to ask. That is the honest shape of LLM-in-the-loop retrieval — its ceiling is your
+model's ability to notice what is missing, not your search stack. It is also why
+`_run_hops` needs its four guards (hop cap, `NONE` reply, repeated query, no new
+chunks): a planner that rephrases instead of advancing would otherwise loop
+forever re-retrieving the same set.
+
+If your model does chase the lead, you have a strong retrieval planner — worth
+knowing before you build anything agentic on top of it.
+</details>
 
 ### Checkpoint
 
@@ -1242,6 +1792,12 @@ Things that matter the moment "demo" becomes "service":
     stale entries simply stop matching — the same self-invalidation trick the
     BM25 cache uses with its mutation counter. Bypassed for multi-turn
     (history) and streaming, where "same question" means something different.
+  - Both are bounded by `cache.max_entries` (default 1024) with LRU eviction.
+    An unbounded cache in a long-lived server is a memory leak with good
+    intentions — every distinct question would be retained forever. The cap is
+    also why a cache hit is never guaranteed: a high-cardinality query
+    distribution can evict an entry before it is ever reused, which is worth
+    checking before concluding your cache "doesn't work".
 - **Observability** (`observability.log_timings: true`): per-stage timings
   (embed / vector search / BM25 / retrieve / generate) are *always* collected
   and shown in `query --debug`; the flag adds one structured log line per
@@ -1314,6 +1870,48 @@ notepad documents\sample_can_fd.txt   # add a sentence
 "debug": true}` twice to `/api/query`. **Expected:** the second response's
 `debug.answer_cache_hit` is `true` and its `timings.generate` is ~0; check
 `GET /api/stats` for the `answer_cache_hits` counter.
+
+Then prove it invalidates itself: edit one of the documents the answer cited,
+`.\run.bat ingest`, and ask the same question a third time.
+
+<details>
+<summary>What you should have seen</summary>
+
+Second call: `answer_cache_hit: true`, `timings.generate` ≈ 0 ms, and the whole
+request collapses to retrieval time. Third call, after re-ingesting a changed
+document: a **miss** — without you clearing anything.
+
+That is the design worth understanding. The key is
+`hash(question + retrieved chunk ids + model + prompt flags)`, so it is
+*content-addressed by its own inputs*. Change the documents and the chunk ids
+change (new `document_hash`), so the key changes and the stale entry is simply
+never looked up again. Compare that with a cache keyed on the question alone,
+which would happily serve last week's answer forever and require you to remember
+to flush it. "Key the cache on everything that could change the answer" is the
+generalisable lesson.
+
+Note what deliberately bypasses the cache: multi-turn requests carrying
+`history`, because the same question means something different after a different
+conversation.
+
+While you're here, look at where those numbers come from —
+[`StageTimings`](../src/rag_app/utils/metrics.py) is the context manager that
+produces `timings.*`, and the process-wide `COUNTERS` dict is what `/api/stats`
+exposes as `answer_cache_hits` / `embedding_cache_hits`. Both are plain
+in-process state, which is exactly the right first implementation and exactly
+what breaks the moment you run two workers: the counters are per-process, so a
+load-balanced deployment reports a fraction of the truth. Interview answer:
+"metrics belong in a shared store or a real metrics backend, not module globals."
+
+The same caveat applies to the BM25 index. It is built lazily on the first
+hybrid query and cached across requests in
+[`get_bm25_index`](../src/rag_app/retrieval/bm25.py), keyed on a
+`bm25_cache_key` the store derives from its own mutation state — so an `ingest`
+in *this* process invalidates it correctly, but an `ingest` run in a *different*
+process (say the CLI while the server is up) does not. The server keeps serving
+keyword results from a stale index until it restarts. Worth knowing before you
+put hybrid search behind a long-lived API.
+</details>
 
 ### Checkpoint
 
@@ -1471,6 +2069,83 @@ up --build -d` and `curl.exe http://localhost:8000/health`. **Expected:** a
 `{"status":"ok"}` and a browsable web UI on the LAN — with no Qt installed in
 the image.
 
+<details>
+<summary>What you should have seen</summary>
+
+`{"status":"ok"}` from `/health`, the web UI at `http://localhost:8000`, and — if
+you look at the image — no PySide6 anywhere in it. The desktop GUI lives behind
+the `[gui]` extra precisely so the deployable artifact doesn't carry a windowing
+toolkit it can never use.
+
+The instructive part is what had to change to containerise a working app, because
+it is the standard interview list:
+
+- **Bind address.** `config.docker.yaml` sets `server.host: 0.0.0.0` instead of
+  loopback. Bind to `127.0.0.1` inside a container and the port publish does
+  nothing — a first-time Docker failure almost everyone hits once.
+- **State on volumes.** `storage/` and `documents/` are mounted, so the container
+  itself stays disposable. Rebuild it freely; the index survives.
+- **Models stay outside.** The container never hosts a model. `base_url` points
+  at the host (`host.docker.internal`), a LAN IP, or the `ollama` compose
+  service. Keeping GPU-bound work out of the API image is what lets you scale
+  the two independently.
+- **A liveness probe that doesn't lie.** `/health` deliberately does *not* touch
+  the vector store or a model, so it answers "is the process up?" and nothing
+  else. If your health check does real work it will fail during load and your
+  orchestrator will restart a container that was merely busy.
+
+If `/health` answers but queries fail, it is almost always `base_url` —
+`localhost` inside a container means the container.
+
+</details>
+
+#### Exercise 11.3 — Add a config flag the way this repo does (~20 min)
+
+**Goal:** learn the two structural conventions that keep four surfaces from
+drifting apart, by trying to break them. **Steps:**
+
+- Add a throwaway field to `RetrievalSection` in
+  [config.py](../src/rag_app/config.py) — say `experimental_thing: bool = False`.
+- Run `pytest`. Read the failures before fixing anything.
+- Now find every place you would have to touch to make it real, and check your
+  list against [factory.py](../src/rag_app/retrieval/factory.py).
+- Revert when you're done.
+
+<details>
+<summary>What you should have seen</summary>
+
+`pytest` goes red immediately, in two different tests, and neither is about
+retrieval behaviour:
+
+- [`test_config_docs.py`](../tests/test_config_docs.py) fails twice — your field
+  is documented in neither README §8 nor `config.example.yaml`. It walks
+  `AppConfig.model_fields` and parametrizes over every field, so "someone added
+  a flag and forgot the docs" is a red build instead of a review comment.
+- [`test_learning_path_docs.py`](../tests/test_learning_path_docs.py) fails
+  because the flag isn't taught anywhere in this file.
+
+That is a **drift guard**: a test whose subject is the documentation, not the
+code. Cheap to write, and it converts a discipline that relies on memory into one
+enforced by CI. Being able to describe this pattern is worth more in an interview
+than any single retrieval technique — it is the difference between "we have a
+convention" and "our convention is enforced".
+
+The second convention is the **single build site**. Your new flag needs wiring in
+exactly one place, `build_retriever` in `factory.py`, and it then reaches the
+CLI, the REST server, the desktop GUI, and the eval runner at once.
+[`test_factory.py`](../tests/test_factory.py) asserts that every field of
+`RetrievalSection` actually arrives at the `Retriever`. The module docstring
+records why this exists: before the factory, each surface copy-pasted its
+`Retriever(...)` call and they drifted — `hybrid_keyword_weight` was honoured
+only by the CLI. So eval was scoring a pipeline the server wasn't running, which
+is the worst possible failure in an evaluation system, because it is silent and
+it invalidates every number you have.
+
+Generalise it: **if you measure one pipeline and ship another, your metrics are
+fiction.** One construction path is how you prevent that structurally rather than
+by care.
+</details>
+
 ### Checkpoint
 
 - [ ] I asked one question through at least two different surfaces and got the
@@ -1534,6 +2209,21 @@ Compare the three answers — same models, same docs, three implementations.
 Each example writes to its **own** Chroma collection, so your from-scratch
 index is untouched.
 
+### Interview check
+
+- **Q: You built this without LangChain — can you use LangChain?**
+  Yes, and better for having built it by hand: I know what each abstraction
+  hides. `RecursiveCharacterTextSplitter` is my chunker, `as_retriever()` is my
+  retriever, an LCEL chain is my `RagService.answer`. See `examples/`.
+- **Q: LangChain vs LlamaIndex?**
+  Heavy overlap. LlamaIndex is data/RAG-first (strong index + query-engine
+  abstractions); LangChain is orchestration/agent-first (LCEL + LangGraph).
+  Choose by where the complexity is, or mix them.
+- **Q: When would you NOT use a framework?**
+  Simple/stable flows, tight latency/token budgets, minimising dependency
+  weight and churn, or when debugging and the abstraction is in the way — keep
+  the hot path thin, use the framework for ingestion/loaders.
+
 ### Exercises
 
 #### Exercise 12.1 — Read the mapping, not the magic (~15 min)
@@ -1544,6 +2234,20 @@ find the LCEL chain and name which from-scratch method each stage
 (`retriever`, `prompt`, `llm`, parser) corresponds to. **Expected:** you can
 say "this `|` step is my `Retriever.retrieve`, this is `PromptBuilder.build`,
 this is `chat.generate`."
+
+<details>
+<summary>What you should have seen</summary>
+
+The LCEL chain `{"context": retriever | format_docs, "question": passthrough} |
+prompt | llm | StrOutputParser()` is a one-line spelling of
+`RagService.answer`: `retriever` is `Retriever.retrieve`, `format_docs` is the
+`[Source N]` block assembly inside `PromptBuilder.build`, `prompt | llm` is
+`ChatProvider.generate`, and `StrOutputParser()` is the `.content` access you do
+by hand. What the framework adds is composition and streaming plumbing; what it
+hides is *which* of those steps is costing you latency — which is why your
+`--debug` stage timings have no direct LCEL equivalent without a callback
+handler.
+</details>
 
 #### Exercise 12.2 — Agentic multi-hop, two ways (~15 min)
 
@@ -1571,21 +2275,6 @@ version is simpler — which is why this repo ships both.
       **and** LlamaIndex equivalents without looking.
 - [ ] I can explain what LCEL is, what `as_query_engine()` hides, and when I'd
       reach for a framework vs. roll my own.
-
-### Interview check
-
-- **Q: You built this without LangChain — can you use LangChain?**
-  Yes, and better for having built it by hand: I know what each abstraction
-  hides. `RecursiveCharacterTextSplitter` is my chunker, `as_retriever()` is my
-  retriever, an LCEL chain is my `RagService.answer`. See `examples/`.
-- **Q: LangChain vs LlamaIndex?**
-  Heavy overlap. LlamaIndex is data/RAG-first (strong index + query-engine
-  abstractions); LangChain is orchestration/agent-first (LCEL + LangGraph).
-  Choose by where the complexity is, or mix them.
-- **Q: When would you NOT use a framework?**
-  Simple/stable flows, tight latency/token budgets, minimising dependency
-  weight and churn, or when debugging and the abstraction is in the way — keep
-  the hot path thin, use the framework for ingestion/loaders.
 
 ---
 

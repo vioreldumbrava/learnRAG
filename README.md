@@ -17,7 +17,7 @@ same explicit core — each one toggled by a single line in `config.yaml`.
 
 > 📚 **Learning RAG?** Read [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md)
 > first — a 12-stage walkthrough mapping each app feature to a RAG concept,
-> with a companion [interview Q&A](docs/02_INTERVIEW_QA.md) (~55 mid-level
+> with a companion [interview Q&A](docs/02_INTERVIEW_QA.md) (74 mid-level
 > questions), [senior deep dive](docs/04_SENIOR_DEEP_DIVE.md) (trade-offs,
 > system design, war stories), [concept reference](docs/01_RAG_CONCEPTS.md),
 > [glossary](docs/03_GLOSSARY.md), and a
@@ -1115,12 +1115,19 @@ RAG_system/
   docs/                        # 📚 RAG learning path (start here)
     00_LEARNING_PATH.md        # 12-stage walkthrough mapping features → concepts
     01_RAG_CONCEPTS.md         # concept-by-concept reference
-    02_INTERVIEW_QA.md         # ~55 mid-level interview questions + answers
+    02_INTERVIEW_QA.md         # 74 mid-level interview questions + answers
     03_GLOSSARY.md             # one-line vocabulary
     04_SENIOR_DEEP_DIVE.md     # senior-level: trade-offs, system design, war stories, newer techniques
+    05_FRAMEWORKS.md           # LangChain/LlamaIndex mapped onto this codebase
   documents/                   # source documents (kept as source of truth)
-    sample_can_fd.txt          # CAN-FD sample (drop your own files anywhere here)
-    sample_spi_dma.md          # organise in sub-folders to auto-tag with `module`
+    sample_can_fd.txt          # flat files get no `module` metadata
+    sample_spi_dma.md
+    CAN/                       # sub-folder name becomes `module: CAN` for filtering
+      can_fd_bit_timing.md     # numbered sections, NBRP/DBRP, the CHEN0 bridge pointer
+      can_diagnostics.md       # error-code table, CHEN0 errata (the bridge target)
+    SPI/                       # sub-folder name becomes `module: SPI`
+      spi_dma_driver.md        # numbered sections, shared "bit timing"/"prescaler" vocabulary
+      spi_troubleshooting.md   # symptom table, QR-4471-B exact-token case
   eval/
     questions.json             # gold-standard Q&A for the `eval` command
   storage/

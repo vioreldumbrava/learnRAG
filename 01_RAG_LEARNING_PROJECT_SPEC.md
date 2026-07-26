@@ -3,8 +3,11 @@
 > **Historical spec (frozen).** This is the original project specification and
 > is kept for reference. The living curriculum is
 > [docs/00_LEARNING_PATH.md](docs/00_LEARNING_PATH.md); the living
-> feature/config reference is README §7/§8. Most "Future features" listed here
-> have since been implemented (see README §7).
+> feature/config reference is README §7/§8. **Every "Future feature" in §13 has
+> since been implemented** — A Qdrant, B hybrid search, C reranker, D FastAPI
+> server, E web UI, F metadata filters, G evaluation suite. §13 is kept only to
+> record what the original plan looked like; see README §7 for what shipped and
+> `docs/00_LEARNING_PATH.md` Stages 9–11 for how to exercise it.
 
 ## 1. Goal
 

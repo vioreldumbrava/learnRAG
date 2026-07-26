@@ -3,7 +3,7 @@
 A concept-by-concept lookup organised alphabetically within sections, not
 chronologically like the [learning path](00_LEARNING_PATH.md). Use this
 when you remember the *topic* but want a fast refresh, or when you want a
-fact that doesn't fit neatly into one of the 11 stages.
+fact that doesn't fit neatly into one of the 12 stages.
 
 Every entry: **What it is** → **When it matters** → **Where in this code**
 (file path) → **Read more** (key terms / authors / papers).

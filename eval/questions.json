@@ -15,13 +15,82 @@
     "expected_contains": ["transmit buffer", "underrun"]
   },
   {
-    "question": "How can DMA help with SPI transfers in an AUTOSAR driver?",
-    "expected_sources": ["sample_spi_dma.md"],
-    "expected_contains": ["DMA", "CPU"]
+    "question": "What is the legal value range of the Data Baud Rate Prescaler?",
+    "expected_sources": ["can_fd_bit_timing.md"],
+    "expected_contains": ["1", "32"]
   },
   {
-    "question": "What technique avoids SPI slave underrun for continuous streaming?",
-    "expected_sources": ["sample_spi_dma.md"],
-    "expected_contains": ["buffering"]
+    "question": "Why would writing a new prescaler value have no effect at all?",
+    "expected_sources": ["can_fd_bit_timing.md"],
+    "expected_contains": ["configuration mode"]
+  },
+  {
+    "question": "How do I make the CAN bus run faster?",
+    "expected_sources": ["can_fd_bit_timing.md"],
+    "expected_contains": ["prescaler"]
+  },
+  {
+    "question": "What does error ERR080082 indicate and is it a wiring problem?",
+    "expected_sources": ["can_diagnostics.md"],
+    "expected_contains": ["phase", "configuration"]
+  },
+  {
+    "question": "What throughput does the classic-mode fallback errata cost?",
+    "expected_sources": ["can_diagnostics.md"],
+    "expected_contains": ["halves"]
+  },
+  {
+    "question": "What is the throughput impact of a prescaler mismatch between NBRP and DBRP?",
+    "expected_relevance": {
+      "can_diagnostics.md": 2.0,
+      "can_fd_bit_timing.md": 1.0,
+      "spi_dma_driver.md": 0.0
+    },
+    "expected_contains": ["halves"]
+  },
+  {
+    "question": "What is published in qualification report QR-4471-B?",
+    "expected_sources": ["spi_troubleshooting.md"],
+    "expected_contains": ["latency"]
+  },
+  {
+    "question": "How is a node recovered from bus-off on this controller?",
+    "expected_sources": ["can_diagnostics.md"],
+    "expected_contains": ["recessive"]
+  },
+  {
+    "question": "Why is the first word of every SPI transfer lost?",
+    "expected_relevance": {
+      "spi_dma_driver.md": 2.0,
+      "spi_troubleshooting.md": 2.0,
+      "can_diagnostics.md": 0.0
+    },
+    "expected_contains": ["receive"]
+  },
+  {
+    "question": "What is the difference between SPI overrun and underrun, and how does the fix differ?",
+    "expected_relevance": {
+      "spi_troubleshooting.md": 2.0,
+      "spi_dma_driver.md": 1.0
+    },
+    "expected_contains": ["underrun", "overrun"]
+  },
+  {
+    "question": "Why does intermittent SPI corruption only appear in release builds?",
+    "expected_relevance": {
+      "spi_dma_driver.md": 2.0,
+      "spi_troubleshooting.md": 1.0
+    },
+    "expected_contains": ["DMA"]
+  },
+  {
+    "question": "Which register fields are ignored when the SPI peripheral runs as a slave?",
+    "expected_sources": ["spi_dma_driver.md"],
+    "expected_contains": ["prescaler"]
+  },
+  {
+    "question": "What is the maximum ambient operating temperature of the CHX-2000?",
+    "expected_sources": [],
+    "expected_contains": ["don't know"]
   }
 ]
