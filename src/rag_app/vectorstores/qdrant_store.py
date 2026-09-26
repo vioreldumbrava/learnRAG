@@ -25,6 +25,8 @@ embedded against `paths.qdrant_dir`. Tests use `location=":memory:"`.
 from __future__ import annotations
 
 import uuid
+import threading
+from functools import wraps
 from pathlib import Path
 
 from qdrant_client import QdrantClient, models
@@ -41,6 +43,14 @@ def _point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(_NAMESPACE, chunk_id))
 
 
+def _synchronized(fn):
+    @wraps(fn)
+    def call(self, *args, **kwargs):
+        with self._client_lock:
+            return fn(self, *args, **kwargs)
+    return call
+
+
 class QdrantVectorStore(VectorStore):
     def __init__(
         self,
@@ -51,15 +61,16 @@ class QdrantVectorStore(VectorStore):
         location: str | None = None,
     ) -> None:
         self.collection_name = collection_name
+        self._client_lock = threading.RLock()
         if location is not None:
-            self._client = QdrantClient(location=location)
+            self._client = QdrantClient(location=location, force_disable_check_same_thread=True)
             self._where = location
         elif url:
             self._client = QdrantClient(url=url)
             self._where = url
         else:
             resolved = str(Path(path or "storage/qdrant").resolve())
-            self._client = QdrantClient(path=resolved)
+            self._client = QdrantClient(path=resolved, force_disable_check_same_thread=True)
             self._where = resolved
         # Bumped on every write so the BM25 cache knows when to rebuild.
         self._mutations = 0
@@ -80,6 +91,7 @@ class QdrantVectorStore(VectorStore):
 
     # ----- writes ----------------------------------------------------------
 
+    @_synchronized
     def fork_collection(self, collection_name: str) -> "QdrantVectorStore":
         import copy
         store = copy.copy(self)
@@ -87,12 +99,14 @@ class QdrantVectorStore(VectorStore):
         store._mutations = 0
         return store
 
+    @_synchronized
     def delete_ids(self, ids: list[str]) -> None:
         if ids and self._client.collection_exists(self.collection_name):
             self._client.delete(collection_name=self.collection_name,
                                 points_selector=models.PointIdsList(points=[_point_id(i) for i in ids]), wait=True)
         self._mutations += 1
 
+    @_synchronized
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -118,6 +132,7 @@ class QdrantVectorStore(VectorStore):
         self._client.upsert(collection_name=self.collection_name, points=points, wait=True)
         self._mutations += 1
 
+    @_synchronized
     def delete_by_document_hash(self, document_hash: str) -> None:
         if not self._client.collection_exists(self.collection_name):
             return
@@ -136,6 +151,7 @@ class QdrantVectorStore(VectorStore):
         )
         self._mutations += 1
 
+    @_synchronized
     def clear(self) -> None:
         if self._client.collection_exists(self.collection_name):
             self._client.delete_collection(self.collection_name)
@@ -143,6 +159,7 @@ class QdrantVectorStore(VectorStore):
 
     # ----- reads -----------------------------------------------------------
 
+    @_synchronized
     def search(
         self,
         query_embedding: list[float],
@@ -181,6 +198,7 @@ class QdrantVectorStore(VectorStore):
             with_payload=True,
         )
 
+    @_synchronized
     def get(self, chunk_id: str) -> RetrievedChunk | None:
         if not self._client.collection_exists(self.collection_name):
             return None
@@ -193,6 +211,7 @@ class QdrantVectorStore(VectorStore):
             return None
         return _to_chunk(records[0].payload or {}, score=None)
 
+    @_synchronized
     def list_chunks(
         self,
         *,
@@ -213,6 +232,7 @@ class QdrantVectorStore(VectorStore):
     def all_chunks(self, limit: int = 50_000) -> list[RetrievedChunk]:
         return self.list_chunks(limit=limit)
 
+    @_synchronized
     def peek_embedding_dim(self) -> int | None:
         if not self._client.collection_exists(self.collection_name):
             return None
@@ -229,6 +249,7 @@ class QdrantVectorStore(VectorStore):
             return None
         return int(len(vector))
 
+    @_synchronized
     def embeddings_for_ids(self, ids: list[str]) -> dict[str, list[float]]:
         if not ids or not self._client.collection_exists(self.collection_name):
             return {}
@@ -246,6 +267,7 @@ class QdrantVectorStore(VectorStore):
                 out[cid] = [float(x) for x in r.vector]
         return out
 
+    @_synchronized
     def stats(self) -> dict:
         count = 0
         if self._client.collection_exists(self.collection_name):
@@ -258,6 +280,7 @@ class QdrantVectorStore(VectorStore):
             "count": count,
         }
 
+    @_synchronized
     def bm25_cache_key(self) -> tuple:
         count = 0
         if self._client.collection_exists(self.collection_name):
@@ -265,6 +288,10 @@ class QdrantVectorStore(VectorStore):
                 collection_name=self.collection_name, exact=True,
             ).count
         return ("qdrant", self._where, self.collection_name, self._mutations, count)
+
+    @_synchronized
+    def close(self) -> None:
+        self._client.close()
 
 
 # ---------------------------------------------------------------------------

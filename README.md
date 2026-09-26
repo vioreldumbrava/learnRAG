@@ -173,17 +173,22 @@ to see the query flow as a handful of lines.
 .\gui.bat
 ```
 
-On first run it creates `.venv\`, installs every dependency (including
-PySide6, cryptography, FastAPI, …), bootstraps `config.yaml` from the
-example, and opens a **five-tab** window:
+On first run it creates `.venv`, installs the application and PySide6,
+bootstraps `config.yaml` from the example, and opens a six-tab window:
 
 | Tab | What it does |
 |---|---|
-| **Settings** | Pick chat + embedding providers, type a base URL, click *Refresh models* to auto-discover what the server has loaded, set chunking strategy / `top_k`, toggle the advanced retrieval features (hybrid, HyDE, decomposition, MMR, reranker, multi-query, neighbor radius), then *Save to config.yaml*. Saving preserves any keys the GUI doesn't manage. URLs you've used before are remembered between sessions, and a *Clear vector DB* button lives next to Save. |
-| **Ingest** | Index the configured documents folder, a single file, or any folder you pick. **Per-file scrolling log** with colour-coded status (indexed/skipped/failed) + a determinate progress bar. Force re-ingest is a checkbox. |
-| **Ask** | Multi-turn chat: type a question, tick *Debug* to see retrieved chunks + the literal prompt, type a `--filter` like `module=CAN`, click **Clear History** to reset the conversation. |
-| **Memory** | The GUI version of `list` + `forget` + `inspect`: table of every ingested document, multi-select + *Forget Selected* to evict chunks, *Show N random chunks* / *Show chunks for selected doc*, plus an *Open storage folder* shortcut. |
-| **Stats** | Collection + chunk count + providers + chunking + retrieval-feature toggles. Includes a *Clear vector store* button (the GUI equivalent of `rag-app clear`). |
+| **Settings** | Edit providers, retrieval, chunking, citations, conversation limits, cache and logging. Saves validated YAML atomically. Apply only after work is idle; applying clears the desktop conversation. Clear active index retains original documents and rebuild backups. |
+| **Ingest** | Index a file, folder, or configured corpus; import multiple files or drop them into managed storage. See persisted per-file jobs, progress, failures, and cancellation. |
+| **Ask** | Streaming transcript with Stop, filters, a per-question `top_k`, sources and collapsible debug for each completed or incomplete turn. Click evidence to inspect exact and neighboring passages. Ctrl+Enter submits once. |
+| **Memory** | Inspect documents and sample chunks, forget selected documents without deleting originals, and open the storage folder. |
+| **Stats** | Check model readiness, index compatibility, chunk count, cache/logging settings, and session metrics. Clear the active index. |
+| **Experiments** | Compare dense, hybrid, MMR, and top-8 presets in retrieval-only or full-answer mode. Inspect metrics and results, cancel runs, and export JSON/CSV. |
+
+Desktop job records live beside the configured index in `<index_file>.desktop.jobs`;
+web jobs use `<index_file>.jobs`. The two interfaces can point to the same corpus,
+but their conversations and job histories are separate. Embedded Qdrant allows
+one owning process; stop the other app before opening the same disk-backed index.
 
 ### Quick start — CLI
 
@@ -444,8 +449,8 @@ prior turns as conversation context — so "what about the data phase?"
 works as a follow-up to a CAN-FD question.
 
 - **CLI:** `/clear` resets history, `/quit` exits.
-- **GUI:** *Clear History* button on the Ask tab; the indicator below the
-  filter shows turn count.
+- **GUI:** *Clear conversation* on the Ask tab removes prior turns. Stop and failed
+  turns remain visible but are excluded from the next model prompt.
 
 Implementation: history is threaded through
 [`PromptBuilder.build`](src/rag_app/retrieval/prompt_builder.py) →

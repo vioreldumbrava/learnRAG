@@ -1,287 +1,231 @@
-"""Ingest tab: pick a folder/file, run the ingestion pipeline, show progress.
-
-Per-file progress (each file → one coloured line in the log) is plumbed via
-a Qt signal so the GUI stays responsive while the worker thread runs the
-ingestion service.
-"""
+"""Persistent desktop ingestion jobs and managed multi-file imports."""
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
-from typing import Callable
 
-from PySide6.QtCore import QThread, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
+    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
-from rag_app.config import load_config
 from rag_app.gui.workers import run_in_thread
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
-from rag_app.providers.factory import build_chat_provider, build_embedding_provider
-from rag_app.vectorstores.factory import build_vector_store
+from rag_app.jobs import TERMINAL
+from rag_app.workflow import import_stream
 
 
-_STATUS_COLOURS = {
-    "indexed": QColor("#3fb950"),
-    "skipped": QColor("#d29922"),
-    "failed":  QColor("#f85149"),
-    "info":    QColor("#888888"),
-}
+class DropArea(QLabel):
+    files_dropped = Signal(list)
+
+    def __init__(self):
+        super().__init__("Drop files here to copy into managed documents and ingest")
+        self.setAlignment(Qt.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(44)
+        self.setStyleSheet("border: 1px dashed gray")
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and all(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self.files_dropped.emit([url.toLocalFile() for url in event.mimeData().urls()])
+        event.acceptProposedAction()
 
 
 class IngestTab(QWidget):
-    # Per-file progress signal: (current, total, file_path, status)
-    # Emitted from the worker thread; received on the GUI thread.
-    file_progress = Signal(int, int, str, str)
+    completed = Signal()
 
-    def __init__(self, config_path_getter: Callable[[], str]) -> None:
+    def __init__(self, runtime):
         super().__init__()
-        self._config_path_getter = config_path_getter
-        self._thread: QThread | None = None
-        self.file_progress.connect(self._on_file_progress)
-
+        self.runtime = runtime
+        self._job_id = None
+        self._last_status = None
+        self._threads = []
         layout = QVBoxLayout(self)
-
-        # path selector
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Path:"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Path:"))
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText(
-            "Leave empty to use documents_dir from config, "
-            "or pick a single file/folder."
-        )
-        path_row.addWidget(self.path_edit, stretch=1)
+        self.path_edit.setPlaceholderText("File, folder, or empty for configured documents directory")
+        row.addWidget(self.path_edit, 1)
         folder_btn = QPushButton("Folder...")
         folder_btn.clicked.connect(self._pick_folder)
-        path_row.addWidget(folder_btn)
+        row.addWidget(folder_btn)
         file_btn = QPushButton("File...")
         file_btn.clicked.connect(self._pick_file)
-        path_row.addWidget(file_btn)
-        layout.addLayout(path_row)
-
-        # options
-        opts_row = QHBoxLayout()
-        self.force_check = QCheckBox("Force re-ingest (ignore hash cache)")
-        opts_row.addWidget(self.force_check)
-        opts_row.addStretch(1)
-        self.ingest_btn = QPushButton("Ingest")
+        row.addWidget(file_btn)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        self.force_check = QCheckBox("Force re-ingest")
+        row.addWidget(self.force_check)
+        row.addStretch()
+        self.ingest_btn = QPushButton("Ingest path")
         self.ingest_btn.clicked.connect(self.run_ingest)
-        opts_row.addWidget(self.ingest_btn)
-        layout.addLayout(opts_row)
-
-        # Determinate progress bar (0..N) — flips to indeterminate (busy)
-        # while discovery is still in progress.
+        row.addWidget(self.ingest_btn)
+        self.import_btn = QPushButton("Import files...")
+        self.import_btn.clicked.connect(self._pick_imports)
+        row.addWidget(self.import_btn)
+        self.cancel_btn = QPushButton("Cancel selected job")
+        self.cancel_btn.clicked.connect(self.cancel_selected)
+        row.addWidget(self.cancel_btn)
+        layout.addLayout(row)
+        self.drop_area = DropArea()
+        self.drop_area.files_dropped.connect(self.import_files)
+        layout.addWidget(self.drop_area)
         self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setVisible(False)
         layout.addWidget(self.progress)
-
-        # Status counters under the bar (indexed / skipped / failed).
-        self.counter_label = QLabel("")
-        self.counter_label.setStyleSheet("color: #888;")
+        self.counter_label = QLabel("No active job")
         layout.addWidget(self.counter_label)
-
-        # Per-file scrolling log
+        layout.addWidget(QLabel("Recent desktop jobs (select to inspect or cancel):"))
+        self.jobs_list = QListWidget()
+        self.jobs_list.currentItemChanged.connect(self._show_selected)
+        layout.addWidget(self.jobs_list, 1)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setMaximumBlockCount(5000)  # keep memory bounded on big runs
-        self.output.setPlaceholderText(
-            "Ingestion progress and summary will appear here. "
-            "Save settings first if you changed providers."
-        )
-        layout.addWidget(self.output, stretch=1)
+        layout.addWidget(self.output, 1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(400)
+        self.timer.timeout.connect(self.refresh_jobs)
+        self.timer.start()
+        self._run_thread(lambda: self.runtime.jobs().list(), lambda _: self.refresh_jobs())
 
-        # Counters for the live "indexed/skipped/failed" line.
-        self._counts = {"indexed": 0, "skipped": 0, "failed": 0}
+    def _run_thread(self, fn, done):
+        thread, _ = run_in_thread(self, fn, done, lambda error: self.output.setPlainText(error))
+        self._threads.append(thread)
+        thread.finished.connect(lambda: self._threads.remove(thread))
 
-    # ----- run -------------------------------------------------------------
+    def run_ingest(self):
+        self._submit([self.path_edit.text().strip() or None], managed=False)
 
-    def run_ingest(self) -> None:
-        config_path = self._config_path_getter()
-        if not Path(config_path).exists():
-            QMessageBox.warning(
-                self,
-                "Save settings first",
-                f"Config file '{config_path}' was not found.\n\n"
-                "Go to Settings, fill in the provider details, and click "
-                "'Save to config.yaml' before ingesting.",
-            )
+    def import_files(self, paths):
+        if paths:
+            self._submit(paths, managed=True)
+
+    def _submit(self, paths, *, managed):
+        if not Path(self.runtime.config_path_getter()).exists():
+            QMessageBox.warning(self, "Save settings first", "Save configuration before ingesting.")
             return
-
-        single_path = self.path_edit.text().strip() or None
         force = self.force_check.isChecked()
 
-        # Reset visual state for this run.
-        self.output.clear()
-        self._append_line(
-            f">>> Ingesting (config={config_path}, force={force}, "
-            f"path={single_path or '<documents_dir>'})",
-            tag="info",
-        )
-        self._counts = {"indexed": 0, "skipped": 0, "failed": 0}
-        self._update_counter_label()
-        self.progress.setRange(0, 0)  # indeterminate until first callback
-        self.progress.setValue(0)
-        self.progress.setVisible(True)
-        self.ingest_btn.setEnabled(False)
+        def submit():
+            jobs = self.runtime.jobs()
 
-        # Captured by the worker — Qt signals are thread-safe, so emitting
-        # from the worker thread is allowed; the slot runs on the GUI thread.
-        emit_progress = self.file_progress.emit
-
-        def task() -> IngestSummary:
-            cfg = load_config(config_path)
-            embedding_provider = build_embedding_provider(cfg.embeddings)
-            store = build_vector_store(cfg)
-            ingest_chat = (
-                build_chat_provider(cfg.chat) if cfg.chunking.contextual else None
-            )
-            service = IngestService(cfg, embedding_provider, store, ingest_chat)
-
-            # Folder case: scan ourselves so we know the total up-front, then
-            # ingest one file at a time so progress events arrive incrementally.
-            if single_path and Path(single_path).is_dir():
-                from rag_app.ingestion.document_loader import scan_folder
-
-                docs = scan_folder(single_path, include_ocr_types=cfg.ocr.enabled)
-                total = len(docs)
-                combined = IngestSummary()
-                for i, doc in enumerate(docs, start=1):
-                    # Translate the inner (1,1,...) progress into outer (i,total,...).
-                    def passthrough(_c, _t, path, status, _i=i, _total=total):
-                        emit_progress(_i, _total, path, status)
-
-                    s = service.run(
-                        force=force,
-                        single_path=str(doc.path),
-                        on_progress=passthrough,
-                    )
-                    combined.indexed_files += s.indexed_files
-                    combined.skipped_files += s.skipped_files
-                    combined.failed_files += s.failed_files
-                    combined.total_chunks += s.total_chunks
-                    combined.embedding_dim = s.embedding_dim or combined.embedding_dim
+            def task(job):
+                cfg, embedder, chat, store = self.runtime.resources()
+                if managed and len(paths) > cfg.server.upload_max_files:
+                    raise ValueError(f"At most {cfg.server.upload_max_files} files per import")
+                service = IngestService(cfg, embedder, store, chat if cfg.chunking.contextual else None)
+                combined = asdict(IngestSummary())
+                total = len(paths)
+                for index, original in enumerate(paths, 1):
+                    if job.cancelled.is_set():
+                        combined["cancelled"] = True
+                        break
+                    path = original
+                    try:
+                        if managed:
+                            with Path(original).open("rb") as stream:
+                                path = import_stream(cfg, Path(original).name, stream)
+                        job.progress(index, total, path or cfg.paths.documents_dir, "indexing")
+                        result = service.run(
+                            force=force, single_path=path,
+                            should_cancel=job.cancelled.is_set,
+                            on_progress=lambda c, t, p, status: job.progress(
+                                index if managed else c,
+                                total if managed else t,
+                                p, status,
+                            ),
+                        )
+                        for key in ("indexed_files", "skipped_files", "failed_files"):
+                            combined[key].extend(getattr(result, key))
+                        combined["total_chunks"] += result.total_chunks
+                        combined["embedding_dim"] = result.embedding_dim or combined["embedding_dim"]
+                        combined["cancelled"] = result.cancelled
+                        status = "failed" if result.failed_files else "indexed"
+                    except Exception as exc:
+                        combined["failed_files"].append((str(original), str(exc)))
+                        status = "failed"
+                    job.update(result=combined)
+                    job.progress(index, total, str(path), status)
                 return combined
 
-            # Single file OR full documents_dir scan — let IngestService
-            # do the discovery and emit progress per file.
-            return service.run(
-                force=force,
-                single_path=single_path,
-                on_progress=lambda c, t, p, s: emit_progress(c, t, p, s),
+            return jobs.submit("upload" if managed else "ingest", task)
+
+        self.output.setPlainText("Starting ingestion job...")
+        self._run_thread(submit, self._submitted)
+
+    def _submitted(self, record):
+        self._job_id = record["id"]
+        self.refresh_jobs()
+
+    def refresh_jobs(self):
+        jobs = self.runtime._jobs
+        if jobs is None:
+            return
+        records = jobs.list()
+        selected = self.jobs_list.currentItem().data(Qt.UserRole) if self.jobs_list.currentItem() else self._job_id
+        self.jobs_list.blockSignals(True)
+        self.jobs_list.clear()
+        for record in records:
+            if record["kind"] not in ("ingest", "upload"):
+                continue
+            label = f"{record['created_at'][:19]}  {record['kind']}  {record['state']}  {record['id'][:8]}"
+            self.jobs_list.addItem(label)
+            item = self.jobs_list.item(self.jobs_list.count() - 1)
+            item.setData(Qt.UserRole, record["id"])
+            if record["id"] == selected:
+                self.jobs_list.setCurrentItem(item)
+        self.jobs_list.blockSignals(False)
+        if self._job_id:
+            record = jobs.get(self._job_id)
+            progress = record.get("progress") or {}
+            total = progress.get("total") or 0
+            self.progress.setRange(0, total or 0)
+            if total:
+                self.progress.setValue(progress.get("current") or 0)
+            self.counter_label.setText(f"{record['state']}: {progress.get('path', '')} ({progress.get('status', '')})")
+            if record["state"] in TERMINAL and self._last_status not in TERMINAL:
+                self.completed.emit()
+            self._last_status = record["state"]
+        self._show_selected()
+
+    def _show_selected(self, *_):
+        item = self.jobs_list.currentItem()
+        if item is None or self.runtime._jobs is None:
+            return
+        record = self.runtime._jobs.get(item.data(Qt.UserRole))
+        result = record.get("result") or {}
+        failures = result.get("failed_files") or []
+        self.output.setPlainText(
+            f"Job {record['id']}\nState: {record['state']}\n"
+            f"Indexed: {len(result.get('indexed_files', []))}\n"
+            f"Skipped: {len(result.get('skipped_files', []))}\n"
+            f"Failed: {len(failures)}\n"
+            + "\n".join(f"{path}: {error}" for path, error in failures)
+            + ("\n" + record["error"] if record.get("error") else "")
+        )
+
+    def cancel_selected(self):
+        item = self.jobs_list.currentItem()
+        if item and self.runtime._jobs:
+            self._run_thread(
+                lambda: self.runtime._jobs.cancel(item.data(Qt.UserRole)),
+                lambda _: self.refresh_jobs(),
             )
 
-        self._thread, _ = run_in_thread(
-            self,
-            fn=task,
-            on_result=self._on_done,
-            on_error=self._on_error,
-            on_done=self._reset_running_state,
-        )
-
-    @Slot(int, int, str, str)
-    def _on_file_progress(
-        self,
-        current: int,
-        total: int,
-        file_path: str,
-        status: str,
-    ) -> None:
-        """Slot — runs on the GUI thread, safe to touch widgets."""
-
-        # Switch the bar to determinate the first time we see a total.
-        if total > 0:
-            if self.progress.maximum() != total:
-                self.progress.setRange(0, total)
-            self.progress.setValue(current - (status == "indexing"))
-
-        # Update counters.
-        if status in self._counts:
-            self._counts[status] += 1
-        self._update_counter_label()
-
-        # Append a coloured line for this file.
-        self._append_line(
-            f"[{current:>4}/{total}] {status:>7}  {file_path}",
-            tag=status,
-        )
-
-    def _update_counter_label(self) -> None:
-        self.counter_label.setText(
-            f"indexed: {self._counts['indexed']}  |  "
-            f"skipped: {self._counts['skipped']}  |  "
-            f"failed: {self._counts['failed']}"
-        )
-
-    def _on_done(self, summary: IngestSummary) -> None:
-        self._append_line("", tag="info")
-        self._append_line(
-            "  Indexed files:        {}\n"
-            "  Skipped (unchanged):  {}\n"
-            "  Failed:               {}\n"
-            "  Total chunks added:   {}\n"
-            "  Embedding dimension:  {}".format(
-                len(summary.indexed_files),
-                len(summary.skipped_files),
-                len(summary.failed_files),
-                summary.total_chunks,
-                summary.embedding_dim if summary.embedding_dim is not None else "n/a",
-            ),
-            tag="info",
-        )
-        for path, msg in summary.failed_files:
-            self._append_line(f"  ! {path}: {msg}", tag="failed")
-        self._append_line("<<< done", tag="info")
-
-    def _on_error(self, message: str) -> None:
-        self._append_line(f"!!! ingestion failed: {message}", tag="failed")
-
-    def _reset_running_state(self) -> None:
-        self.ingest_btn.setEnabled(True)
-        # Keep the progress bar visible at 100% so the user sees the final
-        # state. It'll reset on the next run.
-        if self.progress.maximum() > 0:
-            self.progress.setValue(self.progress.maximum())
-
-    # ----- log helpers -----------------------------------------------------
-
-    def _append_line(self, text: str, *, tag: str) -> None:
-        cursor = self.output.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        fmt = QTextCharFormat()
-        colour = _STATUS_COLOURS.get(tag)
-        if colour is not None:
-            fmt.setForeground(colour)
-        cursor.insertText(text + "\n", fmt)
-        # Auto-scroll to the bottom.
-        sb = self.output.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    # ----- pickers ---------------------------------------------------------
-
-    def _pick_folder(self) -> None:
+    def _pick_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Pick folder to ingest")
         if path:
             self.path_edit.setText(path)
 
-    def _pick_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Pick file to ingest",
-            "",
-            "Documents (*.txt *.md *.pdf *.docx *.html *.htm *.csv)",
-        )
+    def _pick_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Pick file to ingest")
         if path:
             self.path_edit.setText(path)
+
+    def _pick_imports(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import files")
+        self.import_files(paths)

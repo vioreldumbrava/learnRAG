@@ -55,7 +55,7 @@ class JobManager:
                 if data["state"] not in TERMINAL:
                     data.update(
                         state="interrupted",
-                        error="Server stopped before this job finished; rerun to resume unchanged-file skipping.",
+                        error="Application stopped before this job finished; rerun to resume unchanged-file skipping.",
                         finished_at=now(),
                     )
                     atomic_json(path, data)

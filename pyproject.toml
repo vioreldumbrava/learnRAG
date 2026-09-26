@@ -38,6 +38,9 @@ browser = [
 gui = [
     "PySide6>=6.7",
 ]
+desktop-test = [
+    "pytest-qt>=4.4",
+]
 reranker = [
     "sentence-transformers>=3.0",
 ]

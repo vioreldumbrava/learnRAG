@@ -9,6 +9,7 @@ similarity->distance inversion (so score orientation matches Chroma).
 from __future__ import annotations
 
 import pytest
+from concurrent.futures import ThreadPoolExecutor
 
 pytest.importorskip("qdrant_client")
 
@@ -45,6 +46,30 @@ def _seed(store, doc_hash="abcdef123456", module="CAN", n=4):
     ]
     store.upsert_chunks(chunks, [_VECS[i] for i in range(n)])
     return chunks
+
+
+def test_disk_backed_client_shared_across_workers_and_reopen(tmp_path):
+    path = tmp_path / "qdrant"
+    store = QdrantVectorStore(collection_name="desktop", path=path)
+    _seed(store)
+    fork = store.fork_collection("second")
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        searches = list(pool.map(
+            lambda i: store.search(_VECS[i % 4], top_k=2), range(16)
+        ))
+        future = pool.submit(_seed, fork, "other-doc", "LIN", 2)
+        future.result()
+    assert all(searches)
+    assert fork.get("other-doc:1") is not None
+    store.delete_ids(["abcdef123456:0"])
+    assert store.get("abcdef123456:0") is None
+    store.close()
+    reopened = QdrantVectorStore(collection_name="desktop", path=path)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(reopened.get, "abcdef123456:1").result() is not None
+    finally:
+        reopened.close()
 
 
 def test_upsert_and_search_round_trip():

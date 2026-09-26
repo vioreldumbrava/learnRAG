@@ -31,6 +31,7 @@ storage/*.jobs/
 storage/qdrant/
 documents/uploads/
 .artifacts/
+.desktop-screenshots/
 
 # Editor / OS
 .idea/

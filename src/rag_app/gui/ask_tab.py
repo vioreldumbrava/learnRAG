@@ -1,327 +1,296 @@
-"""Ask tab: question input, debug toggle, answer + sources display.
-
-Features:
-    - Multi-turn conversation with history (#1)
-    - Clear History button to reset the conversation
-    - Metadata filter input (#4)
-    - All retrieval enhancements (hybrid, HyDE, reranker) used from config
-"""
+"""Streaming desktop transcript and exact evidence inspection."""
 
 from __future__ import annotations
 
+import json
+import re
+import threading
 from pathlib import Path
-from typing import Callable
 
-from PySide6.QtCore import QThread, Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
+    QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
-from rag_app.config import load_config
 from rag_app.gui.workers import run_in_thread
-from rag_app.models import ChatMessage, RagAnswer
-from rag_app.providers.factory import build_chat_provider, build_embedding_provider
+from rag_app.models import ChatMessage
 from rag_app.retrieval.factory import build_rag_service, build_retriever
-from rag_app.retrieval.rag_service import DebugInfo
-from rag_app.vectorstores.factory import build_vector_store
+from rag_app.validation import parse_filter
+from rag_app.workflow import debug_payload, source_payload
+
+
+class QueryWorker(QObject):
+    token = Signal(str)
+    evidence = Signal(object, object)
+    completed = Signal(str)
+    cancelled = Signal()
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, runtime, question, history, where, top_k):
+        super().__init__()
+        self.runtime, self.question, self.history = runtime, question, history
+        self.where, self.top_k = where, top_k
+        self.stop_requested = threading.Event()
+
+    def run(self):
+        iterator = None
+        try:
+            cfg, embedder, chat, store = self.runtime.resources()
+            retriever = build_retriever(cfg, embedder, store, chat, where=self.where, top_k=self.top_k)
+            service = build_rag_service(cfg, retriever, chat)
+            iterator, sources, debug = service.prepare_stream(self.question, self.history)
+            self.evidence.emit(source_payload(sources), debug_payload(debug))
+            parts = []
+            if not self.stop_requested.is_set():
+                for token in iterator:
+                    if self.stop_requested.is_set():
+                        break
+                    parts.append(token)
+                    self.token.emit(token)
+            if self.stop_requested.is_set():
+                self.cancelled.emit()
+            else:
+                self.completed.emit("".join(parts))
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            if iterator is not None:
+                try:
+                    iterator.close()
+                except Exception:
+                    pass
+            self.runtime.end_query()
+            self.finished.emit()
+
+
+class EvidenceDialog(QDialog):
+    def __init__(self, runtime, source, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Evidence: " + source["file"])
+        self.resize(650, 480)
+        layout = QVBoxLayout(self)
+        details = QLabel(
+            f"Document: {source['document_id']}\nChunk: {source['id']}\n"
+            f"Path: {source['source_path']}\nSection: {source['section']}\n"
+            f"Score: {source['score']} ({source['score_type']})\nPreview: {source['preview']}"
+        )
+        details.setWordWrap(True)
+        details.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        layout.addWidget(details)
+        self.passage = QPlainTextEdit("Loading exact passage and neighbors...")
+        self.passage.setReadOnly(True)
+        layout.addWidget(self.passage)
+        row = QHBoxLayout()
+        open_btn = QPushButton("Open original file")
+        open_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(source["source_path"])))
+        row.addWidget(open_btn)
+        row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+
+        def fetch():
+            store = runtime.resources()[3]
+            with store.coordinator.read():
+                return [(cid, store.get(cid)) for cid in dict.fromkeys([source["id"], *source["context_ids"]])]
+
+        self._thread, _ = run_in_thread(
+            self, fetch, self._show_chunks,
+            lambda error: self.passage.setPlainText("Evidence unavailable: " + error),
+        )
+
+    def _show_chunks(self, chunks):
+        blocks = []
+        for i, (cid, chunk) in enumerate(chunks):
+            if chunk is None:
+                blocks.append(f"{cid}: This revision was replaced or removed.")
+            else:
+                title = "Selected passage" if i == 0 else "Neighbor passage"
+                blocks.append(f"{title} [{cid}]\n{chunk.text}")
+        self.passage.setPlainText("\n\n".join(blocks))
 
 
 class AskTab(QWidget):
-    def __init__(self, config_path_getter: Callable[[], str]) -> None:
+    def __init__(self, runtime):
         super().__init__()
-        self._config_path_getter = config_path_getter
-        self._thread: QThread | None = None
-        self._history: list[ChatMessage] = []  # conversation history (#1)
-        # Providers + Chroma client survive across queries; rebuilt only when
-        # the config file changes. Only the worker thread touches these, and
-        # queries run one at a time (Ask is disabled while one is running).
-        self._pipeline_key: tuple[str, int] | None = None
-        self._pipeline: tuple | None = None
-
+        self.runtime = runtime
+        self._history = []
+        self._worker = None
+        self._thread = None
+        self._evidence_dialogs = []
         layout = QVBoxLayout(self)
-
-        # question + controls
         self.question_edit = QPlainTextEdit()
-        self.question_edit.setPlaceholderText("Type your question, then press Ask...")
-        self.question_edit.setFixedHeight(80)
+        self.question_edit.setPlaceholderText("Ask about your documents (Ctrl+Enter)")
+        self.question_edit.setFixedHeight(76)
         layout.addWidget(self.question_edit)
-
-        controls = QHBoxLayout()
-        self.debug_check = QCheckBox("Debug (show retrieved chunks + final prompt)")
-        controls.addWidget(self.debug_check)
-
-        # Metadata filter (#4)
-        controls.addWidget(QLabel("Filter:"))
+        row = QHBoxLayout()
+        self.debug_check = QCheckBox("Debug")
+        row.addWidget(self.debug_check)
+        row.addWidget(QLabel("Filter:"))
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("module=CAN")
-        self.filter_edit.setFixedWidth(180)
-        controls.addWidget(self.filter_edit)
-
-        controls.addStretch(1)
-
-        # Clear history button (#1)
-        self.clear_btn = QPushButton("Clear History")
+        row.addWidget(self.filter_edit)
+        row.addWidget(QLabel("top_k:"))
+        self.top_k_spin = QSpinBox()
+        self.top_k_spin.setRange(0, 100)
+        self.top_k_spin.setSpecialValueText("Config")
+        row.addWidget(self.top_k_spin)
+        self.clear_btn = QPushButton("Clear conversation")
         self.clear_btn.clicked.connect(self._clear_history)
-        controls.addWidget(self.clear_btn)
-
+        row.addWidget(self.clear_btn)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop)
+        row.addWidget(self.stop_btn)
         self.ask_btn = QPushButton("Ask")
         self.ask_btn.clicked.connect(self.run_ask)
-        controls.addWidget(self.ask_btn)
-        layout.addLayout(controls)
+        row.addWidget(self.ask_btn)
+        layout.addLayout(row)
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.run_ask)
+        self.status_label = QLabel("Ready. Ingest documents to add evidence.")
+        layout.addWidget(self.status_label)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.transcript = QWidget()
+        self.transcript_layout = QVBoxLayout(self.transcript)
+        self.transcript_layout.addStretch()
+        self.scroll.setWidget(self.transcript)
+        layout.addWidget(self.scroll, 1)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setVisible(False)
-        layout.addWidget(self.progress)
-
-        # History indicator
-        self.history_label = QLabel("")
-        self.history_label.setStyleSheet("color: #6a6; font-style: italic;")
-        layout.addWidget(self.history_label)
-
-        # Splitter: answer on top, details (sources + debug) on bottom.
-        splitter = QSplitter(Qt.Vertical)
-
-        self.answer_edit = QPlainTextEdit()
-        self.answer_edit.setReadOnly(True)
-        self.answer_edit.setPlaceholderText("Answer will appear here.")
-        splitter.addWidget(self.answer_edit)
-
-        details = QWidget()
-        details_layout = QVBoxLayout(details)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-
-        details_layout.addWidget(QLabel("Sources  (double-click a row to open the file)"))
-        self.sources_table = QTableWidget(0, 5)
-        self.sources_table.setHorizontalHeaderLabels(["#", "file", "section", "chunk", "score"])
-        self.sources_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
-        )
-        self.sources_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.Stretch
-        )
-        self.sources_table.verticalHeader().setVisible(False)
-        self.sources_table.setToolTip("Double-click a row to open the source file.")
-        self.sources_table.cellDoubleClicked.connect(self._open_source_file)
-        details_layout.addWidget(self.sources_table)
-
-        self.debug_label = QLabel("Debug")
-        details_layout.addWidget(self.debug_label)
-        self.debug_edit = QPlainTextEdit()
-        self.debug_edit.setReadOnly(True)
-        self.debug_edit.setPlaceholderText(
-            "Enable Debug above to see retrieved chunks and the literal prompt."
-        )
-        details_layout.addWidget(self.debug_edit)
-        splitter.addWidget(details)
-        splitter.setSizes([200, 400])
-        layout.addWidget(splitter, stretch=1)
-
-    # ----- run -------------------------------------------------------------
-
-    def run_ask(self) -> None:
+    def run_ask(self):
+        if self._worker is not None:
+            return
         question = self.question_edit.toPlainText().strip()
         if not question:
             return
-
-        config_path = self._config_path_getter()
-        if not Path(config_path).exists():
-            QMessageBox.warning(
-                self,
-                "Save settings first",
-                f"Config file '{config_path}' was not found.\n\n"
-                "Go to Settings, save the configuration, then ingest before asking.",
-            )
-            return
-
-        debug = self.debug_check.isChecked()
-        self.ask_btn.setEnabled(False)
-        self.progress.setVisible(True)
-        self.answer_edit.setPlainText("...")
-        self.sources_table.setRowCount(0)
-        self.debug_edit.clear()
-
-        # Capture history for this query.
-        history = list(self._history) if self._history else None
-
-        # Parse filter.
-        filter_str = self.filter_edit.text().strip()
-        from rag_app.validation import parse_filter
         try:
-            where = parse_filter(filter_str)
+            where = parse_filter(self.filter_edit.text().strip())
         except ValueError as exc:
-            self._on_error(str(exc))
-            self._reset_running_state()
+            self.status_label.setText(str(exc))
             return
-
-        def task():
-            cfg, embedding_provider, chat_provider, store = self._get_pipeline(
-                config_path
-            )
-            retriever = build_retriever(
-                cfg, embedding_provider, store, chat_provider, where=where,
-            )
-            service = build_rag_service(cfg, retriever, chat_provider)
-            if debug:
-                return service.answer_with_debug(question, history=history)
-            return service.answer(question, history=history), None
-
+        if not Path(self.runtime.config_path_getter()).exists():
+            QMessageBox.warning(self, "Save settings first", "Save your configuration before asking.")
+            return
+        if not self.runtime.begin_query():
+            return
+        self.ask_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.clear_btn.setEnabled(False)
+        self.status_label.setText("Retrieving evidence...")
         self._current_question = question
-        self._thread, _ = run_in_thread(
-            self,
-            fn=task,
-            on_result=self._on_done,
-            on_error=self._on_error,
-            on_done=self._reset_running_state,
+        self._add_turn(question)
+        self._worker = QueryWorker(
+            self.runtime, question, list(self._history), where, self.top_k_spin.value() or None
         )
+        thread = self._thread = QThread(self)
+        self._worker.moveToThread(thread)
+        thread.started.connect(self._worker.run)
+        self._worker.token.connect(self._on_token)
+        self._worker.evidence.connect(self._on_evidence)
+        self._worker.completed.connect(self._on_completed)
+        self._worker.cancelled.connect(self._on_cancelled)
+        self._worker.error.connect(self._on_error)
+        self._worker.finished.connect(thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
-    def _get_pipeline(self, config_path: str):
-        """Return (cfg, embedding_provider, chat_provider, store) for a query.
+    def stop(self):
+        if self._worker is not None:
+            self._worker.stop_requested.set()
+            self.stop_btn.setEnabled(False)
+            self.status_label.setText("Stopping; waiting for the provider to return...")
 
-        The config is re-read every query (it's cheap and keeps flag changes
-        live), but providers and the Chroma client are rebuilt only when the
-        config file itself changes — reopening Chroma's PersistentClient per
-        query is wasted work.
-        """
+    def _add_turn(self, question):
+        card = QWidget()
+        body = QVBoxLayout(card)
+        label = QLabel("You: " + question)
+        label.setWordWrap(True)
+        body.addWidget(label)
+        self._answer = QPlainTextEdit()
+        self._answer.setReadOnly(True)
+        self._answer.setPlaceholderText("Retrieving...")
+        self._answer.setMinimumHeight(90)
+        self._answer.setMaximumHeight(260)
+        body.addWidget(self._answer)
+        self._source_row = QVBoxLayout()
+        body.addLayout(self._source_row)
+        toggle = QToolButton()
+        toggle.setText("Debug details")
+        toggle.setCheckable(True)
+        self._debug_toggle = toggle
+        body.addWidget(toggle)
+        self._debug_text = QPlainTextEdit()
+        self._debug_text.setReadOnly(True)
+        self._debug_text.setVisible(False)
+        toggle.toggled.connect(self._debug_text.setVisible)
+        body.addWidget(self._debug_text)
+        self.transcript_layout.insertWidget(self.transcript_layout.count() - 1, card)
+        self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
 
-        key = (config_path, Path(config_path).stat().st_mtime_ns)
-        cfg = load_config(config_path)
-        if self._pipeline is None or self._pipeline_key != key:
-            self._pipeline = (
-                build_embedding_provider(cfg.embeddings),
-                build_chat_provider(cfg.chat),
-                build_vector_store(cfg),
-            )
-            self._pipeline_key = key
-        embedding_provider, chat_provider, store = self._pipeline
-        return cfg, embedding_provider, chat_provider, store
+    def _on_token(self, token):
+        self._answer.insertPlainText(token)
+        self.status_label.setText("Generating...")
 
-    def _on_done(self, payload) -> None:
-        answer, debug_info = payload  # type: ignore[misc]
-        self._render_answer(answer)
-        if debug_info is not None:
-            self._render_debug(debug_info)
-        else:
-            self.debug_edit.clear()
+    def _on_evidence(self, sources, debug):
+        if not sources:
+            self._source_row.addWidget(QLabel("No matching evidence. Add documents in Ingest."))
+        for source in sources:
+            filename = re.sub(r"^[0-9a-f]{32}_", "", source["file"])
+            score = f"{source['score']:.3f}" if source["score"] is not None else "n/a"
+            button = QPushButton(f"{filename} | {source['section']} | {source['score_type']}: {score}")
+            button.setProperty("source", source)
+            button.setToolTip(source["preview"])
+            button.clicked.connect(lambda _checked=False, s=source: self._open_evidence(s))
+            self._source_row.addWidget(button)
+        self._debug_text.setPlainText(json.dumps(debug, indent=2, ensure_ascii=False))
+        self._debug_toggle.setChecked(self.debug_check.isChecked())
 
-        # Update conversation history (#1).
-        question = getattr(self, "_current_question", "")
-        if question:
-            self._history.append(ChatMessage(role="user", content=question))
-            self._history.append(ChatMessage(role="assistant", content=answer.answer))
-            self._update_history_label()
+    def _on_completed(self, answer):
+        if self._worker and self._worker.stop_requested.is_set():
+            self._mark_incomplete("Cancelled")
+            return
+        self._history.extend([
+            ChatMessage(role="user", content=self._current_question),
+            ChatMessage(role="assistant", content=answer),
+        ])
+        self.status_label.setText(f"Complete ({len(self._history) // 2} turns in this session)")
 
-    def _on_error(self, message: str) -> None:
-        self.answer_edit.setPlainText(f"Error:\n{message}")
+    def _mark_incomplete(self, status):
+        self.status_label.setText(status + "; this turn will not be used as history.")
+        self._answer.appendPlainText("\n[" + status + "]")
 
-    def _reset_running_state(self) -> None:
+    def _on_cancelled(self):
+        self._mark_incomplete("Cancelled")
+
+    def _on_error(self, error):
+        self._mark_incomplete("Failed: " + error)
+
+    def _on_thread_finished(self):
         self.ask_btn.setEnabled(True)
-        self.progress.setVisible(False)
+        self.stop_btn.setEnabled(False)
+        self.clear_btn.setEnabled(True)
+        self._worker = None
+        self._thread = None
 
-    def _clear_history(self) -> None:
+    def _open_evidence(self, source):
+        dialog = EvidenceDialog(self.runtime, source, self)
+        self._evidence_dialogs.append(dialog)
+        dialog.finished.connect(lambda: self._evidence_dialogs.remove(dialog))
+        dialog.show()
+
+    def _clear_history(self):
+        if self._worker:
+            return
         self._history.clear()
-        self._update_history_label()
-        self.answer_edit.clear()
-        self.sources_table.setRowCount(0)
-        self.debug_edit.clear()
-
-    def _update_history_label(self) -> None:
-        turns = len(self._history) // 2
-        if turns:
-            self.history_label.setText(f"Conversation: {turns} turn(s) in memory")
-        else:
-            self.history_label.setText("")
-
-    # ----- rendering -------------------------------------------------------
-
-    def _render_answer(self, answer: RagAnswer) -> None:
-        self.answer_edit.setPlainText(answer.answer)
-        self.sources_table.setRowCount(len(answer.sources))
-        for row, src in enumerate(answer.sources):
-            score = f"{src.score:.4f}" if src.score is not None else "n/a"
-            source_path = str(src.metadata.get("source_path", ""))
-            section = str(src.metadata.get("section", ""))
-
-            self.sources_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
-
-            file_item = QTableWidgetItem(str(src.metadata.get("source_file", "?")))
-            file_item.setData(Qt.UserRole, source_path)
-            if source_path:
-                file_item.setToolTip(f"Double-click to open:\n{source_path}")
-                file_item.setForeground(
-                    self.sources_table.palette().link()
-                )
-            self.sources_table.setItem(row, 1, file_item)
-
-            self.sources_table.setItem(row, 2, QTableWidgetItem(section))
-            self.sources_table.setItem(
-                row, 3, QTableWidgetItem(str(src.metadata.get("chunk_index", "?")))
-            )
-            self.sources_table.setItem(row, 4, QTableWidgetItem(score))
-
-        self.sources_table.resizeColumnsToContents()
-        self.sources_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
-        )
-        self.sources_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.Stretch
-        )
-
-    def _open_source_file(self, row: int, _col: int) -> None:
-        """Open the source file for the clicked row in the system default app."""
-        file_item = self.sources_table.item(row, 1)
-        if file_item is None:
-            return
-        source_path = file_item.data(Qt.UserRole)
-        if not source_path:
-            return
-        p = Path(source_path)
-        if not p.exists():
-            QMessageBox.warning(
-                self,
-                "File not found",
-                f"Could not open:\n{source_path}\n\nThe file may have been moved or deleted.",
-            )
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
-
-    def _render_debug(self, debug: DebugInfo) -> None:
-        lines: list[str] = [
-            f"Embedding:  {debug.embedding_provider} / {debug.embedding_model}",
-            f"Chat:       {debug.chat_provider} / {debug.chat_model}",
-            f"Retrieved:  {len(debug.retrieved_chunks)} chunks",
-            f"Prompt:     {debug.prompt_char_count} chars",
-            f"Omitted:    {debug.omitted_history_messages} history messages, {debug.omitted_chunks} evidence chunks",
-            f"Settings:   {debug.effective_settings}",
-            "",
-            "--- Retrieved chunks ---",
-        ]
-        for i, c in enumerate(debug.retrieved_chunks, start=1):
-            score = f"{c.score:.4f}" if c.score is not None else "n/a"
-            preview = c.text.strip().replace("\n", " ")
-            if len(preview) > 200:
-                preview = preview[:197] + "..."
-            lines.append(
-                f"[{i}] {c.metadata.get('source_file', '?')} "
-                f"#{c.metadata.get('chunk_index', '?')}  score={score}\n    {preview}"
-            )
-        lines.append("")
-        for msg in debug.prompt_messages:
-            lines.append(f"--- prompt: {msg.role} ---")
-            lines.append(msg.content)
-            lines.append("")
-        self.debug_edit.setPlainText("\n".join(lines))
+        while self.transcript_layout.count() > 1:
+            item = self.transcript_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.status_label.setText("Conversation cleared.")

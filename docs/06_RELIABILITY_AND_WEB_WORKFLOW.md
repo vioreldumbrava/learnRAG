@@ -121,14 +121,58 @@ signals; neither proves groundedness. Retrieval-only mode does not score answers
 or refusals; questions with no applicable expectations are reported as unscored.
 Document-level metrics cannot measure neighboring-context quality.
 
+## Desktop operating guide and feature comparison
+
+Install `pip install -e ".[gui]"` and launch `python -m rag_app.gui` (or `gui.bat` on
+Windows). Save settings before importing. Use **Ingest path** for an existing
+file or folder; **Import files** and drag-and-drop copy into managed
+`documents/uploads` with unique names, supported-type checks, and the configured
+per-file size limit. Jobs persist in `<index_file>.desktop.jobs`. Reopening the
+desktop shows recent jobs; work that did not reach a terminal state is marked
+interrupted. Cancel stops between files, retaining files already committed.
+
+Ask streams into a scrollable conversation. Ctrl+Enter submits, Stop requests
+cancellation immediately, and the status remains **Stopping** until the provider
+returns and its iterator closes. A cancelled or failed turn is visible but does
+not enter later prompt history. Each answer retains its evidence and debug
+details. Click a source to read the exact chunk and neighboring chunks used in
+the prompt; if they have been replaced or removed, the dialog says so. Memory
+retains document inspection and opening the local storage folder.
+
+Experiments runs the same four presets and bundled questions as the web panel.
+Retrieval-only mode avoids answer generation and chat-assisted query expansion;
+full-answer mode includes answer and refusal checks. Both disable measured
+caches and retain the indexed corpus revision. Select a job to inspect
+aggregate and per-question results, then export JSON or CSV. The panel includes
+a manual rubric for grounding and citation support. Keyword coverage is only
+a keyword match signal; document-level retrieval metrics cannot assess whether
+neighbor passages improved the answer.
+
+| Capability | Desktop | Web |
+|---|---|---|
+| Settings | Editable; applied after work is idle, clearing desktop history | Read-only; restart server after file edits |
+| Conversation | Native streaming transcript; session-local | Browser streaming transcript; tab-local |
+| Ingestion jobs | Persisted in `.desktop.jobs`, with direct local paths and managed import | Persisted in `.jobs`, with uploads and allowed-root folders |
+| Evidence and experiments | Native dialogs and panel | Browser panels and downloads |
+| Index and providers | Shared Python core and configured corpus | Same core and configured corpus |
+
+The desktop and web app keep separate conversations and job histories. A saved
+desktop config does not reload a running web server. For an incompatible index,
+stop other owners and run `rag-app rebuild --config config.yaml`; desktop
+Settings never clears or rebuilds it implicitly. Embedded Qdrant permits one
+owner at a time. Closing the desktop requests cancellation and waits in the Qt
+event loop for safe worker boundaries before releasing its client and jobs lock.
+
 ## Verification
 
 ```powershell
-python -m pip install -e ".[dev,qdrant,browser]"
+python -m pip install -e ".[dev,qdrant,browser,gui,desktop-test]"
 python -m pytest -q
 python -m playwright install chromium
 $env:RAG_BROWSER_TESTS = '1'
 python -m pytest tests/browser -q
+$env:QT_QPA_PLATFORM = 'offscreen'
+python -m pytest tests/desktop -q
 ```
 
 Node 22 enables the incremental SSE parser tests. Chromium integration tests
@@ -139,7 +183,7 @@ keyboard navigation, and narrow screens. Backend tests exercise failed/partial
 commits and recovery against isolated Chroma and Qdrant collections.
 
 CI runs the Python suite on Windows and Linux, Python 3.11 and 3.13, plus browser
-flows on both operating systems. Real-model quality evaluation remains a local
+and desktop flows on both operating systems. Real-model quality evaluation remains a local
 experiment; CI neither downloads an LLM nor asserts fabricated quality gains.
 
 ### Local verification record (2026-09-26)
@@ -151,3 +195,16 @@ workflows passed; the narrow-screen screenshot was also inspected. Package
 building, bundled UI/question assets, OpenAPI routes, Python compilation, and
 Docker loopback bindings were checked. The Windows/Linux CI workflow is added;
 its hosted runs and live-model answer quality were not verified locally.
+
+### Desktop parity verification (2026-09-26)
+
+On Windows, the Python suite with headless desktop tests finished with
+**706 passed and 6 skipped**; four skips are the opt-in browser tests and two
+are fake-store collection-switching cases covered by real backend tests. The
+browser suite was run separately with **4 passed**. Desktop tests cover the
+managed import-to-export workflow, duplicate files, stale and neighboring
+evidence, Stop during retrieval/generation, provider errors, settings reload,
+persisted jobs, ownership locking, and graceful close. A disk-backed Qdrant
+client was exercised across worker threads and a reopen cycle. Screenshots of
+Settings, Ask, and Experiments at 800x600 were inspected. Hosted Windows/Linux
+desktop CI and live-model answer quality remain unverified locally.

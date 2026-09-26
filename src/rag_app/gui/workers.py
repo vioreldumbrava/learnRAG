@@ -1,47 +1,50 @@
-"""Background workers so long operations don't freeze the UI.
-
-Each operation runs in its own QThread. Signals carry the result back to the
-main thread; never touch UI widgets from inside a worker.
-"""
+"""Run blocking operations in Qt threads and marshal callbacks to the UI."""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 
-class Worker(QObject):
-    """Generic worker that runs a callable and emits a result or error.
-
-    Usage:
-        worker = Worker(lambda: do_something(...))
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.result.connect(on_result)
-        worker.error.connect(on_error)
-        thread.start()
-    """
+class Worker(QThread):
+    """One blocking callable; the QThread itself remains owned by the UI."""
 
     result = Signal(object)
     error = Signal(str)
-    finished = Signal()
 
-    def __init__(self, fn: Callable[[], Any]) -> None:
-        super().__init__()
+    def __init__(self, fn: Callable[[], Any], parent: QObject) -> None:
+        super().__init__(parent)
         self._fn = fn
 
     def run(self) -> None:
         try:
             value = self._fn()
-        except Exception as exc:  # surface to the UI
+        except Exception as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
         else:
             self.result.emit(value)
-        finally:
-            self.finished.emit()
+
+
+class _Dispatcher(QObject):
+    """Explicit receiver whose slots always execute in the UI thread."""
+
+    def __init__(self, on_result, on_error, on_done, parent):
+        super().__init__(parent)
+        self.on_result, self.on_error, self.on_done = on_result, on_error, on_done
+
+    @Slot(object)
+    def result(self, value):
+        self.on_result(value)
+
+    @Slot(str)
+    def error(self, message):
+        self.on_error(message)
+
+    @Slot()
+    def done(self):
+        if self.on_done:
+            self.on_done()
 
 
 def run_in_thread(
@@ -51,31 +54,14 @@ def run_in_thread(
     on_error: Callable[[str], None],
     on_done: Callable[[], None] | None = None,
 ) -> tuple[QThread, Worker]:
-    """Run `fn` in a background QThread and dispatch the result.
-
-    Returns (thread, worker). The worker is also attached as `thread._py_worker`
-    so it stays alive even if the caller drops the second tuple element.
-    Without that, PySide6 can garbage-collect the Python `Worker` between
-    `thread.start()` and the `started` signal firing, leaving the operation
-    to silently no-op.
-    """
-
-    thread = QThread(parent)
-    worker = Worker(fn)
-    worker.moveToThread(thread)
-
-    thread.started.connect(worker.run)
-    worker.result.connect(on_result)
-    worker.error.connect(on_error)
-    worker.finished.connect(thread.quit)
-    worker.finished.connect(worker.deleteLater)
+    """Start a callable and return its thread; callbacks run on the UI thread."""
+    thread = Worker(fn, parent)
+    dispatcher = _Dispatcher(on_result, on_error, on_done, parent)
+    thread.result.connect(dispatcher.result)
+    thread.error.connect(dispatcher.error)
+    thread.finished.connect(dispatcher.done)
+    thread.finished.connect(dispatcher.deleteLater)
     thread.finished.connect(thread.deleteLater)
-    if on_done is not None:
-        worker.finished.connect(on_done)
-
-    # Pin Python-side references for the duration of the run.
-    thread._py_worker = worker  # type: ignore[attr-defined]
-    thread.finished.connect(lambda: setattr(thread, "_py_worker", None))
-
+    thread._dispatcher = dispatcher  # keep Python callback wrapper alive
     thread.start()
-    return thread, worker
+    return thread, thread

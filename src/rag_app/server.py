@@ -5,8 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
-import uuid
+import uuid  # noqa: F401 - retained for integrations that patch UUID generation
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -25,7 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from rag_app.config import AppConfig, load_config
-from rag_app.ingestion.document_loader import SUPPORTED_EXTENSIONS, OCR_ONLY_EXTENSIONS
 from rag_app.ingestion.hash_tracker import HashTracker, canonical_path
 from rag_app.ingestion.index_coordinator import (
     IndexCompatibilityError,
@@ -39,6 +37,13 @@ from rag_app.providers.factory import build_chat_provider, build_embedding_provi
 from rag_app.retrieval.factory import build_rag_service, build_retriever
 from rag_app.validation import validate_filter
 from rag_app.vectorstores.factory import build_vector_store
+from rag_app.workflow import (
+    debug_payload as _debug_payload,
+    import_stream,
+    managed_upload_dir,
+    provider_readiness,
+    source_payload as _source_payload,
+)
 
 
 class _State:
@@ -254,43 +259,6 @@ def _make_service(cfg, retriever):
     return build_rag_service(cfg, retriever, _state.chat_provider)
 
 
-def _source_payload(sources):
-    return [
-        SourceResponse(
-            id=s.id,
-            document_id=str(s.metadata.get("document_id", "")),
-            file=str(s.metadata.get("source_file", "?")),
-            source_path=str(s.metadata.get("source_path", "")),
-            section=str(s.metadata.get("section", "")),
-            chunk_index=s.metadata.get("chunk_index", "?"),
-            score=s.score,
-            score_type=s.score_type,
-            preview=s.text[:240],
-            context_ids=s.metadata.get("context_chunk_ids", [s.id]),
-        ).model_dump()
-        for s in sources
-    ]
-
-
-def _debug_payload(info):
-    return {
-        "embedding_provider": info.embedding_provider,
-        "embedding_model": info.embedding_model,
-        "chat_provider": info.chat_provider,
-        "chat_model": info.chat_model,
-        "chunks_retrieved": len(info.retrieved_chunks),
-        "prompt_chars": info.prompt_char_count,
-        "hop_queries": info.hop_queries,
-        "timings": info.timings,
-        "answer_cache_hit": info.answer_cache_hit,
-        "effective_settings": info.effective_settings,
-        "omitted_history_messages": info.omitted_history_messages,
-        "omitted_chunks": info.omitted_chunks,
-        "prompt_messages": [m.model_dump() for m in info.prompt_messages],
-        "retrieved_chunks": [c.model_dump() for c in info.retrieved_chunks],
-    }
-
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -298,25 +266,7 @@ async def health():
 
 @app.get("/api/readiness")
 def readiness():
-    from rag_app.providers.discovery import list_models
-
-    providers = {}
-    for key in ("chat", "embeddings"):
-        cfg = getattr(_state.cfg, key)
-        try:
-            models = list_models(cfg.provider, cfg.base_url)
-            available = cfg.model in models or (
-                cfg.provider == "ollama" and cfg.model + ":latest" in models
-            )
-            providers[key] = {
-                "ready": available,
-                "model": cfg.model,
-                "detail": "Model advertised by provider"
-                if available
-                else "Configured model is not advertised; load or select it",
-            }
-        except Exception as exc:
-            providers[key] = {"ready": False, "model": cfg.model, "detail": str(exc)}
+    providers = provider_readiness(_state.cfg)
     try:
         with _state.vector_store.coordinator.read():
             count = _state.vector_store.stats().get("count", 0)
@@ -489,41 +439,15 @@ def upload_documents(files: list[UploadFile] = File(...)):
         raise HTTPException(
             413, f"At most {cfg.server.upload_max_files} files per upload"
         )
-    root = Path(cfg.paths.documents_dir).resolve()
-    upload_dir = root / "uploads"
-    if not upload_dir.resolve().is_relative_to(root):
-        raise HTTPException(403, "Upload directory points outside documents root")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    allowed = SUPPORTED_EXTENSIONS + (OCR_ONLY_EXTENSIONS if cfg.ocr.enabled else ())
+    try:
+        managed_upload_dir(cfg)
+    except ValueError as exc:
+        raise HTTPException(403, str(exc)) from exc
     saved, rejected = [], []
     for upload in files:
-        target = None
-        created = False
         try:
-            name = re.sub(
-                r"[^A-Za-z0-9._-]",
-                "_",
-                (upload.filename or "document").replace(chr(92), "/").split("/")[-1],
-            )[-150:]
-            if Path(name).suffix.lower() not in allowed:
-                raise ValueError("Unsupported file type (image ingestion requires OCR)")
-            target = upload_dir / (uuid.uuid4().hex + "_" + name)
-            size = 0
-            with target.open("xb") as output:
-                created = True
-                while block := upload.file.read(64 * 1024):
-                    size += len(block)
-                    if size > cfg.server.upload_max_bytes:
-                        raise ValueError(
-                            f"File exceeds {cfg.server.upload_max_bytes} byte upload limit"
-                        )
-                    output.write(block)
-            if not size:
-                raise ValueError("Empty upload")
-            saved.append(str(target))
+            saved.append(import_stream(cfg, upload.filename or "document", upload.file))
         except (ValueError, OSError) as exc:
-            if target and created:
-                target.unlink(missing_ok=True)
             rejected.append([upload.filename or "document", str(exc)])
         finally:
             upload.file.close()

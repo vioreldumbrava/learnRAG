@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import copy
-import shutil
+import os
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 from rag_app.config import AppConfig, load_config
 from rag_app.gui import settings_store
 from rag_app.gui.provider_panel import ProviderPanel
+from rag_app.gui.workers import run_in_thread
 
 
 class SettingsTab(QWidget):
@@ -35,6 +37,7 @@ class SettingsTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.runtime = None
         # Raw dict of the last successfully loaded config. Used as the base
         # when saving so keys the GUI doesn't control (paths, server, prompt,
         # …) survive a load → save round-trip instead of being reset.
@@ -68,14 +71,12 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_retrieval_box())
         layout.addWidget(self._build_ocr_box())
         layout.addWidget(self._build_performance_box())
+        layout.addWidget(self._build_prompt_box())
 
         # save row + danger zone
         save_row = QHBoxLayout()
-        self.clear_db_btn = QPushButton("🗑  Clear vector DB…")
-        self.clear_db_btn.setToolTip(
-            "Delete the Chroma vector store and the ingestion index file.\n"
-            "All ingested documents will be forgotten — you must re-ingest afterwards."
-        )
+        self.clear_db_btn = QPushButton("Clear active index...")
+        self.clear_db_btn.setToolTip("Remove the active index; original documents and rebuild backups remain.")
         self.clear_db_btn.setStyleSheet(
             "QPushButton { color: #c0392b; font-weight: bold; }"
             "QPushButton:hover { background: #fdecea; }"
@@ -186,6 +187,12 @@ class SettingsTab(QWidget):
         data["observability"] = {
             "log_timings": self.log_timings_check.isChecked(),
         }
+        data["prompt"] = {
+            "answer_only_from_context": self.grounding_check.isChecked(),
+            "include_sources": self.citation_check.isChecked(),
+            "max_history_turns": self.history_turns_spin.value(),
+            "max_prompt_chars": self.prompt_chars_spin.value(),
+        }
         return data
 
     def current_config_path(self) -> str:
@@ -250,21 +257,36 @@ class SettingsTab(QWidget):
         self.answer_cache_check.setChecked(cfg.cache.answer)
         self.cache_max_spin.setValue(cfg.cache.max_entries)
         self.log_timings_check.setChecked(cfg.observability.log_timings)
+        self.grounding_check.setChecked(cfg.prompt.answer_only_from_context)
+        self.citation_check.setChecked(cfg.prompt.include_sources)
+        self.history_turns_spin.setValue(cfg.prompt.max_history_turns)
+        self.prompt_chars_spin.setValue(cfg.prompt.max_prompt_chars)
         self._base_config = cfg.model_dump(mode="json")
         settings_store.set_last_config_path(path)
         self.status_label.setText(f"Loaded {path}.")
 
     def save_to_file(self) -> None:
+        if self.runtime is not None and self.runtime.busy():
+            QMessageBox.warning(self, "Work in progress", "Wait for the active query and jobs before applying settings.")
+            return
         path = self.current_config_path()
         data = self.values_as_config_dict()
+        temporary = None
         try:
             AppConfig.model_validate(data)
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=Path(path).parent, delete=False) as f:
+                temporary = f.name
                 yaml.safe_dump(data, f, sort_keys=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, path)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
 
         # Push URLs into history.
         self.chat_panel.remember_url()
@@ -274,51 +296,27 @@ class SettingsTab(QWidget):
         self.config_saved.emit(path)
 
     def _clear_vector_db(self) -> None:
-        """Wipe the Chroma store and index file after confirmation."""
-        path = self.current_config_path()
-        try:
-            cfg: AppConfig = load_config(path)
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Cannot load config",
-                f"Save (or reload) the config first.\n\n{exc}",
-            )
+        if self.runtime is not None and self.runtime.busy():
+            QMessageBox.warning(self, "Work in progress", "Wait for active work before clearing the index.")
             return
-
-        chroma_dir = Path(cfg.paths.chroma_dir)
-        index_file = Path(cfg.paths.index_file)
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Clear vector DB — are you sure?")
-        msg.setIcon(QMessageBox.Warning)
-        msg.setText(
-            "<b>This will permanently delete:</b><br>"
-            f"&nbsp;&nbsp;• Vector store: <tt>{chroma_dir}</tt><br>"
-            f"&nbsp;&nbsp;• Ingestion index: <tt>{index_file}</tt><br><br>"
-            "All ingested document embeddings will be lost.<br>"
-            "<b>You must re-ingest your documents afterwards.</b>"
+        ok = QMessageBox.question(
+            self, "Clear active index?",
+            "This removes searchable chunks from the active index. Original documents "
+            "and rebuild backups remain. Re-ingest to search them again.",
         )
-        msg.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
-        msg.button(QMessageBox.Ok).setText("Yes, clear everything")
-        msg.setDefaultButton(QMessageBox.Cancel)
-        if msg.exec() != QMessageBox.Ok:
+        if ok != QMessageBox.Yes:
             return
-
-        errors: list[str] = []
-        try:
-            from rag_app.vectorstores.factory import build_vector_store
-            build_vector_store(cfg).coordinator.clear()
-        except Exception as exc:
-            errors.append(str(exc))
-
-        if errors:
-            QMessageBox.critical(
-                self, "Partial failure",
-                "Some items could not be deleted:\n" + "\n".join(errors),
-            )
-        else:
-            self.status_label.setStyleSheet("color: #c0392b;")
-            self.status_label.setText("Vector DB cleared. Re-ingest your documents.")
+        def clear():
+            if self.runtime is not None:
+                self.runtime.resources()[3].coordinator.clear()
+            else:
+                from rag_app.vectorstores.factory import build_vector_store
+                build_vector_store(load_config(self.current_config_path())).coordinator.clear()
+        self._clear_thread, _ = run_in_thread(
+            self, clear,
+            lambda _: self.status_label.setText("Active index cleared; originals and backups remain."),
+            lambda error: QMessageBox.critical(self, "Clear failed", error),
+        )
 
     def _browse_config(self) -> None:
         start_dir = str(Path(self.current_config_path()).parent or ".")
@@ -376,6 +374,25 @@ class SettingsTab(QWidget):
         self.answer_cache_check.setChecked(False)
         self.cache_max_spin.setValue(1024)
         self.log_timings_check.setChecked(False)
+        self.grounding_check.setChecked(True)
+        self.citation_check.setChecked(True)
+        self.history_turns_spin.setValue(10)
+        self.prompt_chars_spin.setValue(24000)
+
+    def _build_prompt_box(self) -> QGroupBox:
+        box = QGroupBox("Prompt and conversation")
+        form = QFormLayout(box)
+        self.grounding_check = QCheckBox("Use retrieved context only")
+        form.addRow("", self.grounding_check)
+        self.citation_check = QCheckBox("Show source citations")
+        form.addRow("", self.citation_check)
+        self.history_turns_spin = QSpinBox()
+        self.history_turns_spin.setRange(0, 100)
+        form.addRow("Prior turns:", self.history_turns_spin)
+        self.prompt_chars_spin = QSpinBox()
+        self.prompt_chars_spin.setRange(1000, 1000000)
+        form.addRow("Prompt character guard:", self.prompt_chars_spin)
+        return box
 
     # ----- secondary group boxes -------------------------------------------
 
@@ -400,7 +417,7 @@ class SettingsTab(QWidget):
         )
         form.addRow("Strategy:", self.strategy_combo)
 
-        self.contextual_check = QCheckBox("Contextual retrieval (LLM prefix per chunk)")
+        self.contextual_check = QCheckBox("Add contextual prefix")
         self.contextual_check.setToolTip(
             "At ingest, ask the chat model to write 1-2 sentences situating each\n"
             "chunk in its document, prepended before embedding.\n"
@@ -431,7 +448,7 @@ class SettingsTab(QWidget):
         self.score_threshold_spin.setSpecialValueText("(no threshold)")
         form.addRow("Score threshold:", self.score_threshold_spin)
 
-        self.hybrid_check = QCheckBox("Hybrid search (BM25 + vector, RRF merge)")
+        self.hybrid_check = QCheckBox("Hybrid search (BM25 + vector)")
         self.hybrid_check.setToolTip(
             "Also run a BM25 keyword search and merge both result lists.\n"
             "Catches exact tokens (error codes, register names) that\n"
@@ -457,7 +474,7 @@ class SettingsTab(QWidget):
         self.decompose_max_spin.setRange(1, 10)
         form.addRow("Max sub-questions:", self.decompose_max_spin)
 
-        self.mmr_check = QCheckBox("MMR diversity reranking")
+        self.mmr_check = QCheckBox("MMR reranking")
         self.mmr_check.setToolTip(
             "Select final chunks by balancing query relevance against\n"
             "similarity to chunks already selected. No extra LLM calls."

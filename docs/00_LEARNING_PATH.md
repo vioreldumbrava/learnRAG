@@ -1981,8 +1981,8 @@ project ships all of them so the seams are visible.
 |---|---|
 | CLI (one-shot) | [`cli.py` → `query` / `retrieve` / `inspect` / `eval`](../src/rag_app/cli.py) |
 | CLI (interactive multi-turn) | [`cli.py` → `chat`](../src/rag_app/cli.py) — history list, `/clear`, `/quit` |
-| Desktop GUI | [`gui/app.py`](../src/rag_app/gui/app.py) — five-tab PySide6 window (optional: `pip install -e .[gui]`, `gui.bat` does it for you) |
-| Web UI | [`webui/`](../src/rag_app/webui/) — vanilla HTML/JS served by the API at `/ui/`. Five panels matching the desktop GUI: Ask (SSE streaming + history + sources), Ingest, Documents (forget + inspect chunks), Stats, and a read-only Config view. The GUI for the Docker deployment. |
+| Desktop GUI | [`gui/app.py`](../src/rag_app/gui/app.py) — six-tab PySide6 window with editable Settings, persisted ingestion jobs, streaming Ask, evidence inspection, and Experiments (optional: `pip install -e .[gui]`, `gui.bat` does it for you) |
+| Web UI | [`webui/`](../src/rag_app/webui/) — vanilla HTML/JS served by the API at `/ui/`. Six panels: Ask, Add documents, Documents, Experiments, Status, and read-only Config. The GUI for the Docker deployment. |
 | REST API | [`server.py`](../src/rag_app/server.py) — FastAPI; `GET /health`, `POST /api/query`, `POST /api/retrieve`, `POST /api/ingest`, `GET /api/documents`, `DELETE /api/documents`, `GET /api/chunks`, `GET /api/config`, `GET /api/stats`, `DELETE /api/index` |
 | Docker deployment | [`Dockerfile`](../Dockerfile) (headless, no Qt) + [`docker-compose.yml`](../docker-compose.yml) (volumes for `storage/` + `documents/`, optional `--profile ollama` model server) + [`config.docker.yaml`](../config.docker.yaml) (`server.host: 0.0.0.0`) |
 | Streaming | `ChatProvider.generate_stream` in [`providers/base.py`](../src/rag_app/providers/base.py); native impls in [`ollama_provider.py`](../src/rag_app/providers/ollama_provider.py) and [`lmstudio_provider.py`](../src/rag_app/providers/lmstudio_provider.py) |
