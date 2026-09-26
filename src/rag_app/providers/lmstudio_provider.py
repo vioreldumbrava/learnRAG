@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 def _make_client(base_url: str) -> OpenAI:
     # `api_key` must be a non-empty string for the SDK to initialise; LM Studio
     # ignores its contents.
-    return OpenAI(base_url=base_url, api_key="lm-studio")
+    return OpenAI(base_url=base_url, api_key="lm-studio", timeout=120.0, max_retries=0)
 
 
 def _ensure_model_loaded(base_url: str, model_name: str, model_type: str = "llm") -> str:
@@ -230,6 +230,11 @@ class LmStudioChatProvider(ChatProvider):
                     f"LM Studio streaming request failed (auto-load retry also failed: {retry_exc}): {exc}"
                 ) from exc
 
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        try:
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        finally:
+            close = getattr(stream, "close", None)
+            if close:
+                close()

@@ -15,6 +15,7 @@ so the hot path stays quiet unless you ask for it.
 from __future__ import annotations
 
 import logging
+from threading import RLock
 from collections import defaultdict
 from contextlib import contextmanager
 from time import perf_counter
@@ -29,24 +30,28 @@ class Counters:
 
     def __init__(self) -> None:
         self._c: dict[str, float] = defaultdict(float)
+        self._lock = RLock()
 
     def incr(self, name: str, by: float = 1.0) -> None:
-        self._c[name] += by
+        with self._lock:
+            self._c[name] += by
 
     def hit(self, name: str) -> None:
-        self._c[f"{name}_hits"] += 1
+        self.incr(f"{name}_hits")
 
     def miss(self, name: str) -> None:
-        self._c[f"{name}_misses"] += 1
+        self.incr(f"{name}_misses")
 
     def add_ms(self, stage: str, ms: float) -> None:
-        self._c[f"{stage}_ms_total"] += ms
+        self.incr(f"{stage}_ms_total", ms)
 
     def snapshot(self) -> dict[str, float]:
-        return {k: round(v, 2) for k, v in sorted(self._c.items())}
+        with self._lock:
+            return {k: round(v, 2) for k, v in sorted(self._c.items())}
 
     def reset(self) -> None:
-        self._c.clear()
+        with self._lock:
+            self._c.clear()
 
 
 # One bag for the whole process. Meaningful for in-process surfaces (the CLI

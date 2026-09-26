@@ -13,6 +13,14 @@ from rag_app.models import DocumentChunk, RetrievedChunk
 
 
 class VectorStore(ABC):
+    def delete_ids(self, ids: list[str]) -> None:
+        """Delete exactly these chunk revisions, leaving identical files alone."""
+        raise NotImplementedError
+
+    def fork_collection(self, collection_name: str) -> "VectorStore":
+        """Open an isolated collection using the same database client."""
+        raise NotImplementedError
+
     @abstractmethod
     def upsert_chunks(
         self,

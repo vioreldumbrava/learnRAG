@@ -46,7 +46,7 @@ if not exist "%PYTHON_EXE%" (
 )
 
 REM ----- 3. Verify required packages, install if anything is missing --------
-"%PYTHON_EXE%" -c "import typer, chromadb, pydantic, httpx, pypdf, rich, openai, yaml, rag_app" >nul 2>&1
+"%PYTHON_EXE%" -c "import filelock, python_multipart, typer, chromadb, pydantic, httpx, pypdf, rich, openai, yaml, rag_app" >nul 2>&1
 if errorlevel 1 (
     echo [run.bat] Installing dependencies into %VENV_DIR% ...
     "%PYTHON_EXE%" -m pip install --upgrade pip

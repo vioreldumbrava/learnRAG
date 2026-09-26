@@ -25,6 +25,37 @@ same explicit core — each one toggled by a single line in `config.yaml`.
 
 ---
 
+
+## Reliability and web workflow update
+
+The browser app now includes uploads, background ingestion jobs, cancellable
+streaming chat with per-answer evidence, and reproducible retrieval experiments.
+Start it with `.\run.bat serve` and open `http://127.0.0.1:8000/ui/`.
+
+**Upgrading an existing index:** update dependencies with
+`python -m pip install -e ".[gui,dev]"`, stop other app processes using the index,
+and run `.\run.bat rebuild`. This builds a separate collection and switches the
+catalog only after every source succeeds. The old collection and a uniquely named
+catalog backup remain available; failed rebuilds leave the original active.
+Startup never silently clears incompatible data. Original files stay untouched.
+
+The catalog at `paths.index_file` is now a versioned JSON object with `metadata`
+and `documents`. Document IDs identify canonical paths; revision IDs identify
+individual ingestion attempts. Identical files therefore remain independent.
+A pending-commit journal is reconciled before reads. Preparation failures retain
+old content, and completed files are committed individually.
+
+To roll back a rebuild, stop the app, restore the retained catalog backup over
+`paths.index_file`, restore its provider configuration, and restart. Keep the
+corresponding vector collection until you no longer need that backup. Moving a
+corpus to another absolute path requires a rebuild because document identity is
+path-based. Embedded Qdrant allows one owning process; stop desktop/server tools
+before using another process against its directory.
+
+See [the web experiment lab](docs/00_LEARNING_PATH.md#reproducible-web-lab) for
+controlled comparisons and the [release checklist](docs/06_RELIABILITY_AND_WEB_WORKFLOW.md)
+for operational details and validation commands.
+
 ## Table of contents
 
 1. [What is RAG?](#1-what-is-rag)
@@ -67,10 +98,10 @@ For each chunk of every ingested document, ChromaDB stores:
 
 | field        | what it is                                                |
 |--------------|-----------------------------------------------------------|
-| `id`         | `<document_hash[:12]>:<chunk_index>` — stable on re-ingest |
+| `id`         | `<document_id>:<revision>:<chunk_index>` — stable on re-ingest |
 | `embedding`  | the numerical vector produced by the embedding model      |
 | `document`   | the chunk text itself                                     |
-| `metadata`   | `source_file`, `source_path`, `chunk_index`, `document_hash`, `file_type`, and **`module`** (auto-derived from the sub-folder under `documents/`, used by `--filter`) |
+| `metadata`   | `document_id`, `revision`, `source_file`, `source_path`, `chunk_index`, `document_hash`, `file_type`, and **`module`** (auto-derived from the sub-folder under `documents/`, used by `--filter`) |
 
 The vector DB **is not** the source of truth. The original PDF / TXT / MD
 / DOCX / HTML / CSV file stays on disk. The vector DB is a rebuildable
@@ -205,7 +236,7 @@ embeddings:
 ```
 
 > **Important:** if you change the embedding model, the existing vectors
-> are no longer comparable. Run `.\run.bat clear --yes` and re-ingest.
+> are no longer comparable. Run `.\run.bat rebuild` to build a compatible replacement and retain a backup.
 
 ### Supported file types
 
@@ -228,7 +259,7 @@ All commands accept `--config <path>` (default `config.yaml`). Examples
 use `.\run.bat`; substitute `python -m rag_app` if you set up the
 environment manually.
 
-**All 11 commands at a glance:**
+**Commands at a glance:**
 
 | command | role | what it does |
 |---|---|---|
@@ -238,9 +269,10 @@ environment manually.
 | `retrieve` | read | Search-only — vector + BM25 (if hybrid). **No LLM call.** |
 | `inspect` | read | Peek at stored chunks (summary / by id / by file / random sample). |
 | `list` | read | Table of every ingested document with chunk count + hash. |
-| `eval` | read | Score recall@k + answer keywords against a gold-standard JSON. |
+| `eval` | read | Score recall@k + answer keyword coverage against a gold-standard JSON. |
 | `stats` | read | Collection + provider + retrieval-feature summary. |
 | `forget` | write | Remove ONE document's chunks from the store + index. |
+| `rebuild` | write | Build a compatible replacement collection and retain a catalog backup. |
 | `clear` | write | Wipe the entire store + index. Originals on disk stay put. |
 | `serve` | service | Start the FastAPI REST API (see [section 9](#9-rest-api-server)). |
 
@@ -327,7 +359,7 @@ index if you want a machine-readable view; this is the human one.
 ```
 
 Scores retrieval recall@k, **MRR** (rank of the first relevant chunk),
-and (optionally) keyword presence in the answer. Per-question pass/fail
+and (optionally) keyword coverage in the answer. Per-question pass/fail
 table — the `1st rank` column shows where the first expected source
 landed — plus a summary with mean recall and MRR. Exits non-zero on any
 failure so you can wire it into CI.
@@ -372,8 +404,8 @@ size/overlap, **strategy**, **hybrid on/off**, **HyDE on/off**,
 .\run.bat forget --file foo.pdf --yes                   # skip confirmation
 ```
 
-Looks the file up in the index, deletes all its chunks from Chroma
-via `document_hash`, then drops the entry from the index file. The
+Looks the file up in the index, deletes its exact revision chunks from the active vector store
+by the exact document revision IDs, then updates the catalog atomically. The
 original file on disk is **not** touched. If a filename matches multiple
 paths, the command lists them and asks you to use `--path` to disambiguate.
 
@@ -384,7 +416,7 @@ paths, the command lists them and asks you to use `--path` to disambiguate.
 .\run.bat clear --yes     # skip prompt
 ```
 
-Deletes `storage/chroma/` and `storage/document_index.json`. Originals
+Clears the active backend collection and catalog entries. Rebuild backup collections remain retained. Originals
 in `documents/` stay put. Use `forget` when you only want to remove
 one or two docs.
 
@@ -703,18 +735,17 @@ Override per run with `rag-app ingest --ocr` / `--no-ocr`.
 ```yaml
 cache:
   embedding: true          # cache hash(query) -> vector (skip re-embedding)
-  answer: true             # cache (question + chunk ids + model) -> answer
+  answer: true             # cache exact prompt + provider + generation settings
   max_entries: 1024
 observability:
   log_timings: true        # one structured log line per query
 ```
 
-Two in-memory LRU caches on the query path, both off by default. The
-embedding cache is keyed on the embedding model (a model swap misses instead
-of returning a stale vector); the answer cache is keyed on the retrieved
-chunk ids, so editing a document changes its content-derived ids and stale
-entries stop matching — no TTL needed. The answer cache is bypassed for
-multi-turn and streaming.
+Two synchronized in-memory LRU caches on the query path, both off by default.
+Embedding keys preserve query case and include the provider endpoint and model.
+Answer keys include the exact ordered prompt messages, provider identity,
+model, temperature, and output limit. Changed evidence or prompt ordering causes
+a miss. The answer cache is bypassed for multi-turn and streaming queries.
 
 Per-stage timings (embed / vector search / BM25 / retrieve / generate) are
 always collected and shown in `query --debug`; `log_timings` adds a log line.
@@ -888,7 +919,9 @@ retrieval:
 ```yaml
 prompt:
   answer_only_from_context: true   # strict "say I don't know" system prompt
-  include_sources: true            # include [Source N] block in the prompt
+  include_sources: true           # citation labels/instructions; evidence is always included
+  max_history_turns: 10            # complete user/assistant pairs
+  max_prompt_chars: 24000          # hard character guard, not a tokenizer count
 ```
 
 ### `ocr`
@@ -908,7 +941,7 @@ image). The CLI can override it per run with `ingest --ocr` / `--no-ocr`.
 ```yaml
 cache:
   embedding: false                 # cache query embeddings (hash -> vector)
-  answer: false                    # cache answers (question + chunk ids -> answer)
+  answer: false                    # exact ordered prompt + provider + generation settings
   max_entries: 1024                # LRU cap per cache
 ```
 
@@ -930,6 +963,9 @@ the log line.
 server:
   host: "127.0.0.1"
   port: 8000
+  allowed_document_roots: []        # extra roots for web folder ingestion
+  upload_max_bytes: 26214400        # 25 MiB per file
+  upload_max_files: 20
 ```
 
 Used by `rag-app serve` (see next section). Inside a container the host
@@ -944,7 +980,7 @@ is unreachable through Docker's port mapping.
 .\run.bat serve                                # http://127.0.0.1:8000
 ```
 
-FastAPI-based, hot-config via `config.yaml`. Endpoints:
+FastAPI-based; configuration is loaded once at startup. Endpoints:
 
 | method | path | what it does |
 |---|---|---|
@@ -952,10 +988,19 @@ FastAPI-based, hot-config via `config.yaml`. Endpoints:
 | `GET`  | `/health` | Liveness probe (no store access) — what container healthchecks hit. |
 | `POST` | `/api/query` | Ask a question. JSON body: `{question, top_k?, debug?, stream?, filter?, history?}`. With `stream: true` returns Server-Sent Events. |
 | `POST` | `/api/retrieve` | Retrieval only. Body: `{question, top_k?, filter?}`. |
+| `GET` | `/api/readiness` | Provider model availability and index compatibility, separate from liveness. |
+| `POST` | `/api/uploads` | Multipart `files`; save without overwrites and return an ingestion job (202). |
+| `POST` | `/api/ingest/jobs` | Start folder/file ingestion and return a job (202). |
+| `GET` | `/api/jobs` | Recent jobs; results are fetched per job. |
+| `GET` | `/api/jobs/{id}` | Persisted state, progress, result, and error. |
+| `POST` | `/api/jobs/{id}/cancel` | Request cancellation between safe work boundaries. |
+| `POST` | `/api/experiments` | Compare `dense`, `hybrid`, `mmr`, `top_k_8`; mode `retrieval` or `full`. |
+| `GET` | `/api/experiments/{id}/report?format=json` | Download a JSON report; `format=csv` exports rows. |
+| `GET` | `/api/chunks/{id}` | Inspect an exact source chunk. |
 | `POST` | `/api/ingest` | Trigger ingestion. Body: `{force?, path?}`. |
 | `GET`  | `/api/documents` | List every ingested document (path, chunks, hash). |
 | `DELETE` | `/api/documents?path=...` | Forget one document (the REST version of `rag-app forget`). |
-| `GET`  | `/api/chunks` | Inspect stored chunks: `?sample=N` (random) or `?source_file=...`. |
+| `GET`  | `/api/chunks` | Inspect stored chunks: `?sample=N` (random) or `?document_id=...`; legacy `?source_file=...` is also accepted. |
 | `GET`  | `/api/config` | The effective (read-only) configuration. |
 | `GET`  | `/api/stats` | Collection name, chunk count, embedding dim. |
 | `DELETE` | `/api/index` | Wipe the vector store + index. |
@@ -965,22 +1010,29 @@ OpenAPI / Swagger UI is at `http://127.0.0.1:8000/docs`.
 Streaming responses (`stream: true`) are SSE frames with JSON payloads:
 first one `data: {"sources": [...]}` event (retrieval finishes before
 generation starts), then `data: {"token": "..."}` per token, then the
-`data: [DONE]` terminator.
+`data: [DONE]` terminator. With debug enabled, a `{"debug": ...}` event
+precedes completion. Failures emit `{"error": {"message": ...}}` without
+`[DONE]`; an EOF without completion is an incomplete answer, never a success.
+Source payloads consistently include IDs, section, preview, score type, and
+context chunk IDs (including expanded neighbors). Invalid questions/history,
+filters, and limits return 422; incompatible indexes return 409. Retrieval-only
+requests never invoke chat-assisted query transformations.
 
 ### Built-in web UI
 
 `rag-app serve` also serves a zero-dependency web UI at
 `http://127.0.0.1:8000/ui/` (the root URL redirects there) — plain
 HTML/JS from [`src/rag_app/webui/`](src/rag_app/webui/), no build step.
-Five panels mirror the desktop GUI:
+Six panels support the local workflow:
 
 | panel | what it does |
 |---|---|
-| **Ask** | Streaming answers (token by token), multi-turn history, debug view, metadata filter, sources table with the `section` column — same features as the GUI's Ask tab. |
-| **Ingest** | Run ingestion with a server-side path (empty = configured `documents/`) and Force; indexed/skipped/failed lists. |
-| **Documents** | Every ingested document with multi-select **Forget Selected** / per-row Forget, plus **Inspect** — view a document's chunks or a random sample (the GUI's Memory tab). |
-| **Stats** | Store stats **and** the effective providers, chunking, `top_k`, and retrieval-feature toggles + **Clear Index**. |
-| **Config** | Read-only view of the full effective configuration. |
+| **Ask** | Streaming conversation with Stop, source inspection, filters, and debug alongside streaming. Incomplete turns are excluded from history. |
+| **Add documents** | Upload or drag/drop files, ingest permitted server folders, watch per-file progress, cancel, and revisit jobs after refresh. |
+| **Documents** | Inspect and forget documents by stable identity, including duplicates with identical names or contents. |
+| **Experiments** | Compare four controlled presets on a fixed corpus snapshot; inspect results and export JSON/CSV. |
+| **Status** | Store/config summary, separate provider readiness check, and Clear Index. |
+| **Config** | Read-only view of all effective settings, including caches and observability. |
 
 The **Config panel is read-only by design**: the server builds its
 providers once at startup and the Docker config is a read-only mount, so
@@ -989,7 +1041,7 @@ changing settings is a file-edit-plus-restart operation (edit
 form. That's also why there is no model-discovery "Refresh models" button
 the desktop Settings tab has. There is **no authentication**: anyone who
 can reach the port can query *and wipe* the index, so don't expose it
-beyond your LAN.
+beyond this computer. Docker ports are bound to loopback by default.
 
 Example — multi-turn chat via REST:
 
@@ -1024,7 +1076,7 @@ curl.exe http://localhost:8000/health      # -> {"status":"ok"}
 
 Then open `http://localhost:8000` in a browser — the container serves the
 [built-in web UI](#built-in-web-ui) (ask questions, ingest, manage
-documents, stats) from any machine on your LAN. This is the intended
+documents, stats) on the local computer. This is the intended
 "GUI" for the Docker deployment; the PySide6 desktop app stays on the
 desktop and should not run against the container's `storage/`.
 

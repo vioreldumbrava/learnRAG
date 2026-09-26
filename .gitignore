@@ -23,6 +23,14 @@ config.yaml
 # Local vector store and ingestion index
 storage/chroma/
 storage/document_index.json
+storage/*.lock
+storage/*.pending
+storage/*.backup-*
+storage/*.building-*
+storage/*.jobs/
+storage/qdrant/
+documents/uploads/
+.artifacts/
 
 # Editor / OS
 .idea/

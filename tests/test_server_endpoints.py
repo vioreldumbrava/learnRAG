@@ -78,6 +78,12 @@ def _fill(store: ServerFakeStore, embedder: FakeEmbeddingProvider, n: int = 5) -
         for i in range(n)
     ]
     store.upsert_chunks(chunks, embedder.embed_texts([c.text for c in chunks]))
+    from rag_app.ingestion.hash_tracker import HashTracker
+    from rag_app.ingestion.index_coordinator import embedding_identity, store_identity
+    tracker = HashTracker(store.coordinator.path)
+    tracker.metadata = {"embedding": embedding_identity(store.coordinator.cfg),
+                        "store": store_identity(store.coordinator.cfg), "embedding_dim": embedder.dim}
+    tracker.save()
 
 
 def test_health(api):
@@ -206,9 +212,11 @@ def test_documents_lists_tracker_entries(api, tmp_path):
     response = client.get("/api/documents")
     assert response.status_code == 200
     docs = response.json()["documents"]
-    assert [d["path"] for d in docs] == ["documents/a.txt", "documents/b.md"]
+    from rag_app.ingestion.hash_tracker import canonical_path
+    assert [d["path"] for d in docs] == [canonical_path("documents/a.txt"), canonical_path("documents/b.md")]
     assert docs[0] == {
-        "path": "documents/a.txt", "source_file": "a.txt",
+        "path": canonical_path("documents/a.txt"), "source_file": "a.txt",
+        "document_id": "", "revision": "",
         "chunks": 3, "document_hash": "h1",
     }
 

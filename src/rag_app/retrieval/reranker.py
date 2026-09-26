@@ -149,6 +149,7 @@ def _materialize(
                 text=chunk.text,
                 metadata=metadata,
                 score=score,
+                score_type=score_key,
             )
         )
     return results

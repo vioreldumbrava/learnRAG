@@ -73,21 +73,17 @@ def _make_vector_store(config: AppConfig) -> VectorStore:
 def _parse_filters(filter_str: str | None) -> dict | None:
     """Parse 'key=value,key2=value2' into a Chroma where-clause."""
 
-    if not filter_str:
-        return None
-    where: dict = {}
-    for pair in filter_str.split(","):
-        pair = pair.strip()
-        if "=" not in pair:
-            continue
-        key, value = pair.split("=", 1)
-        where[key.strip()] = value.strip()
-    if not where:
-        return None
-    if len(where) == 1:
-        return where
-    # ChromaDB requires $and for multiple conditions.
-    return {"$and": [{k: v} for k, v in where.items()]}
+    from rag_app.validation import parse_filter
+    try:
+        return parse_filter(filter_str)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _validate_question(value: str) -> str:
+    if not value.strip():
+        raise typer.BadParameter("Question cannot be blank")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +100,7 @@ def ingest(
     path: Optional[Path] = typer.Option(
         None,
         "--path",
-        help="Ingest a single file instead of scanning the documents folder.",
+        help="Ingest an explicit file or folder instead of the configured documents folder.",
     ),
     ocr: Optional[bool] = typer.Option(
         None,
@@ -186,7 +182,7 @@ def ingest(
             # Spinner caption shows the *next* file we're about to work on.
             progress.update(
                 task_id,
-                advance=1,
+                completed=current - (status == "indexing"),
                 description=f"Last: [{colour}]{status}[/{colour}] {Path(file_path).name}",
             )
 
@@ -201,7 +197,7 @@ def ingest(
 
 @app.command()
 def query(
-    question: str = typer.Argument(..., help="The question to ask."),
+    question: str = typer.Argument(..., callback=_validate_question, help="The question to ask."),
     config: Path = ConfigOption,
     debug: bool = typer.Option(
         False, "--debug", help="Print retrieval details and prompt preview."
@@ -232,7 +228,7 @@ def query(
         # LLM processes the prompt. That's the model, not buffering. The
         # markers below make this gap visible so it doesn't look like a hang.
         import time
-        token_iter, sources = service.answer_stream(question)
+        token_iter, sources, debug_info = service.prepare_stream(question)
         console.print()
         console.print(
             "[dim]Waiting for first token "
@@ -268,6 +264,8 @@ def query(
         from rag_app.models import RagAnswer
         answer = RagAnswer(answer=full_text, sources=sources)
         _print_sources(answer.sources)
+        if debug:
+            _print_debug(debug_info)
     elif debug:
         answer, debug_info = service.answer_with_debug(question)
         _print_debug(debug_info)
@@ -382,12 +380,13 @@ def chat(
 
 @app.command()
 def retrieve(
-    question: str = typer.Argument(..., help="The question to retrieve chunks for."),
+    question: str = typer.Argument(..., callback=_validate_question, help="The question to retrieve chunks for."),
     config: Path = ConfigOption,
     top_k: Optional[int] = typer.Option(
         None,
         "--top-k",
         "-k",
+        min=1, max=100,
         help="Override the top_k from config for this run.",
     ),
     filter: Optional[str] = typer.Option(
@@ -466,8 +465,9 @@ def inspect(
     file: Optional[str] = typer.Option(
         None, "--file", help="List chunks belonging to a source filename."
     ),
+    document_id: Optional[str] = typer.Option(None, "--document-id", help="Inspect one stable document identity."),
     sample: Optional[int] = typer.Option(
-        None, "--sample", help="Show N random chunks with preview."
+        None, "--sample", min=1, max=100, help="Show N random chunks with preview."
     ),
 ) -> None:
     """Look inside the vector store — what's actually stored?
@@ -479,6 +479,11 @@ def inspect(
     setup_logging(cfg.app.debug)
     store = _make_vector_store(cfg)
 
+    with store.coordinator.locked():
+        _inspect_store(store, id, file, document_id, sample)
+
+
+def _inspect_store(store, id, file, document_id, sample):
     if id is not None:
         chunk = store.get(id)
         if chunk is None:
@@ -487,12 +492,12 @@ def inspect(
         _print_chunk(chunk)
         return
 
-    if file is not None:
-        chunks = store.list_chunks(where={"source_file": file})
+    if file is not None or document_id is not None:
+        chunks = store.list_chunks(where={"document_id": document_id} if document_id else {"source_file": file})
         if not chunks:
-            console.print(f"[yellow]No chunks for file '{file}'.[/yellow]")
+            console.print(f"[yellow]No chunks for document '{document_id or file}'.[/yellow]")
             return
-        console.print(f"[bold]{len(chunks)} chunk(s) for {file}:[/bold]")
+        console.print(f"[bold]{len(chunks)} chunk(s) for {document_id or file}:[/bold]")
         _print_chunk_table(chunks)
         return
 
@@ -745,8 +750,8 @@ def forget(
 ) -> None:
     """Remove ONE document from the vector store and the ingestion index.
 
-    Looks the file up in the index, deletes all of its chunks from Chroma
-    via the document_hash, then removes the entry from the index file.
+    Looks the file up in the catalog and removes its exact revision chunks
+    through a recoverable commit, preserving identical copies elsewhere.
     The original file on disk is left untouched.
 
     Examples:
@@ -767,6 +772,8 @@ def forget(
     # Find matching entries.
     matches: list[tuple[str, dict]] = []
     if path:
+        from rag_app.ingestion.hash_tracker import canonical_path
+        path = canonical_path(path)
         if path in entries:
             matches = [(path, entries[path])]
     elif file:
@@ -810,18 +817,14 @@ def forget(
     vector_store = _make_vector_store(cfg)
     removed = 0
     for p, entry in matches:
-        document_hash = entry.get("document_hash") or entry.get("hash")
-        if document_hash:
-            try:
-                vector_store.delete_by_document_hash(str(document_hash))
-            except Exception as exc:
-                console.print(f"[red]Failed to delete chunks for {p}: {exc}[/red]")
-                continue
-        tracker.remove(p)
+        try:
+            vector_store.coordinator.forget(p)
+        except Exception as exc:
+            console.print(f"[red]Failed to forget {p}: {exc}[/red]")
+            continue
         removed += 1
         console.print(f"[red]forgot[/red]  {p}")
 
-    tracker.save()
     console.print(
         f"\n[green]Removed {removed} document(s) from the store and the index.[/green]"
     )
@@ -834,29 +837,39 @@ def clear(
         False, "--yes", "-y", help="Skip the confirmation prompt."
     ),
 ) -> None:
-    """Delete the vector store and the ingestion index."""
+    """Clear the active collection and catalog, retaining sources and rebuild backups."""
 
     cfg = _load(config)
     setup_logging(cfg.app.debug)
 
     if not yes:
         confirm = typer.confirm(
-            f"This will delete the vector store at '{cfg.paths.chroma_dir}' "
-            f"and the index file '{cfg.paths.index_file}'. Continue?"
+            f"Clear the active {cfg.vector_store.provider} collection and "
+            f"catalog '{cfg.paths.index_file}'? Sources and rebuild backups remain."
         )
         if not confirm:
             console.print("[yellow]Aborted.[/yellow]")
             raise typer.Exit(code=1)
 
-    chroma_dir = Path(cfg.paths.chroma_dir)
-    index_file = Path(cfg.paths.index_file)
-    if chroma_dir.exists():
-        shutil.rmtree(chroma_dir)
-        console.print(f"[red]Removed[/red] {chroma_dir}")
-    if index_file.exists():
-        index_file.unlink()
-        console.print(f"[red]Removed[/red] {index_file}")
+    _make_vector_store(cfg).coordinator.clear()
     console.print("[green]Cleared.[/green]")
+
+
+@app.command()
+def rebuild(config: Path = ConfigOption, yes: bool = typer.Option(False, "--yes", "-y")) -> None:
+    """Rebuild in a new collection; retain the old catalog and collection for rollback."""
+    from rag_app.ingestion.index_coordinator import rebuild_index
+    cfg = _load(config)
+    if not yes and not typer.confirm("Build a replacement index? Stop other app processes first. The old index will be retained."):
+        raise typer.Exit(1)
+    store = _make_vector_store(cfg)
+    try:
+        summary, backup = rebuild_index(cfg, build_embedding_provider(cfg.embeddings), store,
+                                       build_chat_provider(cfg.chat) if cfg.chunking.contextual else None)
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"Rebuilt {len(summary.indexed_files)} documents. Catalog backup: {backup}")
 
 
 @app.command()
@@ -971,7 +984,7 @@ def _print_eval_report(report: EvalReport) -> None:
     table.add_column("recall@k", justify="right")
     table.add_column("1st rank", justify="right")
     table.add_column("nDCG@k", justify="right")
-    table.add_column("keywords", justify="right")
+    table.add_column("keyword coverage", justify="right")
     table.add_column("pass")
     for i, r in enumerate(report.results, start=1):
         q = r.question.question
@@ -994,7 +1007,7 @@ def _print_eval_report(report: EvalReport) -> None:
         else:
             rank = str(r.first_relevant_rank)
         ndcg = "n/a" if r.ndcg is None else f"{r.ndcg:.2f}"
-        passed = "[green]PASS[/green]" if r.passed else "[red]FAIL[/red]"
+        passed = "not scored" if not r.scored else "[green]PASS[/green]" if r.passed else "[red]FAIL[/red]"
         table.add_row(str(i), q, recall, rank, ndcg, kw, passed)
     console.print(table)
 
@@ -1002,10 +1015,11 @@ def _print_eval_report(report: EvalReport) -> None:
         Panel.fit(
             f"Passed: [green]{report.passed_count}[/green] / {len(report.results)}\n"
             f"Failed: [red]{report.failed_count}[/red]\n"
+            f"Not scored: {report.unscored_count}\n"
             f"Mean retrieval recall: {report.mean_recall:.2f}\n"
             f"MRR (reciprocal rank): {report.mean_reciprocal_rank:.2f}\n"
             f"Mean nDCG@k:            {report.mean_ndcg:.2f}\n"
-            f"Mean keyword recall:   {report.mean_keyword_recall:.2f}",
+            f"Mean keyword coverage:   {report.mean_keyword_recall:.2f}",
             title="Summary",
             border_style="cyan" if report.all_passed else "red",
         )
@@ -1025,6 +1039,9 @@ def _print_debug(debug: DebugInfo) -> None:
     info.add_row(
         "Answer cache", "HIT" if debug.answer_cache_hit else "miss",
     )
+    info.add_row("Omitted history messages", str(debug.omitted_history_messages))
+    info.add_row("Omitted evidence chunks", str(debug.omitted_chunks))
+    info.add_row("Effective settings", str(debug.effective_settings))
     console.print(info)
 
     if debug.timings:

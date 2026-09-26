@@ -265,13 +265,10 @@ class MemoryTab(QWidget):
         failed: list[tuple[str, str]] = []
         for path, doc_hash in selected:
             try:
-                if doc_hash:
-                    store.delete_by_document_hash(doc_hash)
-                tracker.remove(path)
+                store.coordinator.forget(path)
                 removed += 1
             except Exception as exc:
                 failed.append((path, str(exc)))
-        tracker.save()
 
         if failed:
             QMessageBox.warning(
@@ -310,7 +307,8 @@ class MemoryTab(QWidget):
             return
         source_file = cell.text()
 
-        chunks = self._load_chunks(where={"source_file": source_file})
+        from rag_app.ingestion.hash_tracker import document_id
+        chunks = self._load_chunks(where={"document_id": document_id(cell.data(Qt.ItemDataRole.UserRole))})
         if chunks is None:
             return
         if not chunks:
@@ -334,7 +332,8 @@ class MemoryTab(QWidget):
             return None
         try:
             store = build_vector_store(cfg)
-            return store.list_chunks(where=where, limit=2000)
+            with store.coordinator.locked():
+                return store.list_chunks(where=where, limit=2000)
         except Exception as exc:
             self.status_label.setText(f"Failed to read store: {exc}")
             return None

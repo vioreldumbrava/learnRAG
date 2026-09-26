@@ -39,7 +39,7 @@ if not exist "%PYTHON_CONSOLE_EXE%" (
 )
 
 REM ----- 3. Verify required packages, install if anything is missing --------
-"%PYTHON_CONSOLE_EXE%" -c "import typer, chromadb, pydantic, httpx, pypdf, rich, openai, yaml, PySide6, rag_app" >nul 2>&1
+"%PYTHON_CONSOLE_EXE%" -c "import filelock, python_multipart, typer, chromadb, pydantic, httpx, pypdf, rich, openai, yaml, PySide6, rag_app" >nul 2>&1
 if errorlevel 1 (
     echo [gui.bat] Installing dependencies into %VENV_DIR% ...
     "%PYTHON_CONSOLE_EXE%" -m pip install --upgrade pip

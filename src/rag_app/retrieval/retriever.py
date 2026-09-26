@@ -19,6 +19,8 @@ A single query flows through two internal steps that multi-hop reuses:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import logging
 import re
 from time import perf_counter
@@ -116,6 +118,11 @@ class Retriever:
         self.last_timings: dict[str, float] = {}
 
     def retrieve(self, question: str) -> list[RetrievedChunk]:
+        coordinator = getattr(self.vector_store, "coordinator", None)
+        with coordinator.read() if coordinator else nullcontext():
+            return self._retrieve(question)
+
+    def _retrieve(self, question: str) -> list[RetrievedChunk]:
         if not question or not question.strip():
             return []
 
@@ -168,6 +175,10 @@ class Retriever:
         for text in embed_texts:
             t0 = perf_counter()
             query_embedding = self.embedding_provider.embed_query(text)
+            coordinator = getattr(self.vector_store, "coordinator", None)
+            if coordinator:
+                coordinator.validate_dimension(len(query_embedding))
+                coordinator.validate_resolved_model(self.embedding_provider)
             self._add_timing("embed_ms", (perf_counter() - t0) * 1000.0)
             if primary_query_embedding is None:
                 primary_query_embedding = query_embedding
@@ -504,8 +515,8 @@ class Retriever:
     def _expand_neighbors(self, chunk: RetrievedChunk) -> RetrievedChunk:
         """Stitch the chunks around `chunk` into one wider passage.
 
-        Chunk ids are `<document_hash[:12]>:<index>`, so the neighbors of
-        `abc:7` with radius 1 are `abc:6` and `abc:8`. Missing neighbors
+        Chunk IDs are `<document_id>:<revision>:<index>`. Neighbors share
+        document identity and revision, even for byte-identical documents. Missing neighbors
         (start/end of document) are skipped silently. The returned chunk
         keeps the hit's id, score and metadata — only the text widens.
         """
@@ -516,9 +527,11 @@ class Retriever:
 
         center = int(idx_str)
         texts: list[str] = []
+        context_ids: list[str] = []
         for idx in range(center - self.neighbor_radius, center + self.neighbor_radius + 1):
             if idx == center:
                 texts.append(chunk.text)
+                context_ids.append(chunk.id)
                 continue
             if idx < 0:
                 continue
@@ -528,14 +541,17 @@ class Retriever:
                 return chunk
             if neighbor is not None and neighbor.text:
                 texts.append(neighbor.text)
+                context_ids.append(neighbor.id)
 
         if len(texts) == 1:
             return chunk
         metadata = dict(chunk.metadata)
         metadata["neighbor_expanded"] = True
+        metadata["context_chunk_ids"] = context_ids
         return RetrievedChunk(
             id=chunk.id,
             text="\n\n".join(texts),
             metadata=metadata,
             score=chunk.score,
+            score_type=chunk.score_type,
         )

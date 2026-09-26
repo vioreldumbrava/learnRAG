@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
@@ -17,9 +18,10 @@ from rag_app.ingestion.document_loader import (
 )
 from rag_app.ingestion.hash_tracker import (
     HashTracker,
-    compute_chunking_fingerprint,
     compute_file_hash,
+    document_id,
 )
+from rag_app.ingestion.index_coordinator import IndexCoordinator, ingestion_fingerprint, ingestion_settings
 from rag_app.ingestion.text_extractor import extract_text
 from rag_app.models import DocumentChunk
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
@@ -76,6 +78,7 @@ class IngestSummary:
     failed_files: list[tuple[str, str]] = field(default_factory=list)
     total_chunks: int = 0
     embedding_dim: int | None = None
+    cancelled: bool = False
 
 
 class IngestService:
@@ -98,28 +101,41 @@ class IngestService:
             strategy=config.chunking.strategy,
         )
         self.hash_tracker = HashTracker(config.paths.index_file)
-        self._chunking_fingerprint = compute_chunking_fingerprint(config.chunking)
+        self.coordinator = IndexCoordinator(config, vector_store)
+        vector_store.coordinator = self.coordinator
+        self._chunking_fingerprint = ingestion_fingerprint(config)
 
     def run(
         self,
         force: bool = False,
         single_path: str | None = None,
         on_progress: Callable[..., None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> IngestSummary:
+        with self.coordinator.writer():
+            return self._run(force, single_path, on_progress, should_cancel)
+
+    def _run(self, force, single_path, on_progress, should_cancel) -> IngestSummary:
         """Run the full ingestion pipeline.
 
         Args:
             force: re-ingest even if unchanged.
-            single_path: ingest a single file instead of the configured folder.
+            single_path: ingest an explicit file or folder instead of the configured folder.
             on_progress: optional callback called for each file processed.
         """
 
         progress = on_progress or _noop_progress
+        with self.coordinator.read():
+            self.hash_tracker = HashTracker(self.config.paths.index_file)
         documents = self._discover(single_path)
         summary = IngestSummary()
         total = len(documents)
 
         for idx, doc in enumerate(documents, start=1):
+            if should_cancel and should_cancel():
+                summary.cancelled = True
+                break
+            progress(idx, total, doc.source_path, "indexing")
             try:
                 indexed = self._ingest_one(doc, force=force, summary=summary)
             except Exception as exc:  # surface, but keep processing others
@@ -134,7 +150,6 @@ class IngestService:
                 summary.skipped_files.append(doc.source_path)
                 progress(idx, total, doc.source_path, "skipped")
 
-        self.hash_tracker.save()
         return summary
 
     # ----- internals -------------------------------------------------------
@@ -142,6 +157,8 @@ class IngestService:
     def _discover(self, single_path: str | None) -> list[LoadedDocument]:
         ocr_on = self.config.ocr.enabled
         if single_path:
+            if Path(single_path).is_dir():
+                return scan_folder(single_path, include_ocr_types=ocr_on)
             return [load_single(single_path, include_ocr_types=ocr_on)]
         return scan_folder(self.config.paths.documents_dir, include_ocr_types=ocr_on)
 
@@ -161,16 +178,6 @@ class IngestService:
             logger.info("Unchanged, skipping: %s", path)
             return False
 
-        # If the file changed, evict its old chunks from the vector store
-        # before inserting new ones.
-        previous_hash = self.hash_tracker.previous_hash(path)
-        if previous_hash:
-            self.vector_store.delete_by_document_hash(previous_hash)
-        if force:
-            # In force mode we always re-evict by the *current* hash too, in
-            # case ids overlap from an earlier identical content state.
-            self.vector_store.delete_by_document_hash(current_hash)
-
         text = extract_text(
             path,
             ocr_enabled=self.config.ocr.enabled,
@@ -180,9 +187,7 @@ class IngestService:
         chunk_texts = self.chunker.split(text)
 
         if not chunk_texts:
-            logger.warning("No text extracted from %s — skipping.", path)
-            self.hash_tracker.record(path, current_hash, chunks=0, document_hash=current_hash)
-            return False
+            raise ValueError("No text extracted; previous indexed content retained. Enable OCR for scanned documents.")
 
         # Derive folder-based metadata for filtering (#4).
         folder_meta = _derive_folder_metadata(doc, self.config.paths.documents_dir)
@@ -192,6 +197,8 @@ class IngestService:
         prefixes = self._contextualize(text, chunk_texts)
 
         chunks = []
+        doc_id = document_id(path)
+        revision = uuid.uuid4().hex
         for i, chunk_text in enumerate(chunk_texts):
             prefix = prefixes[i] if prefixes else ""
             stored_text = f"{prefix}\n\n{chunk_text}" if prefix else chunk_text
@@ -200,6 +207,8 @@ class IngestService:
                 "source_path": doc.source_path,
                 "chunk_index": i,
                 "document_hash": current_hash,
+                "document_id": doc_id,
+                "revision": revision,
                 "file_type": doc.file_type,
                 "section": _extract_section(chunk_text),
                 **folder_meta,
@@ -209,7 +218,7 @@ class IngestService:
                 metadata["context_prefix"] = prefix
             chunks.append(
                 DocumentChunk(
-                    id=f"{current_hash[:12]}:{i}",
+                    id=f"{doc_id}:{revision}:{i}",
                     text=stored_text,
                     metadata=metadata,
                 )
@@ -224,14 +233,16 @@ class IngestService:
                 summary.embedding_dim,
             )
 
-        self.vector_store.upsert_chunks(chunks, embeddings)
-        self.hash_tracker.record(
-            path,
-            current_hash,
-            chunks=len(chunks),
-            document_hash=current_hash,
-            chunking_fingerprint=self._chunking_fingerprint,
-        )
+        # All expensive/fallible preparation finished before the commit point.
+        if compute_file_hash(path) != current_hash:
+            raise ValueError("Source changed during ingestion; retry this file")
+        self.coordinator.commit(path, chunks, embeddings, {
+            "hash": current_hash, "chunks": len(chunks), "document_hash": current_hash,
+            "document_id": doc_id, "revision": revision,
+            "chunking_fingerprint": self._chunking_fingerprint,
+            "ingestion_settings": ingestion_settings(self.config),
+        }, embedding_provider=self.embedding_provider)
+        self.hash_tracker = HashTracker(self.config.paths.index_file)
         summary.total_chunks += len(chunks)
         logger.info("Indexed %d chunks from %s", len(chunks), path)
         return True

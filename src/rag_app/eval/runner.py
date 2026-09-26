@@ -1,33 +1,17 @@
-"""Score the RAG pipeline against a gold-standard set of questions.
+"""Evaluate retrieval recall, reciprocal rank, nDCG, and keyword coverage.
 
-What we measure for each question:
-
-- **Retrieval recall@k**: how many of the `expected_sources` files appeared
-  somewhere in the top-k retrieved chunks. A simple recall — "did we find it
-  at all?" — not graded by rank. Mid-level interview rubric: this is the
-  most-asked retrieval metric in real RAG eval.
-
-- **MRR (Mean Reciprocal Rank)**: 1/rank of the *first* expected source in
-  the ranked retrieval list, averaged over all questions. Recall@k only asks
-  "did we find it at all?" — MRR also rewards finding it *early*. A system
-  that always puts the right chunk first scores 1.0; one that buries it at
-  rank 5 scores 0.2.
-
-- **Keyword recall in the answer** (only when an LLM is configured): how many
-  of the `expected_contains` substrings appeared in the model's answer. This
-  is a cheap stand-in for *faithfulness*: did the model actually mention the
-  facts we expected? Real eval frameworks (RAGAS, Trulens) use richer
-  signals, but substring presence catches most regressions in a learning
-  project.
-
-A question is `passed` when both dimensions reach 1.0 (or when an
-expectation list was empty, in which case that dimension is "not asserted").
+Keyword coverage counts expected substrings in answers. It cannot establish
+factual correctness, grounding, or citation quality; these need manual review.
+Refusal checks accept specified phrases on unanswerable questions. Retrieval-only
+runs do not score answer keywords or refusals. Questions with no applicable
+expectations are marked unscored, rather than counted as successful checks.
 """
 
 from __future__ import annotations
 
 import json
 import math
+from time import perf_counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +42,12 @@ class EvalResult:
     # source, or None when no expected source appeared (or none was asserted).
     first_relevant_rank: int | None = None
     ndcg: float | None = None
+    refusal_pass: bool | None = None
+    elapsed_ms: float = 0.0
+
+    @property
+    def scored(self) -> bool:
+        return self.sources_expected > 0 or self.keywords_expected > 0 or self.refusal_pass is not None
 
     @property
     def retrieval_recall(self) -> float | None:
@@ -87,15 +77,19 @@ class EvalReport:
 
     @property
     def passed_count(self) -> int:
-        return sum(1 for r in self.results if r.passed)
+        return sum(1 for r in self.results if r.passed and r.scored)
 
     @property
     def failed_count(self) -> int:
-        return len(self.results) - self.passed_count
+        return sum(1 for r in self.results if not r.passed and r.scored)
+
+    @property
+    def unscored_count(self) -> int:
+        return sum(not r.scored for r in self.results)
 
     @property
     def all_passed(self) -> bool:
-        return self.failed_count == 0 and bool(self.results)
+        return self.failed_count == 0 and any(r.scored for r in self.results)
 
     @property
     def mean_recall(self) -> float:
@@ -162,6 +156,8 @@ def score_question(
     haystack = (answer or "").lower()
     keywords_found = sum(1 for kw in keywords_expected if kw.lower() in haystack)
     ndcg = _ndcg_at_k(question, retrieved)
+    refusal_pass = (any(phrase.lower() in haystack for phrase in question.accepted_refusals)
+                    if question.accepted_refusals and answer is not None else None)
 
     sources_pass = (not expected) or sources_found == len(expected)
     # Keyword check only counts when (a) we have expected keywords AND (b) we
@@ -179,9 +175,10 @@ def score_question(
         sources_expected=len(expected),
         keywords_found=keywords_found,
         keywords_expected=len(keywords_expected) if answer is not None else 0,
-        passed=sources_pass and keywords_pass,
+        passed=sources_pass and keywords_pass and refusal_pass is not False,
         first_relevant_rank=first_relevant_rank,
         ndcg=ndcg,
+        refusal_pass=refusal_pass,
     )
 
 
@@ -250,6 +247,7 @@ def run_eval(
 
     results: list[EvalResult] = []
     for q in questions:
+        started = perf_counter()
         if rag_service is not None:
             rag_answer: RagAnswer = rag_service.answer(q.question)
             results.append(score_question(q, rag_answer.sources, rag_answer.answer))
@@ -267,6 +265,7 @@ def run_eval(
                     model_name=cfg.retrieval.reranker_model,
                 )
             results.append(score_question(q, chunks, answer=None))
+        results[-1].elapsed_ms = round((perf_counter() - started) * 1000, 2)
     return EvalReport(results=results)
 
 

@@ -1,27 +1,28 @@
-"""Track file hashes so unchanged documents aren't re-ingested.
+"""Versioned atomic catalog of canonical source paths and committed revisions.
 
-Stored on disk as JSON:
-
-    {
-        "documents/sample_can_fd.txt": {
-            "hash": "abc123...",
-            "chunks": 4,
-            "document_hash": "abc123...",
-            "source_file": "sample_can_fd.txt"
-        }
-    }
-
-`hash` and `document_hash` are the same value today (SHA-256 of the raw
-file bytes); the redundancy keeps the schema flexible if we later want to
-distinguish "is this file changed" from "what tag should index the chunks".
+Document identity is path-derived. Content hashes detect unchanged bytes.
+The catalog retains per-document chunk IDs and ingestion settings plus global
+embedding/store identity and the active corpus revision. Legacy catalogs load
+for inspection or explicit rebuild; ingestion never upgrades them silently.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+from rag_app.ingestion.atomic import atomic_json
+
+
+def canonical_path(path: str | Path) -> str:
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def document_id(path: str | Path) -> str:
+    return hashlib.sha256(canonical_path(path).encode("utf-8")).hexdigest()
 
 
 def compute_file_hash(path: str | Path) -> str:
@@ -42,15 +43,7 @@ def compute_chunking_fingerprint(chunking) -> str:
     those config edits would silently do nothing until you `--force`.
     """
 
-    parts = "|".join(
-        str(x)
-        for x in (
-            chunking.chunk_size,
-            chunking.chunk_overlap,
-            chunking.strategy,
-            chunking.contextual,
-        )
-    )
+    parts = json.dumps(chunking.model_dump(), sort_keys=True)
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
 
 
@@ -58,6 +51,8 @@ class HashTracker:
     def __init__(self, index_path: str | Path) -> None:
         self.index_path = Path(index_path)
         self._index: dict[str, dict[str, Any]] = {}
+        self.metadata: dict[str, Any] = {}
+        self.legacy = False
         self._load()
 
     # ----- lookup / mutate -------------------------------------------------
@@ -68,19 +63,18 @@ class HashTracker:
         current_hash: str,
         chunking_fingerprint: str | None = None,
     ) -> bool:
-        entry = self._index.get(str(path))
+        entry = self._index.get(canonical_path(path))
         if entry is None or entry.get("hash") != current_hash:
             return False
         # If the caller tracks a chunking fingerprint, a change to it (e.g.
         # toggling `contextual` or changing `chunk_size`) counts as changed.
-        # Entries written before fingerprints existed have no key — treat those
-        # as unchanged so old indexes don't force a full re-ingest.
-        if chunking_fingerprint is not None and "chunking_fingerprint" in entry:
+        # Missing fingerprints require preparation with the current pipeline.
+        if chunking_fingerprint is not None:
             return entry.get("chunking_fingerprint") == chunking_fingerprint
         return True
 
     def previous_hash(self, path: str | Path) -> str | None:
-        entry = self._index.get(str(path))
+        entry = self._index.get(canonical_path(path))
         return entry.get("document_hash") if entry else None
 
     def record(
@@ -90,6 +84,7 @@ class HashTracker:
         chunks: int,
         document_hash: str | None = None,
         chunking_fingerprint: str | None = None,
+        **extra: Any,
     ) -> None:
         p = Path(path)
         entry: dict[str, Any] = {
@@ -100,23 +95,27 @@ class HashTracker:
         }
         if chunking_fingerprint is not None:
             entry["chunking_fingerprint"] = chunking_fingerprint
-        self._index[str(p)] = entry
+        entry.update(extra)
+        self._index[canonical_path(p)] = entry
 
     def remove(self, path: str | Path) -> None:
-        self._index.pop(str(path), None)
+        self._index.pop(canonical_path(path), None)
 
     def all_entries(self) -> dict[str, dict[str, Any]]:
         return dict(self._index)
 
     def clear(self) -> None:
         self._index = {}
+        self.metadata = {}
 
     # ----- persistence -----------------------------------------------------
 
     def save(self) -> None:
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.index_path.open("w", encoding="utf-8") as f:
-            json.dump(self._index, f, indent=2, sort_keys=True)
+        atomic_json(self.index_path, self.as_dict())
+        self.legacy = False
+
+    def as_dict(self) -> dict:
+        return {"schema_version": 2, "metadata": self.metadata, "documents": self._index}
 
     def _load(self) -> None:
         if not self.index_path.exists():
@@ -124,7 +123,18 @@ class HashTracker:
             return
         try:
             with self.index_path.open("r", encoding="utf-8") as f:
-                self._index = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            # Corrupt or unreadable index — start fresh, force re-ingestion.
-            self._index = {}
+                raw = json.load(f)
+            if raw.get("schema_version") == 2:
+                self.metadata = raw["metadata"]
+                if not isinstance(self.metadata, dict):
+                    raise ValueError("invalid catalog metadata")
+                raw = raw["documents"]
+            elif "schema_version" in raw:
+                raise ValueError("unsupported catalog schema version")
+            else:
+                self.legacy = bool(raw)
+            if not isinstance(raw, dict) or not all(isinstance(v, dict) for v in raw.values()):
+                raise ValueError("invalid catalog structure")
+            self._index = {canonical_path(k): v for k, v in raw.items()}
+        except (json.JSONDecodeError, OSError, ValueError, KeyError, AttributeError) as exc:
+            raise RuntimeError(f"Cannot read index catalog {self.index_path}; restore its backup before continuing: {exc}") from exc

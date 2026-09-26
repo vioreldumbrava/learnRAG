@@ -160,16 +160,13 @@ class AskTab(QWidget):
 
         # Parse filter.
         filter_str = self.filter_edit.text().strip()
-        where = None
-        if filter_str and "=" in filter_str:
-            where = {}
-            for pair in filter_str.split(","):
-                pair = pair.strip()
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    where[k.strip()] = v.strip()
-            if len(where) > 1:
-                where = {"$and": [{k: v} for k, v in where.items()]}
+        from rag_app.validation import parse_filter
+        try:
+            where = parse_filter(filter_str)
+        except ValueError as exc:
+            self._on_error(str(exc))
+            self._reset_running_state()
+            return
 
         def task():
             cfg, embedding_provider, chat_provider, store = self._get_pipeline(
@@ -308,6 +305,8 @@ class AskTab(QWidget):
             f"Chat:       {debug.chat_provider} / {debug.chat_model}",
             f"Retrieved:  {len(debug.retrieved_chunks)} chunks",
             f"Prompt:     {debug.prompt_char_count} chars",
+            f"Omitted:    {debug.omitted_history_messages} history messages, {debug.omitted_chunks} evidence chunks",
+            f"Settings:   {debug.effective_settings}",
             "",
             "--- Retrieved chunks ---",
         ]

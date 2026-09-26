@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 ProviderName = Literal["ollama", "lmstudio"]
@@ -46,6 +46,12 @@ class ChunkingSection(BaseModel):
     # the LLM as context (local models have small windows).
     contextual_document_chars: int = Field(default=6000, ge=500)
 
+    @model_validator(mode="after")
+    def _valid_overlap(self):
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        return self
+
     @field_validator("chunk_size")
     @classmethod
     def _chunk_size_positive(cls, v: int) -> int:
@@ -66,7 +72,7 @@ class ChatSection(BaseModel):
     model: str
     base_url: str
     temperature: float = 0.2
-    max_tokens: int = 800
+    max_tokens: int = Field(default=800, ge=1)
 
 
 class EmbeddingsSection(BaseModel):
@@ -84,10 +90,10 @@ class VectorStoreSection(BaseModel):
 
 
 class RetrievalSection(BaseModel):
-    top_k: int = 5
+    top_k: int = Field(default=5, ge=1, le=100)
     score_threshold: float | None = None
     hybrid: bool = False
-    hybrid_keyword_weight: float = 0.3
+    hybrid_keyword_weight: float = Field(default=0.3, ge=0, le=1)
     # Optional candidate pool size used by MMR/rerankers before final top_k.
     candidate_k: int | None = Field(default=None, ge=1)
     reranker_model: str | None = None
@@ -114,6 +120,8 @@ class RetrievalSection(BaseModel):
 class PromptSection(BaseModel):
     answer_only_from_context: bool = True
     include_sources: bool = True
+    max_history_turns: int = Field(default=10, ge=0, le=100)
+    max_prompt_chars: int = Field(default=24000, ge=1000)
 
 
 class OcrSection(BaseModel):
@@ -130,9 +138,8 @@ class CacheSection(BaseModel):
     # repeated question. Keyed on the embedding model, so changing the model
     # simply misses (no stale vectors).
     embedding: bool = False
-    # Cache answers: (question + retrieved chunk ids + chat model + prompt
-    # flags) -> answer. Because chunk ids are content-derived, editing a
-    # document changes the ids and old entries stop matching (self-invalidating).
+    # Cache answers by exact ordered prompt, provider identity, and generation
+    # settings. Changes to evidence text or its ordering cause a cache miss.
     answer: bool = False
     # Upper bound on entries per cache (LRU eviction beyond this).
     max_entries: int = Field(default=1024, ge=1)
@@ -146,7 +153,10 @@ class ObservabilitySection(BaseModel):
 
 class ServerSection(BaseModel):
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = Field(default=8000, ge=1, le=65535)
+    allowed_document_roots: list[str] = Field(default_factory=list)
+    upload_max_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    upload_max_files: int = Field(default=20, ge=1, le=100)
 
 
 class AppConfig(BaseModel):

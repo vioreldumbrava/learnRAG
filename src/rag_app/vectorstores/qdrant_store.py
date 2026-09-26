@@ -80,6 +80,19 @@ class QdrantVectorStore(VectorStore):
 
     # ----- writes ----------------------------------------------------------
 
+    def fork_collection(self, collection_name: str) -> "QdrantVectorStore":
+        import copy
+        store = copy.copy(self)
+        store.collection_name = collection_name
+        store._mutations = 0
+        return store
+
+    def delete_ids(self, ids: list[str]) -> None:
+        if ids and self._client.collection_exists(self.collection_name):
+            self._client.delete(collection_name=self.collection_name,
+                                points_selector=models.PointIdsList(points=[_point_id(i) for i in ids]), wait=True)
+        self._mutations += 1
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -102,7 +115,7 @@ class QdrantVectorStore(VectorStore):
             )
             for chunk, vector in zip(chunks, embeddings)
         ]
-        self._client.upsert(collection_name=self.collection_name, points=points)
+        self._client.upsert(collection_name=self.collection_name, points=points, wait=True)
         self._mutations += 1
 
     def delete_by_document_hash(self, document_hash: str) -> None:
@@ -277,17 +290,12 @@ def _to_qdrant_filter(where: dict | None) -> "models.Filter | None":
     if not where:
         return None
     conditions: list = []
-    if "$and" in where:
-        for cond in where["$and"]:
-            for key, value in cond.items():
-                conditions.append(
-                    models.FieldCondition(key=key, match=models.MatchValue(value=value))
-                )
-    else:
-        for key, value in where.items():
-            conditions.append(
-                models.FieldCondition(key=key, match=models.MatchValue(value=value))
-            )
+    for condition in where.get("$and", [where]):
+        for key, value in condition.items():
+            if isinstance(value, float):
+                conditions.append(models.FieldCondition(key=key, range=models.Range(gte=value, lte=value)))
+            else:
+                conditions.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
     if not conditions:
         return None
     return models.Filter(must=conditions)

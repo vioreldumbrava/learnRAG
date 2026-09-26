@@ -18,6 +18,7 @@ Supports:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from typing import Iterator
 
 from rag_app.models import ChatMessage, RagAnswer, RetrievedChunk
@@ -41,6 +42,9 @@ class DebugInfo:
     hop_queries: list[str] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
     answer_cache_hit: bool = False
+    omitted_history_messages: int = 0
+    omitted_chunks: int = 0
+    effective_settings: dict = field(default_factory=dict)
 
     @property
     def prompt_char_count(self) -> int:
@@ -87,7 +91,8 @@ class RagService:
         timings = StageTimings()
         with timings.stage("retrieve"):
             chunks = self._retrieve_and_rerank(question)
-        messages = self.prompt_builder.build(question, chunks, history=history)
+        prepared = self.prompt_builder.prepare(question, chunks, history)
+        chunks, messages = prepared.chunks, prepared.messages
         text, cache_hit = self._generate(question, chunks, messages, history, timings)
         log_query(
             question, [c.id for c in chunks], timings.as_dict(),
@@ -103,7 +108,8 @@ class RagService:
         timings = StageTimings()
         with timings.stage("retrieve"):
             chunks = self._retrieve_and_rerank(question)
-        messages = self.prompt_builder.build(question, chunks, history=history)
+        prepared = self.prompt_builder.prepare(question, chunks, history)
+        chunks, messages = prepared.chunks, prepared.messages
         text, cache_hit = self._generate(question, chunks, messages, history, timings)
 
         # Fold in the retriever's own per-stage breakdown (embed / search / bm25).
@@ -123,6 +129,9 @@ class RagService:
             hop_queries=list(getattr(self.retriever, "last_hop_queries", [])),
             timings=timings.as_dict(),
             answer_cache_hit=cache_hit,
+            omitted_history_messages=prepared.omitted_history_messages,
+            omitted_chunks=prepared.omitted_chunks,
+            effective_settings=getattr(self.retriever, "effective_settings", {}),
         )
         log_query(
             question, [c.id for c in chunks], timings.as_dict(),
@@ -141,14 +150,39 @@ class RagService:
         chunks while tokens arrive.
         """
 
-        chunks = self._retrieve_and_rerank(question)
-        messages = self.prompt_builder.build(question, chunks, history=history)
-        token_iter = self.chat_provider.generate_stream(
-            messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+        tokens, chunks, _ = self.prepare_stream(question, history)
+        return tokens, chunks
+
+    def prepare_stream(self, question, history=None):
+        timings = StageTimings()
+        with timings.stage("retrieve"):
+            chunks = self._retrieve_and_rerank(question)
+        prepared = self.prompt_builder.prepare(question, chunks, history)
+        timings.merge(getattr(self.retriever, "last_timings", {}))
+        debug = DebugInfo(
+            embedding_provider=getattr(self.retriever.embedding_provider, "provider_name", "unknown"),
+            embedding_model=getattr(self.retriever.embedding_provider, "model_name", "unknown"),
+            chat_provider=self.chat_provider.provider_name, chat_model=self.chat_provider.model_name,
+            retrieved_chunks=prepared.chunks, prompt_messages=prepared.messages,
+            hop_queries=list(getattr(self.retriever, "last_hop_queries", [])),
+            timings=timings.as_dict(), omitted_history_messages=prepared.omitted_history_messages,
+            omitted_chunks=prepared.omitted_chunks,
+            effective_settings=getattr(self.retriever, "effective_settings", {}),
         )
-        return token_iter, chunks
+
+        def generate():
+            tokens = self.chat_provider.generate_stream(prepared.messages, self.temperature, self.max_tokens)
+            try:
+                with timings.stage("generate"):
+                    yield from tokens
+            finally:
+                close = getattr(tokens, "close", None)
+                if close:
+                    close()
+                debug.chat_model = self.chat_provider.model_name
+                debug.timings = timings.as_dict()
+                log_query(question, [c.id for c in prepared.chunks], debug.timings, enabled=self._log_timings)
+        return generate(), prepared.chunks, debug
 
     # ----- internals -------------------------------------------------------
 
@@ -169,13 +203,7 @@ class RagService:
         cacheable = self._answer_cache is not None and not history
         key = None
         if cacheable:
-            key = self._answer_cache.make_key(
-                question,
-                [c.id for c in chunks],
-                chat_model=getattr(self.chat_provider, "model_name", "unknown"),
-                answer_only_from_context=self.prompt_builder.answer_only_from_context,
-                include_sources=self.prompt_builder.include_sources,
-            )
+            key = self._answer_cache.prompt_key(messages, self.chat_provider, self.temperature, self.max_tokens)
             cached = self._answer_cache.get(key)
             if cached is not None:
                 COUNTERS.hit("answer_cache")
@@ -189,10 +217,16 @@ class RagService:
                 max_tokens=self.max_tokens,
             )
         if cacheable and key is not None:
+            key = self._answer_cache.prompt_key(messages, self.chat_provider, self.temperature, self.max_tokens)
             self._answer_cache.put(key, text)
         return text, False
 
     def _retrieve_and_rerank(self, question: str) -> list[RetrievedChunk]:
+        coordinator = getattr(self.retriever.vector_store, "coordinator", None)
+        with coordinator.read() if coordinator else nullcontext():
+            return self._retrieve_locked(question)
+
+    def _retrieve_locked(self, question: str) -> list[RetrievedChunk]:
         """Retrieve chunks and optionally rerank them (#6)."""
 
         chunks = self.retriever.retrieve(question)

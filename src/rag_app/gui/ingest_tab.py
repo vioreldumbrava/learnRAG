@@ -205,7 +205,7 @@ class IngestTab(QWidget):
         if total > 0:
             if self.progress.maximum() != total:
                 self.progress.setRange(0, total)
-            self.progress.setValue(current)
+            self.progress.setValue(current - (status == "indexing"))
 
         # Update counters.
         if status in self._counts:

@@ -139,11 +139,10 @@ class StatsTab(QWidget):
         if ok != QMessageBox.Yes:
             return
 
-        chroma_dir = Path(cfg.paths.chroma_dir)
-        index_file = Path(cfg.paths.index_file)
-        if chroma_dir.exists():
-            shutil.rmtree(chroma_dir, ignore_errors=True)
-        if index_file.exists():
-            index_file.unlink(missing_ok=True)
+        try:
+            build_vector_store(cfg).coordinator.clear()
+        except Exception as exc:
+            QMessageBox.critical(self, "Clear failed", str(exc))
+            return
         self.status_label.setText("Cleared.")
         self.refresh()

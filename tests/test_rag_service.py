@@ -78,15 +78,15 @@ def test_debug_flow_returns_debug_info(
     assert debug.answer_cache_hit is False
 
 
-def test_empty_question_returns_no_sources(
+def test_empty_question_is_rejected_before_generation(
     fake_embedding_provider, fake_vector_store, fake_chat_provider
 ):
     retriever = Retriever(fake_embedding_provider, fake_vector_store, top_k=3)
     service = RagService(retriever, PromptBuilder(), fake_chat_provider)
-    answer = service.answer("   ")
-    assert answer.sources == []
-    # Still calls the chat provider with the (empty) context.
-    assert fake_chat_provider.received
+    import pytest
+    with pytest.raises(ValueError, match="blank"):
+        service.answer("   ")
+    assert not fake_chat_provider.received
 
 
 def test_mmr_runs_before_reranker(

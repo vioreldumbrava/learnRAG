@@ -1,122 +1,350 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>local-rag-learning</title>
-<link rel="stylesheet" href="style.css">
-</head>
-<body>
-<header>
-  <h1>local-rag-learning</h1>
-  <span id="health" class="health" title="API status">&#9679;</span>
-  <nav>
-    <button class="tab active" data-panel="ask">Ask</button>
-    <button class="tab" data-panel="ingest">Ingest</button>
-    <button class="tab" data-panel="documents">Documents</button>
-    <button class="tab" data-panel="stats">Stats</button>
-    <button class="tab" data-panel="config">Config</button>
-  </nav>
-</header>
-
-<main>
-  <!-- Ask ------------------------------------------------------------- -->
-  <section id="panel-ask" class="panel active">
-    <textarea id="question" rows="3"
-      placeholder="Type your question, then press Ask (Ctrl+Enter)"></textarea>
-    <div class="controls">
-      <label><input type="checkbox" id="stream" checked> Stream</label>
-      <label><input type="checkbox" id="debug"> Debug</label>
-      <input type="text" id="filter" placeholder="filter, e.g. module=CAN">
-      <span id="history-label" class="muted"></span>
-      <span class="spacer"></span>
-      <button id="clear-history" class="secondary">Clear History</button>
-      <button id="ask" class="primary">Ask</button>
-    </div>
-    <div id="ask-status" class="status"></div>
-    <pre id="answer" class="answer"></pre>
-    <h2>Sources</h2>
-    <table id="sources">
-      <thead><tr><th>#</th><th>file</th><th>section</th><th>chunk</th><th>score</th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div id="debug-block" hidden>
-      <h2>Debug</h2>
-      <pre id="debug-info"></pre>
-    </div>
-  </section>
-
-  <!-- Ingest ---------------------------------------------------------- -->
-  <section id="panel-ingest" class="panel">
-    <p class="muted">Indexes documents from the server's filesystem. Leave the
-      path empty to ingest the configured <code>documents/</code> folder (a
-      mounted volume in Docker), or give a single file / folder path
-      <em>as seen by the server</em>.</p>
-    <input type="text" id="ingest-path"
-      placeholder="path on the server (empty = configured documents_dir)">
-    <div class="controls">
-      <label><input type="checkbox" id="force"> Force re-ingest (ignore hash cache)</label>
-      <span class="spacer"></span>
-      <button id="run-ingest" class="primary">Run Ingest</button>
-    </div>
-    <div id="ingest-status" class="status"></div>
-    <div id="ingest-results"></div>
-  </section>
-
-  <!-- Documents ------------------------------------------------------- -->
-  <section id="panel-documents" class="panel">
-    <div class="controls">
-      <span id="documents-status" class="status"></span>
-      <span class="spacer"></span>
-      <button id="forget-selected" class="danger secondary">Forget Selected</button>
-      <button id="refresh-documents" class="secondary">Refresh</button>
-    </div>
-    <table id="documents">
-      <thead><tr>
-        <th><input type="checkbox" id="select-all" title="Select all"></th>
-        <th>file</th><th>path</th><th>chunks</th><th>hash</th><th></th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
-
-    <h2>Inspect chunks</h2>
-    <div class="controls">
-      <label>Random sample:
-        <input type="number" id="sample-n" value="5" min="1" max="50" style="width:60px">
-      </label>
-      <button id="show-random" class="secondary">Show random chunks</button>
-      <span class="muted">or click a document's <b>Inspect</b> button above.</span>
-    </div>
-    <pre id="chunks-view" class="answer"></pre>
-  </section>
-
-  <!-- Stats ----------------------------------------------------------- -->
-  <section id="panel-stats" class="panel">
-    <div class="controls">
-      <span id="stats-status" class="status"></span>
-      <span class="spacer"></span>
-      <button id="refresh-stats" class="secondary">Refresh</button>
-      <button id="clear-index" class="danger">Clear Index</button>
-    </div>
-    <table id="stats"><tbody></tbody></table>
-  </section>
-
-  <!-- Config (read-only) ---------------------------------------------- -->
-  <section id="panel-config" class="panel">
-    <p class="muted">The effective server configuration. This is
-      <b>read-only</b>: the server builds its providers once at startup and the
-      config file is a read-only mount in Docker. To change settings, edit the
-      config file (<code>config.docker.yaml</code> for the container) and
-      restart. There is no Refresh-models / Save here for that reason.</p>
-    <div class="controls">
-      <span id="config-status" class="status"></span>
-      <span class="spacer"></span>
-      <button id="refresh-config" class="secondary">Refresh</button>
-    </div>
-    <div id="config-tables"></div>
-  </section>
-</main>
-
-<script src="app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>local-rag-learning</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>local-rag-learning</h1>
+        <p class="muted">
+          Your documents. Inspectable answers. Measurable experiments.
+        </p>
+      </div>
+      <span id="health" role="status">Checking API...</span>
+    </header>
+    <nav aria-label="Workspace" role="tablist">
+      <button
+        class="tab active"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-ask"
+        id="tab-ask"
+        data-panel="ask"
+      >
+        Ask
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-ingest"
+        id="tab-ingest"
+        data-panel="ingest"
+      >
+        Add documents
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-documents"
+        id="tab-documents"
+        data-panel="documents"
+      >
+        Documents
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-experiments"
+        id="tab-experiments"
+        data-panel="experiments"
+      >
+        Experiments
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-stats"
+        id="tab-stats"
+        data-panel="stats"
+      >
+        Status
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-config"
+        id="tab-config"
+        data-panel="config"
+      >
+        Config
+      </button>
+    </nav>
+    <main>
+      <section
+        id="panel-ask"
+        class="panel active"
+        role="tabpanel"
+        aria-labelledby="tab-ask"
+      >
+        <div id="empty-index" class="notice" hidden>
+          No documents are indexed yet.
+          <button id="go-ingest">Add your first document</button>
+        </div>
+        <div id="transcript" aria-label="Conversation"></div>
+        <form id="ask-form">
+          <label for="question">Ask your documents</label>
+          <textarea
+            id="question"
+            rows="3"
+            maxlength="4000"
+            placeholder="What would you like to find out?"
+            required
+          ></textarea>
+          <div class="controls">
+            <label
+              ><input type="checkbox" id="stream" checked /> Stream
+              answer</label
+            ><label
+              ><input type="checkbox" id="debug" /> Show debug details</label
+            >
+            <label for="filter">Filter</label
+            ><input id="filter" placeholder="module=CAN" />
+            <span class="spacer"></span
+            ><button type="button" id="clear-history">Clear conversation</button
+            ><button type="button" id="stop" hidden>Stop</button
+            ><button class="primary" id="ask" type="submit">Ask</button>
+          </div>
+          <p
+            id="ask-status"
+            class="status"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <p id="history-label" class="muted">
+            Ctrl+Enter to ask. Conversation stays in this tab.
+          </p>
+        </form>
+      </section>
+      <section
+        id="panel-ingest"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-ingest"
+        hidden
+      >
+        <h2>Add documents</h2>
+        <p>
+          Upload documents, or index a folder on this computer. Existing indexed
+          content remains available if a replacement fails.
+        </p>
+        <form id="upload-form">
+          <div id="drop-zone" class="drop-zone">
+            <label for="upload-files">Choose files or drop them here</label
+            ><input type="file" id="upload-files" multiple required />
+            <p id="upload-limits" class="muted">
+              TXT, Markdown, PDF, DOCX, HTML and CSV
+            </p>
+          </div>
+          <button id="upload" class="primary" type="submit">
+            Upload and index
+          </button>
+        </form>
+        <p id="upload-status" class="status" role="status"></p>
+        <details>
+          <summary>Index an existing server folder or file</summary>
+          <form id="ingest-form">
+            <label for="ingest-path"
+              >Path on the server (empty uses configured documents
+              folder)</label
+            ><input
+              id="ingest-path"
+              placeholder="Leave empty for configured folder"
+            />
+            <div class="controls">
+              <label
+                ><input type="checkbox" id="force" /> Force re-ingestion</label
+              ><button id="run-ingest" type="submit">Run ingestion</button>
+            </div>
+          </form>
+        </details>
+        <div id="ingest-job" class="job" aria-live="polite"></div>
+        <div id="ingest-results"></div>
+        <h3>Recent ingestion jobs</h3>
+        <div id="ingest-jobs"></div>
+      </section>
+      <section
+        id="panel-documents"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-documents"
+        hidden
+      >
+        <div class="controls">
+          <h2>Indexed documents</h2>
+          <span class="spacer"></span
+          ><button id="forget-selected" class="danger">Forget selected</button
+          ><button id="refresh-documents">Refresh</button>
+        </div>
+        <p id="documents-status" class="status" role="status"></p>
+        <div class="table-wrap">
+          <table id="documents">
+            <thead>
+              <tr>
+                <th>
+                  <input
+                    type="checkbox"
+                    id="select-all"
+                    aria-label="Select all documents"
+                  />
+                </th>
+                <th>File</th>
+                <th>Path</th>
+                <th>Chunks</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="controls">
+          <label for="sample-n">Random sample</label
+          ><input
+            id="sample-n"
+            type="number"
+            value="5"
+            min="1"
+            max="100"
+          /><button id="show-random">Inspect sample</button>
+        </div>
+        <div id="chunks-view"></div>
+      </section>
+      <section
+        id="panel-experiments"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-experiments"
+        hidden
+      >
+        <h2>Compare retrieval settings</h2>
+        <p>
+          Run the bundled questions against one fixed snapshot of your index.
+          Start with the sample CAN/SPI corpus. Each preset changes one setting
+          from the dense baseline; global settings stay unchanged and caches are
+          disabled.
+        </p>
+        <form id="experiment-form">
+          <fieldset>
+            <legend>Presets</legend>
+            <label
+              ><input type="checkbox" name="preset" value="dense" checked />
+              Dense baseline (top 5)</label
+            ><label
+              ><input type="checkbox" name="preset" value="hybrid" checked />
+              Hybrid search</label
+            ><label
+              ><input type="checkbox" name="preset" value="mmr" checked /> MMR
+              diversity</label
+            ><label
+              ><input type="checkbox" name="preset" value="top_k_8" checked />
+              Top 8</label
+            >
+          </fieldset>
+          <div class="controls">
+            <label for="experiment-mode">Mode</label
+            ><select id="experiment-mode">
+              <option value="retrieval">Retrieval only</option>
+              <option value="full">Retrieval and answers</option></select
+            ><button id="run-experiment" class="primary" type="submit">
+              Run comparison
+            </button>
+          </div>
+        </form>
+        <p class="muted">
+          Retrieval only skips chat-assisted query transformations and answer
+          checks. Keyword coverage does not prove grounding. Document-level
+          scores cannot measure wider neighboring context.
+        </p>
+        <div id="experiment-job" class="job" aria-live="polite"></div>
+        <p id="experiment-status" class="status" role="status"></p>
+        <div id="experiment-results"></div>
+        <details>
+          <summary>Manual answer review rubric</summary>
+          <ol>
+            <li>
+              Can each factual claim be supported by an inspected passage?
+            </li>
+            <li>
+              Do the cited sources actually support the claim, rather than
+              merely sharing its topic?
+            </li>
+            <li>
+              Does an answer acknowledge missing or contradictory evidence?
+            </li>
+            <li>
+              Did any retrieval gain justify the measured latency and longer
+              prompt?
+            </li>
+          </ol>
+        </details>
+        <h3>Recent experiment jobs</h3>
+        <div id="experiment-jobs"></div>
+      </section>
+      <section
+        id="panel-stats"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-stats"
+        hidden
+      >
+        <div class="controls">
+          <h2>System status</h2>
+          <span class="spacer"></span
+          ><button id="refresh-stats">Refresh status</button
+          ><button id="check-readiness">Check models</button
+          ><button id="clear-index" class="danger">Clear index</button>
+        </div>
+        <p id="stats-status" role="status" class="status"></p>
+        <p class="muted">
+          API liveness and model readiness are separate checks. Model checks
+          report availability; they do not generate an answer.
+        </p>
+        <pre id="readiness"></pre>
+        <div class="table-wrap">
+          <table id="stats">
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+      <section
+        id="panel-config"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-config"
+        hidden
+      >
+        <div class="controls">
+          <h2>Effective configuration</h2>
+          <span class="spacer"></span
+          ><button id="refresh-config">Refresh</button>
+        </div>
+        <p>
+          Read-only. Edit your YAML configuration and restart the server to
+          change it. Embedding-model changes require an explicit rebuild;
+          existing data is never cleared automatically.
+        </p>
+        <p id="config-status" class="status" role="status"></p>
+        <div id="config-tables"></div>
+      </section>
+    </main>
+    <dialog id="source-dialog" aria-labelledby="source-title">
+      <h2 id="source-title">Source evidence</h2>
+      <button id="close-source" autofocus>Close</button>
+      <pre id="source-text"></pre>
+    </dialog>
+    <script type="module" src="app.js"></script>
+  </body>
 </html>

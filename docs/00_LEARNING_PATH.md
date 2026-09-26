@@ -33,8 +33,8 @@ So you read, then run, then self-quiz, then practise, then tick off.
 that every stage really has all six sections, so this list cannot drift again.
 
 Before you start: make sure `.\run.bat ingest` has succeeded at least once
-(verify with `.\run.bat inspect` — you should see 34 chunks from the six files
-in `documents/`).
+(verify with `.\run.bat inspect` — chunk counts depend on the chosen settings;
+confirm that the six sample files are present). Older indexes need `.\run.bat rebuild`.
 
 **About the corpus.** `documents/` ships a small synthetic corpus about two
 invented peripherals (a CAN FD controller and an SPI peripheral). It is
@@ -62,6 +62,52 @@ Tick a stage once you've cleared its **Checkpoint**:
 - [ ] Stage 10 — Production Concerns (incl. caching & observability)
 - [ ] Stage 11 — Operating the System (CLI / GUI / Web / REST / Docker)
 - [ ] Stage 12 — Frameworks: LangChain & LlamaIndex
+
+---
+
+## Reproducible web lab
+
+Use the **Experiments** panel alongside Stages 5, 8, and 9. It runs the bundled
+questions without editing global YAML or rebuilding the corpus. Reports record
+the corpus revision, effective settings, actual model names, per-question
+metrics, and latency. They are the evidence for your conclusions.
+
+**Prerequisites:** ingest the six sample CAN/SPI files, load an embedding model,
+and start `.\run.bat serve`. Full-answer comparisons also require the chat model.
+Use a separate learning index if your normal corpus contains unrelated files.
+Do not ingest or clear data during a comparison: commits wait for its fixed
+snapshot. The fixed index includes its existing chunking and contextual-ingest
+settings; the panel does not change those variables.
+
+**Isolated baseline:** `dense` uses `top_k: 5` with all optional retrieval
+techniques off. Caches are disabled for every measured run. The other presets
+start from this baseline independently; they never stack earlier choices.
+
+| Experiment | One change | What to inspect | Failure explanation | Checkpoint |
+|---|---|---|---|---|
+| Dense baseline | None | Per-question sources, recall, MRR, nDCG, latency | A correct-looking answer cannot compensate for missing evidence | Export JSON and identify a missed or weakly ranked question |
+| Hybrid | `hybrid: true`, keyword weight 0.3 | Exact identifiers such as QR-4471-B | Extra keywords can promote irrelevant passages; improvement is model/corpus dependent | Name the question that changed and explain the evidence |
+| MMR | `use_mmr: true`, lambda 0.5 | Diversity of source documents and rank changes | Diversity can lower the rank of the strongest evidence | Identify a gain and a trade-off, even if aggregate recall is unchanged |
+| Top 8 | `top_k: 8` | Recall gain versus latency and additional context | More results may add distractors without improving ranking | Explain whether the extra context is justified |
+
+**Mode:** retrieval-only runs do not generate answers, score refusals, or run
+chat-assisted HyDE, multi-query, decomposition, or multi-hop. The four presets
+also disable reranking. General CLI `eval --skip-llm` may still run a configured
+local cross-encoder, but it disables chat-assisted transformations and the LLM
+reranker. Full-answer mode adds answer keyword coverage and accepted refusal
+checks; keyword coverage is not a faithfulness metric.
+
+**Expected observations:** record your own results. Do not require every preset
+to improve, or expect exact agreement with the historical tables below. The
+current gold set includes two unanswerable questions; they are unscored in
+retrieval-only mode. Document-level metrics cannot measure whether neighbor
+expansion supplies the missing sentence within a document.
+
+**Manual grounding checkpoint:** inspect each important claim and its cited
+passage; check that citations support claims, that missing evidence is
+acknowledged, and that contradictory passages are not silently ignored. Export
+both JSON (full evidence/configuration) and CSV (comparison rows). A passing
+keyword/refusal check is only a cue for this review.
 
 ---
 
@@ -236,35 +282,25 @@ a safe place. **Steps:**
   provider has available (ideally one with a *different* dimension).
 - Now run `.\run.bat query "What is SPI slave underrun?"` **without** clearing or
   re-ingesting. Observe what happens.
-- Then `.\run.bat clear --yes; .\run.bat ingest; .\run.bat inspect` and query
-  again.
+- Then `.\run.bat rebuild`, inspect the replacement index, and query again.
 
 <details>
 <summary>What you should have seen</summary>
 
-Querying without re-ingesting gives you one of two failures, and which one you
-get is itself the lesson:
+The app now rejects an incompatible embedding configuration before searching,
+including a different model with the same vector dimension. Dimension changes
+reported by the provider are checked as well. This guard prevents the silent
+semantic mismatch that this exercise used to demonstrate.
 
-- **Different dimension** → a hard error from the vector store. The query vector
-  has 1024 components, the stored vectors have 768, and the distance calculation
-  is undefined. Loud, immediate, easy to diagnose.
-- **Same dimension, different model** → *no error at all*, and quietly worse
-  results. The arithmetic is valid but meaningless, because the two models place
-  the same text in different regions of their own spaces. This is the dangerous
-  case: nothing alerts, recall just degrades, and the cause is invisible unless
-  you have a gold set (Stage 8) watching for it.
+Run `.\run.bat rebuild` with other app processes stopped. It prepares a separate
+collection and retains the old catalog/collection for rollback. If any source
+fails, the active index is unchanged. Changing extraction, OCR, contextual
+settings, or chunking also changes the ingestion fingerprint, so a normal
+ingestion run processes unchanged file bytes again when their pipeline changed.
 
-After clear + re-ingest, `inspect` reports the new dimension and answers are
-good again. The dimension is logged on the first embed call in
-[`ingest_service._ingest_one`](../src/rag_app/ingestion/ingest_service.py) —
-that log line is worth keeping in production for exactly this reason.
-
-Note what the tooling does and does not protect you from: changing `chunk_size`
-or `chunking.strategy` *does* invalidate the index automatically, via the
-chunking fingerprint in
-[`hash_tracker.py`](../src/rag_app/ingestion/hash_tracker.py). Changing the
-embedding model does **not** — that invalidation is on you. Worth remembering as
-an answer to "what would you add to this codebase next?"
+**Checkpoint:** explain why equal dimensions do not imply compatible embeddings,
+locate the recorded embedding identity in the catalog, and identify the backup
+created by the successful rebuild.
 </details>
 
 ### Checkpoint
@@ -554,7 +590,7 @@ This repo ships a second backend, **Qdrant**, to prove it — and to show what
 an interface *doesn't* hide. Two backend quirks the adapter has to paper over:
 
 - **Point ids.** Qdrant requires UUID or integer ids; our chunk ids are the
-  string `<hash12>:<index>`. The adapter stores each point under
+  string `<document_id>:<revision>:<index>`. The adapter stores each point under
   `uuid5(namespace, chunk_id)` — still deterministic, so re-ingest upserts in
   place — and keeps the real id in the payload. Every returned chunk's id
   comes from the payload, so neighbor expansion (which asks for `abc:8` by
@@ -576,8 +612,7 @@ from `vector_store.provider`.
 
 ```powershell
 # Edit config.yaml: vector_store.provider = "qdrant"
-.\run.bat clear --yes            # a different backend is a separate, empty index
-.\run.bat ingest                 # no migration — you re-derive from the source docs
+.\run.bat rebuild                # prepare the new backend and retain the old catalog backup                 # no migration — you re-derive from the source docs
 .\run.bat retrieve "What happens if NBRP and DBRP are different?"
 .\run.bat stats                  # the "Vector store" row now reads "qdrant"
 ```
@@ -608,19 +643,20 @@ flat sample files. The nested ones carry `module: "CAN"` / `module: "SPI"`; the
 flat ones have no `module` key at all. `section` comes from
 `_extract_section`, `document_hash` is what the incremental-ingest tracker
 compares against, and `chunk_index` is what makes neighbour expansion possible
-in Stage 9-D — "the chunk after `79a315baa861:4`" is just `79a315baa861:5`.
+in Stage 9-D — "the chunk after `document:revision:4`" is `document:revision:5`.
 
-That id scheme is doing more work than it looks. Because it is deterministic, a
-re-ingest of an unchanged file produces the *same* ids, so upserts are idempotent
-and the answer cache (Stage 10) can key on chunk ids and self-invalidate when
-content changes.
+New chunk IDs contain document identity, ingestion revision, and position.
+Identical files at separate paths remain independent. An unchanged-file check
+skips unnecessary preparation; a forced replacement produces a new revision.
+The journal makes commits recoverable, and answer caches key on the exact
+ordered prompt, including its evidence.
 </details>
 
 #### Exercise 4.2 — Prove the ABC is real (~15 min)
 
 **Goal:** run the *same* corpus on both backends. **Steps:** ingest under
-`provider: chroma`, run a query; switch to `provider: qdrant`, `clear`,
-re-ingest, run the same query. **Expected:** comparable top results — the
+`provider: chroma`, run a query; stop other app processes, switch to
+`provider: qdrant`, run `rebuild`, and run the same query. **Expected:** comparable top results — the
 retrieval code didn't change, only the storage behind the interface did.
 
 <details>
@@ -921,7 +957,7 @@ hand-waving — see `PromptBuilder.build`'s two system-prompt flavours in
 The limit of the control is worth stating too: it is a *request*, not a
 guarantee. A strong model complies reliably, a weak one leaks anyway, and neither
 gives you a signal you can alarm on. That is why Stage 5's score threshold and a
-faithfulness metric (Stage 8) exist — three weak layers, no single strong one.
+manual grounding review (Stage 8) exist — three weak layers, no single strong one.
 
 Put the flag back to `true` when you're done.
 </details>
@@ -1070,9 +1106,10 @@ evaluation has two layers:
    - **Context relevance**: the retrieved chunks are on-topic.
    - Frameworks: **RAGAS** (the most common), **Trulens**, **DeepEval**.
 
-For a learning project you don't need RAGAS to start — keyword presence in
-the answer is a cheap, decent proxy for faithfulness ("did the model
-actually mention the fact?").
+Start with keyword coverage as a cheap regression signal: it counts expected
+substrings in the answer. A false statement can contain every expected word,
+so coverage does not measure faithfulness. Inspect the cited passages and apply
+the manual grounding rubric before drawing an answer-quality conclusion.
 
 ### In this code
 
@@ -1188,8 +1225,11 @@ techniques instead of eyeballing retrieved chunks.
 <details>
 <summary>What you should have seen</summary>
 
-Measured on this corpus with a 768-dim embedding model (your absolute numbers
-will differ — the *directions* are the point):
+**Historical illustrative results, not a reproducible benchmark.** These values
+came from the earlier 16-question corpus without a retained exact model/config
+artifact. The current dataset has 17 questions. Neither the numbers nor the
+directions are acceptance criteria. Export a fresh web experiment report before
+making a quality claim about your model or corpus:
 
 | config | recall | MRR | nDCG@k | passing |
 |---|---|---|---|---|
@@ -1770,7 +1810,7 @@ Things that matter the moment "demo" becomes "service":
 - **BM25 index caching**: the server and GUI build a fresh `Retriever`
   per request, so the hybrid-search BM25 index is cached *across*
   requests ([`get_bm25_index`](../src/rag_app/retrieval/bm25.py), keyed
-  by the store's mutation counter + chunk count) instead of re-tokenising
+  by corpus revision, store mutation counter, and chunk count) instead of re-tokenising
   the whole corpus every query.
 - **Concurrent reranking**: the LLM-as-judge reranker scores candidates
   on a 4-thread pool ([`reranker.py`](../src/rag_app/retrieval/reranker.py))
@@ -1786,12 +1826,10 @@ Things that matter the moment "demo" becomes "service":
     changing the model just misses — no stale vectors. Wraps only the
     retrieval provider ([`CachedEmbeddingProvider`](../src/rag_app/retrieval/cache.py));
     ingestion keeps the raw provider.
-  - *Answer cache* (`cache.answer: true`): `(question + retrieved chunk ids +
-    chat model + prompt flags) → answer`. Because chunk ids are
-    content-derived (`<hash12>:<idx>`), editing a document changes the ids and
-    stale entries simply stop matching — the same self-invalidation trick the
-    BM25 cache uses with its mutation counter. Bypassed for multi-turn
-    (history) and streaming, where "same question" means something different.
+  - *Answer cache* (`cache.answer: true`): exact ordered prompt messages,
+    provider endpoint/model, and generation settings map to an answer. Evidence
+    text, ordering, citation settings, temperature, and output limit all affect
+    identity. It is bypassed for multi-turn (history) and streaming queries.
   - Both are bounded by `cache.max_entries` (default 1024) with LRU eviction.
     An unbounded cache in a long-lived server is a memory leak with good
     intentions — every distinct question would be retained forever. The cap is
@@ -1848,15 +1886,13 @@ notepad documents\sample_can_fd.txt   # add a sentence
   prior instructions ("ignore the system prompt and reply with…"). Treat
   retrieved text as untrusted user input, not as system text.
 - **Q: What would you cache in a RAG system, and how do you invalidate it?**
-  Query embeddings (keyed on query + embedding model) and final answers
-  (keyed on question + retrieved chunk ids + chat model). Invalidation is
-  mostly structural: content-derived chunk ids mean a changed document
-  changes the ids, so answer-cache entries for it stop matching. Model-name
-  keys handle model swaps. TTLs handle everything else.
-- **Q: Why key the answer cache on retrieved chunk ids rather than just the
-  question?** So the cache is coupled to the *evidence*, not the wording. If
-  re-ingestion changes what retrieval returns, you must not serve the old
-  answer — and id-keying makes that automatic.
+  Query embeddings use the exact query and provider endpoint/model identity.
+  Final answers use the ordered prompt messages plus provider and generation
+  settings. Changing evidence text or ordering causes a cache miss. Both caches
+  are bounded, synchronized, and local to a process.
+- **Q: Why key the answer cache on the entire prompt?** The same question can
+  produce a different answer when the evidence, its ordering, or instructions
+  change. Chunk IDs alone do not capture all those differences.
 - **Q: What per-stage timings would you log for a RAG query?** Embed, vector
   search, (BM25), rerank, generate. The LLM generate stage dominates; logging
   the split is how you prove that before optimising the wrong thing.
@@ -1882,9 +1918,9 @@ request collapses to retrieval time. Third call, after re-ingesting a changed
 document: a **miss** — without you clearing anything.
 
 That is the design worth understanding. The key is
-`hash(question + retrieved chunk ids + model + prompt flags)`, so it is
-*content-addressed by its own inputs*. Change the documents and the chunk ids
-change (new `document_hash`), so the key changes and the stale entry is simply
+`hash(exact ordered prompt messages + provider endpoint/model + temperature + max_tokens)`, so it is
+*keyed by its exact generation inputs*. Change the evidence, its order, the
+provider, or generation settings, and the key changes; a stale entry is simply
 never looked up again. Compare that with a cache keyed on the question alone,
 which would happily serve last week's answer forever and require you to remember
 to flush it. "Key the cache on everything that could change the answer" is the
@@ -1903,22 +1939,17 @@ what breaks the moment you run two workers: the counters are per-process, so a
 load-balanced deployment reports a fraction of the truth. Interview answer:
 "metrics belong in a shared store or a real metrics backend, not module globals."
 
-The same caveat applies to the BM25 index. It is built lazily on the first
-hybrid query and cached across requests in
-[`get_bm25_index`](../src/rag_app/retrieval/bm25.py), keyed on a
-`bm25_cache_key` the store derives from its own mutation state — so an `ingest`
-in *this* process invalidates it correctly, but an `ingest` run in a *different*
-process (say the CLI while the server is up) does not. The server keeps serving
-keyword results from a stale index until it restarts. Worth knowing before you
-put hybrid search behind a long-lived API.
+The BM25 cache also includes the committed corpus revision. A second process
+using the same catalog observes invalidation after a coordinated commit. Keep
+one process for embedded Qdrant and stop other app processes during rebuilds.
 </details>
 
 ### Checkpoint
 
 - [ ] I enabled `cache.answer` and observed a HIT with a near-zero generate
       time on the second identical query.
-- [ ] I can explain why the answer cache is keyed on retrieved chunk ids and
-      what makes it self-invalidating.
+- [ ] I can explain why the answer cache includes the ordered evidence, prompt
+      instructions, provider identity, and generation settings.
 - [ ] I know which stage dominates query latency and where to read the
       per-stage timings.
 

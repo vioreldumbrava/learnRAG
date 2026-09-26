@@ -42,6 +42,14 @@ class ChromaVectorStore(VectorStore):
 
     # ----- writes ----------------------------------------------------------
 
+    def fork_collection(self, collection_name: str) -> "ChromaVectorStore":
+        return ChromaVectorStore(self.persist_dir, collection_name)
+
+    def delete_ids(self, ids: list[str]) -> None:
+        for start in range(0, len(ids), 128):
+            self._collection.delete(ids=ids[start:start + 128])
+        self._mutations += 1
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -58,12 +66,11 @@ class ChromaVectorStore(VectorStore):
         documents = [c.text for c in chunks]
         metadatas = [c.metadata for c in chunks]
 
-        self._collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        for start in range(0, len(ids), 128):
+            self._collection.upsert(
+                ids=ids[start:start + 128], embeddings=embeddings[start:start + 128],
+                documents=documents[start:start + 128], metadatas=metadatas[start:start + 128],
+            )
         self._mutations += 1
 
     def delete_by_document_hash(self, document_hash: str) -> None:

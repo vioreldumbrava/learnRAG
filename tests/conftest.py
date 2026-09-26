@@ -130,6 +130,11 @@ class FakeVectorStore(VectorStore):
             del self.chunks[cid]
             del self.embeddings[cid]
 
+    def delete_ids(self, ids: list[str]) -> None:
+        for cid in ids:
+            self.chunks.pop(cid, None)
+            self.embeddings.pop(cid, None)
+
     def stats(self) -> dict:
         return {"count": len(self.chunks)}
 

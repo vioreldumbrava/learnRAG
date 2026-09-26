@@ -16,3 +16,4 @@ class EvalQuestion(BaseModel):
     expected_sources: list[str] = Field(default_factory=list)
     expected_relevance: dict[str, float] = Field(default_factory=dict)
     expected_contains: list[str] = Field(default_factory=list)
+    accepted_refusals: list[str] = Field(default_factory=list)

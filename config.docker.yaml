@@ -54,6 +54,8 @@ retrieval:
 prompt:
   answer_only_from_context: true
   include_sources: true
+  max_history_turns: 10
+  max_prompt_chars: 24000
 
 # OCR needs the image built with `--build-arg WITH_OCR=true` (installs
 # tesseract-ocr + poppler-utils and the Python OCR packages).
@@ -65,3 +67,6 @@ ocr:
 server:
   host: "0.0.0.0"   # required inside a container
   port: 8000
+  allowed_document_roots: []
+  upload_max_bytes: 26214400
+  upload_max_files: 20

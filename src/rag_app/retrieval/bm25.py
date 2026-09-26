@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from threading import RLock
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -100,6 +101,7 @@ class BM25Index:
                     text=chunk.text,
                     metadata=chunk.metadata,
                     score=-bm25_score,
+                    score_type="negative_bm25",
                 )
             )
         return results
@@ -126,16 +128,21 @@ class BM25Index:
 # One entry per (persist_dir, collection); replaced whenever the store's
 # cache key changes.
 _INDEX_CACHE: dict[tuple, BM25Index] = {}
+_INDEX_LOCK = RLock()
 
 
 def get_bm25_index(store: VectorStore) -> BM25Index:
+    with _INDEX_LOCK:
+        return _get_bm25_index(store)
+
+
+def _get_bm25_index(store: VectorStore) -> BM25Index:
     """Build (or reuse) a BM25 index over every chunk in `store`.
 
     Stores that implement `bm25_cache_key()` (ChromaVectorStore does) get
     process-wide caching: the key changes whenever the store mutates through
-    this process or its chunk count changes, which invalidates the entry.
-    Out-of-process edits that keep the chunk count identical are not
-    detected — restart the server (or re-ingest through it) in that case.
+    this process, its chunk count changes, or its catalog revision changes.
+    Coordinated out-of-process commits therefore also invalidate the cache.
 
     Stores without a cache key (e.g. in-memory test fakes) get a fresh
     index per call.
@@ -145,6 +152,11 @@ def get_bm25_index(store: VectorStore) -> BM25Index:
 
     key_fn = getattr(store, "bm25_cache_key", None)
     key = key_fn() if key_fn is not None else None
+
+    coordinator = getattr(store, "coordinator", None)
+    if key is not None and coordinator:
+        from rag_app.ingestion.hash_tracker import HashTracker
+        key = (*key, HashTracker(coordinator.path).metadata.get("revision"))
 
     if key is not None:
         cached = _INDEX_CACHE.get(key)
@@ -206,6 +218,7 @@ def reciprocal_rank_fusion(
             text=chunk_map[cid].text,
             metadata=chunk_map[cid].metadata,
             score=rrf_score,
+            score_type="rrf",
         )
         for cid, rrf_score in ranked
     ]

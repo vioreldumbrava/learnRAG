@@ -33,6 +33,7 @@ class RetrievedChunk(BaseModel):
     text: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     score: float | None = None
+    score_type: str = "cosine_distance"
 
 
 class ChatMessage(BaseModel):

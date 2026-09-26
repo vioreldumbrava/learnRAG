@@ -258,10 +258,11 @@ class SettingsTab(QWidget):
         path = self.current_config_path()
         data = self.values_as_config_dict()
         try:
+            AppConfig.model_validate(data)
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(data, f, sort_keys=False)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return
 
@@ -304,16 +305,11 @@ class SettingsTab(QWidget):
             return
 
         errors: list[str] = []
-        if chroma_dir.exists():
-            try:
-                shutil.rmtree(chroma_dir)
-            except OSError as exc:
-                errors.append(f"Vector store: {exc}")
-        if index_file.exists():
-            try:
-                index_file.unlink()
-            except OSError as exc:
-                errors.append(f"Index file: {exc}")
+        try:
+            from rag_app.vectorstores.factory import build_vector_store
+            build_vector_store(cfg).coordinator.clear()
+        except Exception as exc:
+            errors.append(str(exc))
 
         if errors:
             QMessageBox.critical(
@@ -533,7 +529,7 @@ class SettingsTab(QWidget):
         self.store_provider_combo.setToolTip(
             "Vector store backend. Chroma is embedded and default; Qdrant needs\n"
             "the [qdrant] extra. Switching backends is a separate index — you\n"
-            "must re-ingest after changing this."
+            "must run 'rag-app rebuild' after changing this."
         )
         form.addRow("Vector store:", self.store_provider_combo)
 
