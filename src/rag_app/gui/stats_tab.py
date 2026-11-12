@@ -79,7 +79,9 @@ class StatsTab(QWidget):
             self.compatibility_label.setText(index)
             self.cache_label.setText(
                 f"Embedding: {cfg.cache.embedding}; answer: {cfg.cache.answer}; "
-                f"max entries: {cfg.cache.max_entries}; timing logs: {cfg.observability.log_timings}"
+                f"max entries: {cfg.cache.max_entries}; timing logs: {cfg.observability.log_timings}; "
+                f"PDF tables: {cfg.extraction.pdf_tables}; source code: {cfg.extraction.code_files}; "
+                f"answer judge: {cfg.evaluation.judge_model or 'the chat model'}"
             )
             self.metrics_label.setText(json.dumps(metrics) if metrics else "No queries this session")
             self.status_label.setText("Readiness checked.")

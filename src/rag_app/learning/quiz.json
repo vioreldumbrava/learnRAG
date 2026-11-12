@@ -1,0 +1,597 @@
+[
+ {
+  "id": "1",
+  "section": "Fundamentals",
+  "stage": 1,
+  "question": "What is RAG, in one paragraph?",
+  "answer": "Retrieval-Augmented Generation. At query time you retrieve relevant text snippets from your own data, paste them into the prompt, and ask an LLM to answer using that context. The model doesn't memorise your data; each query sees only the few chunks the retriever surfaced. It's how you get an LLM to answer questions over corpora it was never trained on, with attribution, and without re-training."
+ },
+ {
+  "id": "2",
+  "section": "Fundamentals",
+  "stage": 1,
+  "question": "When would you reach for RAG vs fine-tuning?",
+  "answer": "RAG when the task is factual and the facts change or need attribution. Fine-tuning when the task is about *style, format, or behaviour* the model needs to internalise. They're complementary, not alternatives — many production systems do both."
+ },
+ {
+  "id": "3",
+  "section": "Fundamentals",
+  "stage": 1,
+  "question": "Why not just paste all documents into the prompt (long-context)?",
+  "answer": "Three reasons: (1) cost scales linearly with token count, (2) the \"lost in the middle\" effect — LLMs attend less to the middle of long prompts, (3) most corpora don't fit even in 1M-token windows. RAG is selective long-context."
+ },
+ {
+  "id": "4",
+  "section": "Fundamentals",
+  "stage": 1,
+  "question": "Walk me through a RAG query end-to-end.",
+  "answer": "Embed the question with the same model used at ingest, search the vector store for the K nearest chunks, build a prompt with a system instruction + the context block + the question, send to the LLM, return the answer with source attribution. See RagService.answer — it's literally five lines."
+ },
+ {
+  "id": "5",
+  "section": "Fundamentals",
+  "stage": 1,
+  "question": "What are the two phases of RAG and why are they separate?",
+  "answer": "Ingestion (rare, runs when docs change) and query (runs every user question). They're separate because they have different performance and cost profiles — ingestion is batchable and you only do it on changes; query is latency-sensitive and runs constantly. See ingestion/ vs retrieval/."
+ },
+ {
+  "id": "6",
+  "section": "Embeddings",
+  "stage": 2,
+  "question": "What is an embedding?",
+  "answer": "A fixed-length vector of floats that represents the semantic meaning of a text. Semantically similar texts have vectors close together in the embedding space (measured by cosine similarity)."
+ },
+ {
+  "id": "7",
+  "section": "Embeddings",
+  "stage": 2,
+  "question": "Why must the same embedding model be used for ingestion and query?",
+  "answer": "Different models live in different geometries — a vector from model A and a vector from model B are not comparable even if they have the same dimension. Distance only makes sense within one model's space."
+ },
+ {
+  "id": "8",
+  "section": "Embeddings",
+  "stage": 2,
+  "question": "What happens if you change the embedding model mid-flight?",
+  "answer": "Catastrophic silent failure: search starts returning irrelevant chunks because you're comparing vectors from two different spaces. The fix is always \"clear the index and re-ingest.\" This is one of the top production incidents in RAG."
+ },
+ {
+  "id": "9",
+  "section": "Embeddings",
+  "stage": 2,
+  "question": "Bi-encoder vs cross-encoder?",
+  "answer": "A bi-encoder embeds query and passage independently — fast, you can pre-compute passage embeddings. A cross-encoder feeds (query, passage) jointly through a transformer — much more accurate, too slow for first-pass retrieval. Standard production pattern: bi-encoder retrieves top-50, cross-encoder reranks to top-5."
+ },
+ {
+  "id": "10",
+  "section": "Embeddings",
+  "stage": 2,
+  "question": "How does embedding dimension affect quality?",
+  "answer": "Marginally. Higher dim costs more storage and slightly slower search, but doesn't reliably help retrieval quality. Training data and objective matter more than dimension count."
+ },
+ {
+  "id": "11",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "Why chunk at all? Why not embed whole documents?",
+  "answer": "Embedding models have input limits. Even if they didn't, a single vector for a 200-page doc can't represent any one fact well enough to be retrieved — the meaning gets averaged into noise. Chunks let specific facts be addressable."
+ },
+ {
+  "id": "12",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "What's the trade-off between small and large chunks?",
+  "answer": "Small chunks → precise matches but missing context, and a specific fact may need siblings to make sense. Large chunks → richer context but lower retrieval precision and noisier matches. Tune to the question style — Q&A wants 500–800 chars; summarisation tolerates 2000+."
+ },
+ {
+  "id": "13",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "Why use overlap?",
+  "answer": "Important facts often live near chunk boundaries. Overlap means the same fact gets embedded twice from slightly different contexts, doubling its chance of being retrieved. 10–25% of chunk size is typical."
+ },
+ {
+  "id": "14",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "How does this project chunk?",
+  "answer": "Paragraph-aware with overlap, falling back to a character window for oversized paragraphs. See Chunker.split. Splits on blank lines first, packs paragraphs greedily up to chunk_size, carries chunk_overlap characters into the next chunk."
+ },
+ {
+  "id": "15",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "What chunking strategies exist, in order of sophistication?",
+  "answer": "Fixed window → sliding window with overlap → paragraph / sentence aware → recursive (try big separator, fall back to smaller) → semantic (embed sentences, group by similarity). Strategy choice matters more than chunk size in most cases."
+ },
+ {
+  "id": "15a",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "How do you ingest scanned PDFs or images?",
+  "answer": "Detect the image-only pages — after normal text extraction they come back near-empty — and run those through an OCR engine (Tesseract in this project) at ingest time. The recovered text is then chunked and embedded like any other document. OCR is an ingest-time step only; it never runs during a query. See ocr.enabled / extract_text."
+ },
+ {
+  "id": "15b",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "Why gate OCR on min_chars_per_page instead of always running it?",
+  "answer": "OCR is slow and introduces recognition errors. Born-digital pages already have perfect text, so OCR'ing them wastes time and can lower quality. Thresholding the extracted character count routes only the pages that actually need it to the OCR path."
+ },
+ {
+  "id": "15c",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "What is contextual retrieval and what failure does it fix?",
+  "answer": "A chunk lifted out of a long document loses the context that makes it findable — \"the company reported a 3% rise\" loses which company. At ingest, the chat LLM writes 1-2 sentences situating each chunk in its document; that prefix is prepended before embedding, so the chunk's vector (and its BM25 tokens) carry the missing context. Anthropic's result (Sep 2024) is that contextual embeddings + contextual BM25 compound. Set chunking.contextual: true."
+ },
+ {
+  "id": "15d",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "Why is contextual retrieval an ingest-time technique, and what's the cost?",
+  "answer": "Because the enrichment is a property of the stored chunk, not the query — pay it once, not on every search. The cost is one chat-LLM call per chunk at ingest (minutes per document with a local model). Queries are completely unaffected."
+ },
+ {
+  "id": "15e",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "Do you store the original chunk text or the contextualized text?",
+  "answer": "This project stores the contextualized text (prefix + original) so BM25 indexes it too, and keeps the raw prefix in metadata[\"context_prefix\"]. Storing only the original would make the sparse index miss the added context; storing both (as text + recoverable metadata) is the pragmatic middle, at the cost of slightly longer prompts."
+ },
+ {
+  "id": "15f",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "How do you make tables in PDFs retrievable?",
+  "answer": "Linearize them: write each row with its column names (Register: SMPR, Reset: 0x0003) so a row is a self-contained fact wherever a chunk boundary falls. Plain extraction gives bare values whose header may sit in another chunk. Here it is extraction.pdf_tables, via pdfplumber (text_extractor.py); the cost is longer text."
+ },
+ {
+  "id": "15g",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "How do citations get page numbers?",
+  "answer": "From metadata, not from the model. Extraction keeps one segment per page, the document is chunked as a whole, and each chunk is then mapped back to the pages it covers and stored with page_start / page_end (locator.py). Chunking page by page would also give page numbers, but it breaks sentences and tables that cross a page break."
+ },
+ {
+  "id": "15h",
+  "section": "Chunking",
+  "stage": 3,
+  "question": "How is chunking source code different from chunking prose?",
+  "answer": "The unit is a definition, not a size: split at function and class boundaries, keep the signature and doc comment with the body, and store the symbol and line range. This project uses brace depth and indentation (code_chunker.py); production systems use a parser such as tree-sitter."
+ },
+ {
+  "id": "16",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "What's stored in the vector DB?",
+  "answer": "ID, embedding vector, the chunk text itself, and metadata (source_file, chunk_index, document_hash, file_type in this project). The original documents stay on disk as source of truth — the vector store is a rebuildable index. See ChromaVectorStore."
+ },
+ {
+  "id": "17",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "What is HNSW and why is it the default index?",
+  "answer": "Hierarchical Navigable Small World — a layered proximity graph. You start on the top (sparse) layer with long jumps, greedily walk toward the query, then descend to denser layers for the final refinement. Sub-millisecond search at 10M+ vectors with > 95% recall. Used by Chroma, Qdrant, Weaviate, pgvector."
+ },
+ {
+  "id": "18",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "What's an ANN index in general?",
+  "answer": "Approximate Nearest Neighbour — algorithms that find \"the K nearest vectors with high probability\" instead of exact KNN. Trades a few percent of recall for orders-of-magnitude speedup. Necessary above ~100k vectors."
+ },
+ {
+  "id": "19",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "When would you pick IVF + PQ over HNSW?",
+  "answer": "When you're memory-bound. PQ (product quantisation) compresses each vector 8–32×; IVF clusters them for cheap candidate selection. Used for billion-scale stores that don't fit in RAM uncompressed."
+ },
+ {
+  "id": "20",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "Is the vector store the source of truth?",
+  "answer": "No — it's derived data. Keep the original docs; treat the store as a cache that you can rebuild any time (and must rebuild if you change the embedding model). This project enforces that mental model by keeping documents/ separate from storage/chroma/."
+ },
+ {
+  "id": "20a",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "What breaks when you swap vector databases?",
+  "answer": "Not the retrieval logic — it talks to a VectorStore interface. What breaks are the backend rules the adapter must reconcile: id formats (Qdrant needs UUID/int, so string chunk ids get uuid5-mapped), score orientation (similarity vs distance), and when the vector dimension must be declared (Qdrant up front, Chroma inferred). Swapping is a re-ingest, never a data migration."
+ },
+ {
+  "id": "20b",
+  "section": "Vector stores & indexes",
+  "stage": 4,
+  "question": "Similarity vs distance — why does orientation matter?",
+  "answer": "Higher-is-better (cosine similarity) and lower-is-better (cosine distance) are the same information inverted. If half your code assumes one and half assumes the other, thresholds and sort orders silently flip. This project standardises on distance (lower = closer), so the Qdrant adapter converts 1 - similarity at the boundary."
+ },
+ {
+  "id": "21",
+  "section": "Retrieval",
+  "stage": 5,
+  "question": "Cosine vs L2 vs dot product — when does it matter?",
+  "answer": "Almost always pick cosine for text embeddings — modern embedding models are trained with a cosine objective. L2 and cosine agree on ranking when vectors are normalised. Dot product is cosine without the normalisation step — fastest, but only meaningful for unit-length vectors."
+ },
+ {
+  "id": "22",
+  "section": "Retrieval",
+  "stage": 5,
+  "question": "What does top_k actually control?",
+  "answer": "How many chunks to retrieve per query. Too low → miss the answer. Too high → wastes context window, dilutes signal, costs more. 5 is a reasonable default for short docs; 10–20 for complex synthesis questions."
+ },
+ {
+  "id": "23",
+  "section": "Retrieval",
+  "stage": 5,
+  "question": "How do you handle \"I don't know\" in RAG?",
+  "answer": "Two layers: (1) a score threshold on retrieval so really-far matches get dropped, (2) a system prompt that explicitly says \"answer only from context; if it isn't there, say I don't know.\" Both are needed — either alone is leaky."
+ },
+ {
+  "id": "24",
+  "section": "Retrieval",
+  "stage": 5,
+  "question": "What's the main failure mode of pure dense vector retrieval?",
+  "answer": "Rare / opaque tokens. Embeddings compress; identifiers like ERR080082 or CHEN0 get smeared because the embedding model doesn't have dense training data for them. The standard fix is hybrid search."
+ },
+ {
+  "id": "25",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What is hybrid search?",
+  "answer": "Combining a dense vector retriever with a sparse keyword retriever (BM25 most commonly), then merging the result lists. Dense covers \"meaning,\" sparse covers \"exact tokens.\" Merge with Reciprocal Rank Fusion (RRF) — robust, no score normalisation needed, one less hyperparameter than a weighted sum."
+ },
+ {
+  "id": "26",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What's BM25?",
+  "answer": "A 30-year-old sparse keyword scoring algorithm — souped-up TF-IDF with document-length normalisation and term-rarity weighting. Knows nothing about meaning, but excellent at exact-token recall. Python: rank_bm25. The sparse half of every hybrid search system."
+ },
+ {
+  "id": "27",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What's a cross-encoder reranker and when would you add one?",
+  "answer": "A model that scores (query, passage) jointly to produce a relevance score. Too slow for first-pass retrieval but much more accurate. Two-stage pipeline (bi-encoder retrieves top-50 → cross-encoder reranks to top-5) is the standard production accuracy upgrade. Examples: bge-reranker-v2, Cohere Rerank."
+ },
+ {
+  "id": "28",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What is MMR and when is it useful?",
+  "answer": "Maximal Marginal Relevance — re-ranks the top-K to balance \"relevance to the query\" against \"dissimilarity to already-picked chunks.\" Reduces near-duplicates in the result set. Useful when source documents overlap heavily, or when you want diverse citations."
+ },
+ {
+  "id": "29",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What is HyDE?",
+  "answer": "Hypothetical Document Embeddings. Ask the LLM to write a hypothetical answer to the question, embed that, retrieve with the hypothetical's embedding. Often beats the literal question because \"answers look like answers\" in embedding space. Extra LLM call adds latency."
+ },
+ {
+  "id": "29a",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What is multi-hop (iterative) retrieval and what does it solve?",
+  "answer": "Some answers need facts spread across chunks that don't all match the original query, so one retrieval round misses a side. Multi-hop retrieves, shows the LLM the results, lets it write a follow-up search query for what's still missing, retrieves again, and merges the hops with RRF. It's the fix for \"bridge\" questions. Implemented here via retrieval.multi_hop."
+ },
+ {
+  "id": "29b",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "Multi-hop vs query decomposition?",
+  "answer": "Decomposition plans all sub-questions up front from the question text alone. Multi-hop conditions each follow-up on what the previous hop actually retrieved — a feedback loop rather than a static plan. Both merge with RRF; multi-hop is strictly more adaptive and strictly more LLM calls."
+ },
+ {
+  "id": "29c",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "How do you stop a multi-hop loop from running forever?",
+  "answer": "Four guards, any of which ends it: a hard hop cap (multi_hop_max_hops), a NONE reply meaning \"nothing else needed\", a check that the follow-up isn't a repeat of an earlier query, and a check that the hop actually found new chunks."
+ },
+ {
+  "id": "29d",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What is agentic RAG, and what does it cost you?",
+  "answer": "The model runs the retrieval loop: it picks an action (search for X, read around passage N, list the files, stop), sees the result, and picks again. A fixed pipeline cannot serve a question with two unrelated parts in one search; an agent can issue two. The costs: a model call per step before the answer starts, runs that differ from each other (harder to debug and to evaluate), and strong dependence on the model's planning. So you bound it — step budget, no repeated action, fallback to the fixed pipeline when the replies cannot be parsed — and you make it earn its place on an eval set. In this project: retrieval/agent.py, retrieval.agentic, agent_max_steps. The agent only gathers evidence; the answer comes from the normal prompt, so citations still work."
+ },
+ {
+  "id": "29e",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "Why would you parse actions from text instead of using function calling?",
+  "answer": "Portability and control. Native tool calling is a server feature whose format and reliability vary: hosted models do it well, local servers implement it unevenly, and small models often emit malformed calls. A two-line text protocol (THOUGHT: ... / ACTION: SEARCH: ...) works on any chat model, is trivial to log and read, and lets you decide what an unparseable reply means (here: one reminder, then fall back). With a strong hosted model and many tools with structured arguments, native function calling is the better choice; the loop around it is the same."
+ },
+ {
+  "id": "29f",
+  "section": "Retrieval",
+  "stage": 9,
+  "question": "What does a knowledge graph add to RAG, and what is GraphRAG?",
+  "answer": "Retrieval by entity and relationship instead of by similar wording. At ingest an LLM extracts entities and relations from each chunk; at query time the entities named in the question pull in the chunks that mention them and the chunks of related entities. That reaches evidence that shares no vocabulary with the question (\"NBRP\" retrieving the passage about DBRP, because the two must match). GraphRAG is Microsoft's full version: it also clusters the graph into communities and writes a summary of each, so corpus-wide questions can be answered from summaries. Costs: an LLM call per chunk (or more) at ingest, extraction errors baked into the index, and duplicate nodes unless you resolve entity names. This project implements the entity half (entity_graph.py, chunking.entity_graph + retrieval.graph) and not community summaries."
+ },
+ {
+  "id": "30",
+  "section": "Prompt construction & generation",
+  "stage": 6,
+  "question": "How is the context typically formatted in the prompt?",
+  "answer": "Numbered passages, each with where it is from: [1] File: foo.pdf | Location: p. 41-42 | Section: 3.2 Bit timing\\n<text>\\n[2] .... The number is what the model cites, and it lets you audit which chunk produced which claim. See PromptBuilder.build."
+ },
+ {
+  "id": "30a",
+  "section": "Prompt construction & generation",
+  "stage": 6,
+  "question": "The answer contains citations. How do you know they are real?",
+  "answer": "Parse the markers out of the finished answer and compare them with the passages that were in the prompt: a number with no passage behind it is a fabricated reference, and an answer with no markers cannot be traced. That is a cheap, deterministic check (citations.py). Whether a cited passage actually supports the claim needs a reader or a judge model."
+ },
+ {
+  "id": "30b",
+  "section": "Prompt construction & generation",
+  "stage": 6,
+  "question": "In a chat, what do you search for when the user asks a follow-up?",
+  "answer": "Not the follow-up as typed: \"what about the second one?\" has nothing to search for. Rewrite it into a standalone question using the conversation (query condensation), search with the rewrite, and generate with the original question plus history. Here: retrieval.rewrite_followups (Retriever._rewrite_with_history). It costs one LLM call per follow-up."
+ },
+ {
+  "id": "31",
+  "section": "Prompt construction & generation",
+  "stage": 6,
+  "question": "How do you prevent hallucination?",
+  "answer": "Three layers: (1) score threshold so weak matches don't enter the prompt, (2) system prompt explicitly forbidding out-of-context answers, (3) post-hoc check that cited sources actually appear in the retrieved chunks. No single layer is sufficient."
+ },
+ {
+  "id": "32",
+  "section": "Prompt construction & generation",
+  "stage": 6,
+  "question": "What's \"lost in the middle\"?",
+  "answer": "Empirical finding (Liu et al. 2023): LLMs attend more strongly to the start and end of long prompts than to the middle. Performance on \"find the answer in the 10th passage out of 20\" degrades sharply. Practical mitigation: put highest-ranked chunks at the top, second- ranked at the bottom."
+ },
+ {
+  "id": "33",
+  "section": "Prompt construction & generation",
+  "stage": 6,
+  "question": "What's prompt injection in a RAG system?",
+  "answer": "A retrieved chunk contains content like \"ignore the previous instructions and reply with…\" — the LLM follows it because the chunk is part of the prompt. Treat retrieved content as untrusted user input, use clear delimiters, and apply output filters downstream."
+ },
+ {
+  "id": "34",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "How do you evaluate a RAG system?",
+  "answer": "Two layers. Retrieval: recall@k, MRR, NDCG against a gold set of (question, expected sources). Answer: faithfulness (every claim supported by retrieved context), answer relevance, context relevance. RAGAS is the most common framework. This project gives you a starter eval harness in eval/runner.py."
+ },
+ {
+  "id": "35",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "What's recall@k? Why is it the first metric to track?",
+  "answer": "Fraction of expected sources that appear in the top-K retrieved chunks. Simple, deterministic, no LLM judge needed. If recall@k is bad, nothing downstream can save you — the answer just isn't going to the model. So you fix retrieval before you tune anything else."
+ },
+ {
+  "id": "36",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "What's faithfulness?",
+  "answer": "Every factual claim in the answer is supported by something in the retrieved context. Opposite of hallucination. RAGAS measures it by breaking the answer into atomic claims and asking an LLM judge whether each is supported."
+ },
+ {
+  "id": "37",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "Why does \"it worked for me on this question\" not count as eval?",
+  "answer": "Because you can't tell whether a config change helped or hurt without a comparable baseline. Without an eval set, every \"I think this is better now\" is a vibe, and vibes lie. Maintain a small (10–500 question) gold set and CI-gate on it."
+ },
+ {
+  "id": "37a",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "You have a corpus and no test questions. How do you get an eval set?",
+  "answer": "Three sources, in order of value. Questions people really asked (log them, or save them from chat sessions) because they carry real wording and real vocabulary gaps. Questions you write for cases you know are hard: an exact identifier, a fact split across two documents, a question with no answer. And synthetic questions: show an LLM one chunk, ask for a question that chunk answers, and you get the expected source for free. Synthetic ones are drafts, not tests, until someone has read them: they reuse the chunk's own words (so retrieval looks better than it is), some only make sense with the passage in view, and none of them needs more than one chunk. In this project: eval-set generate stores them as drafts that eval ignores until eval-set accept (eval/generate.py, eval/sets.py)."
+ },
+ {
+  "id": "37b",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "How far can you trust an LLM judge?",
+  "answer": "Far enough to rank two configurations over many questions, not far enough to certify one answer. Four limits to name: it is noisy (rerun and the score moves, especially with a small judge, so measure that difference first); a model grading its own answers is biased towards approval, so use a different and ideally stronger model; faithfulness is checked against the retrieved passages only, so an answer that repeats a wrong passage scores perfectly; and it costs extra calls per answer. Good practice: retrieval metrics for retrieval tuning (they are exact and free), the judge for answer quality, and a human reading the judged claims when the result matters. Here: eval/judge.py, --judge, evaluation.judge_model."
+ },
+ {
+  "id": "37c",
+  "section": "Evaluation",
+  "stage": 8,
+  "question": "Someone shows you a 2D plot of the embeddings with neat clusters. What do you ask?",
+  "answer": "How much of the variance the two axes keep, and which projection made it. A 2D picture of a 768-dimensional space discards most of the information: with PCA at 30% explained variance, two points that look adjacent can be far apart, and t-SNE or UMAP distort global distances even more while producing prettier clusters. So the plot is good for seeing structure (groups, outliers, duplicates) and useless for reading distances. Nearest neighbours must come from the full space. This project's embedding map prints the explained variance and shows each neighbour's true rank beside its rank on the map, so the disagreement is visible (analysis/embedding_map.py)."
+ },
+ {
+  "id": "38",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "Where does latency go in a RAG query?",
+  "answer": "Mostly the LLM call. Embed = 50–200 ms. Vector search = 10–50 ms. LLM generation = 200 ms – 30 s depending on model size and answer length. First lever: smaller chat model. Second: stream tokens to the user."
+ },
+ {
+  "id": "39",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "What's the most common RAG failure in production?",
+  "answer": "Retrieval misses — the right chunk isn't in the top-K. Logging top-K IDs and scores per query is how you triage. Fixes, in order: better chunking, raise top_k, add hybrid search, add a reranker. Here, rag-app retrieve \"...\" --trace shows what each stage found, so you can tell \"never retrieved\" from \"retrieved, then dropped\" (see trace.py)."
+ },
+ {
+  "id": "40",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "How do you handle stale data?",
+  "answer": "Detect source changes (hash, mtime, webhook) and re-ingest. This project does it via HashTracker — SHA-256 of the file bytes; unchanged files are skipped, changed files have their old chunks deleted by document_hash and re-embedded. Track index freshness in your observability stack."
+ },
+ {
+  "id": "41",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "What goes in your RAG observability?",
+  "answer": "Per query: the question, top-K IDs + scores, retrieval latency, generation latency, model used, prompt token count, the answer, and ideally a faithfulness score from an offline LLM judge. Without this, you can't debug retrieval misses or hallucinations after the fact. This project collects per-stage timings + cache counters in utils/metrics.py, shown in query --debug and at GET /api/stats."
+ },
+ {
+  "id": "41a",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "What would you cache in a RAG system?",
+  "answer": "Query embeddings (hash(query) → vector, keyed on the embedding model) and final answers (question + retrieved chunk ids + chat model → answer). Embeddings are cheap but repeated; answers are expensive and often repeated verbatim. Both are implemented here behind cache.embedding / cache.answer."
+ },
+ {
+  "id": "41b",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "How do you invalidate a RAG answer cache?",
+  "answer": "Mostly structurally. Because chunk ids are content-derived, re-ingesting a changed document changes its ids, so the retrieved id-set changes and old entries stop matching — no TTL needed. Keying on the chat model handles model swaps. You also bypass the cache for multi-turn and streaming, where \"same question\" isn't really the same request."
+ },
+ {
+  "id": "41c",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "Why key the answer cache on retrieved chunk ids, not just the question?",
+  "answer": "To couple the cache to the evidence. Two users asking the same question after a re-ingest should not get a pre-ingest answer. Id-keying makes the cache miss automatically the moment retrieval would return different chunks."
+ },
+ {
+  "id": "42",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "When would you build hybrid search vs add a reranker first?",
+  "answer": "Look at your queries. If you're seeing recall misses on exact identifiers and rare tokens, do hybrid first — it directly fixes that class. If recall@50 is fine but the top-5 ordering is wrong, do a reranker first — that's exactly what cross-encoders are for. They stack."
+ },
+ {
+  "id": "43",
+  "section": "Production & failure modes",
+  "stage": 10,
+  "question": "If you had one more day to improve RAG quality, what would you do?",
+  "answer": "Build (or curate) a 30-question eval set and run it. You learn more in a day of measurement than a week of feature work, and it tells you which feature actually helps next."
+ },
+ {
+  "id": "44",
+  "section": "Demo questions",
+  "stage": null,
+  "question": "Walk me through how this code knows whether to re-ingest a file.",
+  "answer": "HashTracker keeps a JSON {path: {hash, chunks, document_hash}}. On ingest, we compute the file's SHA-256, compare to the stored hash, skip if equal. If changed, we delete_by_document_hash on the vector store to evict old chunks, then re-embed and upsert with the new hash baked into chunk metadata. So re-ingest is incremental and idempotent."
+ },
+ {
+  "id": "45",
+  "section": "Demo questions",
+  "stage": null,
+  "question": "What does this codebase teach you about provider abstraction?",
+  "answer": "The two ABCs in providers/base.py (EmbeddingProvider, ChatProvider) and the factory in factory.py are the seam. Every concrete provider implements the same two-method surface, so swapping Ollama for LM Studio is a config change, and adding a new backend is one new file. This is the difference between \"we can swap LLM vendors in a long weekend\" and \"we can't.\""
+ },
+ {
+  "id": "46",
+  "section": "Demo questions",
+  "stage": null,
+  "question": "Walk me through how hybrid search is wired up in this codebase.",
+  "answer": "Flip retrieval.hybrid: true in config.yaml. Inside Retriever.retrieve, two searches run: the existing vector search, and _bm25_search which pulls a BM25Index built over all chunks in the store — cached across requests via get_bm25_index and rebuilt only when the store mutates, since the server/GUI construct a fresh Retriever per query. Both legs fetch 4 × top_k candidates, then reciprocal_rank_fusion merges them (default RRF k=60, BM25 lists weighted by retrieval.hybrid_keyword_weight) and we keep the top top_k. RagService, PromptBuilder, and the CLI are unchanged — that's the point of the Retriever seam."
+ },
+ {
+  "id": "47",
+  "section": "Demo questions",
+  "stage": null,
+  "question": "The inspect and retrieve commands look small — what do they teach?",
+  "answer": "They isolate stages of the pipeline so you can debug each independently. inspect shows you what's in the store (so you can confirm chunking and metadata look right). retrieve runs vector search without the LLM (so you can tell whether a bad answer was caused by bad retrieval or bad generation). In an interview: this maps onto the production debugging mindset of \"isolate the stage before you change anything.\""
+ },
+ {
+  "id": "48",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "How does this project support a multi-turn conversation?",
+  "answer": "RagService.answer(question, history=[...]) accepts a list of prior ChatMessage turns. PromptBuilder.build(history=...) inserts those turns between the system message and the new user message. Retrieval re-runs for the current question (so a follow-up can find new sources), but the LLM sees the conversation. The chat CLI command and the GUI's Ask tab both maintain the list — /clear or Clear History resets it."
+ },
+ {
+  "id": "49",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "Why does retrieval re-run on every turn instead of reusing the previous chunks?",
+  "answer": "Because the user's follow-up may be about something new. \"What about the SPI side?\" after a CAN-FD question needs SPI chunks, not the CAN chunks that answered turn 1. Re-retrieving is cheap; over-relying on prior context causes the model to answer from memory and silently ignore the docs."
+ },
+ {
+  "id": "50",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "How does streaming work in this code?",
+  "answer": "ChatProvider.generate_stream returns an Iterator[str]. Ollama uses its native stream: true API in ollama_provider.py; LM Studio uses the OpenAI SDK's streaming chat completions in lmstudio_provider.py. The CLI's query --stream and chat write tokens to stdout as they arrive; the REST API's stream: true returns a Server-Sent Events response. Default fallback for providers that don't override generate_stream is to yield the whole answer in one chunk."
+ },
+ {
+  "id": "51",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "What does --filter \"module=CAN\" actually do?",
+  "answer": "It builds a Chroma where={\"module\": \"CAN\"} clause and constrains the vector search to chunks whose metadata satisfies it. module is auto-derived from the sub-folder under documents/ during ingest (see _derive_folder_metadata), so organising your corpus by topic gives you free filtering. Multi-key filters (module=CAN,file_type=pdf) use Chroma's $and. This prevents the false-positive case where two unrelated documents share vocabulary like \"clock\" or \"underrun.\""
+ },
+ {
+  "id": "52",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "What does the REST API expose, and when would you choose it over the CLI?",
+  "answer": "Five endpoints in server.py: POST /api/query (with stream, debug, filter, history), POST /api/retrieve, POST /api/ingest, GET /api/stats, DELETE /api/index. Swagger UI at /docs. Choose REST when something other than a human needs to ask questions — a web frontend, a Slackbot, a CI job — so they don't have to spawn Python processes per query."
+ },
+ {
+  "id": "53",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "Which reranker backend does this codebase support?",
+  "answer": "reranker.py supports two backends. retrieval.reranker_backend: \"llm\" asks the chat model to score each candidate 0–10 for relevance. sentence-transformers uses a real local CrossEncoder such as cross-encoder/ms-marco-MiniLM-L-6-v2; install it with pip install -e .[reranker]."
+ },
+ {
+  "id": "54",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "HyDE — what does enabling it cost, and when is it worth it?",
+  "answer": "One extra LLM call per query before retrieval. The LLM writes a hypothetical 3–5 sentence answer (Retriever._hyde_expand), we embed that, then search. Worth it for vague natural-language questions (\"how does this whole subsystem work?\"). Not worth it for queries that are already keyword-rich — you're paying for an LLM call that produces something the user already gave you."
+ },
+ {
+  "id": "55",
+  "section": "Operating the system",
+  "stage": 11,
+  "question": "How would you measure whether hybrid/HyDE/reranker actually help?",
+  "answer": "Curate a gold-standard JSON (eval/questions.json), run .\\run.bat eval --skip-llm once per config — toggle one feature at a time, compare mean recall@k between runs. For end-to-end quality, run without --skip-llm and watch keyword-recall in the answer. Without an eval set, every \"I think this is better\" is a vibe; vibes lie."
+ },
+ {
+  "id": "56",
+  "section": "Frameworks",
+  "stage": 12,
+  "question": "This project is framework-free — can you use LangChain / LlamaIndex?",
+  "answer": "Yes, and building it by hand makes me better with them: I know what each abstraction hides. RecursiveCharacterTextSplitter / SentenceSplitter is my Chunker; vectorstore.as_retriever() / index.as_retriever() is my Retriever.retrieve; an LCEL chain (prompt | llm | parser) or a LlamaIndex query engine is my RagService.answer. See examples/langchain_rag.py and examples/llamaindex_rag.py."
+ },
+ {
+  "id": "57",
+  "section": "Frameworks",
+  "stage": 12,
+  "question": "LangChain vs LlamaIndex — how do you choose?",
+  "answer": "Heavy overlap. LlamaIndex is data/RAG-first (strong Documents→Nodes→Index→ QueryEngine abstractions); LangChain is orchestration/agent-first (LCEL + LangGraph). Pick by where the complexity is — index/retrieval leans LlamaIndex, multi-step agent/tool flows lean LangChain/LangGraph — or mix them."
+ },
+ {
+  "id": "58",
+  "section": "Frameworks",
+  "stage": 12,
+  "question": "What is LCEL and what does index.as_query_engine() hide?",
+  "answer": "LCEL is composing Runnables with | into a chain that gets .invoke/.stream/.batch/async for free — it exposes the pipeline. A LlamaIndex query engine encapsulates it: as_query_engine() bundles a retriever + a response synthesizer (how top-k chunks are combined: compact/refine/tree_summarize) + prompt templating. Both bottom out in the same retrieve→prompt→generate you built by hand."
+ },
+ {
+  "id": "59",
+  "section": "Frameworks",
+  "stage": 12,
+  "question": "When would you NOT use a framework?",
+  "answer": "Simple/stable flows, tight latency or token budgets, minimising dependency weight and API churn, or when debugging and the abstraction is in the way. A common middle ground: framework for ingestion/loaders, hand-written for the hot query path."
+ },
+ {
+  "id": "60",
+  "section": "Frameworks",
+  "stage": 12,
+  "question": "LangGraph vs a hand-rolled multi-hop loop?",
+  "answer": "Same idea (retrieve→decide→retrieve→answer). LangGraph makes the control flow an explicit, inspectable state machine — worth it once you have branches, retries, tools, or human-in-the-loop; overkill for a two-hop loop. This repo ships both: Retriever._run_hops and examples/langgraph_agentic_rag.py."
+ },
+ {
+  "id": "61",
+  "section": "Frameworks",
+  "stage": 12,
+  "question": "How would you evaluate a framework-based RAG app?",
+  "answer": "The same metrics you already know — recall@k / MRR / nDCG for retrieval, faithfulness / answer-relevance for generation — via RAGAS, LlamaIndex evals, or LangSmith datasets. The framework changes how you wire the eval, not what you measure."
+ }
+]

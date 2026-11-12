@@ -245,7 +245,13 @@ def test_resolved_model_and_pipeline_settings_are_recorded(index_env):
     ingest(index_env)
     tracker = HashTracker(cfg.paths.index_file)
     entry = next(iter(tracker.all_entries().values()))
-    assert entry["ingestion_settings"]["chunking"] == cfg.chunking.model_dump()
+    # Every chunking setting is recorded. `entity_graph` is recorded under its
+    # own key and only while it is on, so adding that setting did not change
+    # the fingerprint of indexes built before it existed.
+    expected = cfg.chunking.model_dump()
+    assert expected.pop("entity_graph") is False
+    assert entry["ingestion_settings"]["chunking"] == expected
+    assert "entity_graph_chat" not in entry["ingestion_settings"]
     embedder.model_name = "other-resolved-model"
     with pytest.raises(IndexCompatibilityError, match="Resolved embedding"):
         build_retriever(cfg, embedder, store).retrieve("evidence")

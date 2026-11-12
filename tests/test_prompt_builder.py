@@ -31,11 +31,43 @@ def test_build_includes_sources_block():
     ]
     msgs = pb.build("What is NBRP?", chunks)
     user_content = msgs[1].content
-    assert "[Source 1]" in user_content
-    assert "[Source 2]" in user_content
-    assert "sample_can_fd.txt" in user_content
-    assert "sample_spi_dma.md" in user_content
-    assert "NBRP and DBRP must match." in user_content
+    # Passages are numbered; the number is what the model is asked to cite.
+    assert "[1] File: sample_can_fd.txt\nNBRP and DBRP must match." in user_content
+    assert "[2] File: sample_spi_dma.md\n" in user_content
+    assert "like [1] or [2][3]" in msgs[0].content
+
+
+def test_sources_block_says_where_each_passage_is_from():
+    located = RetrievedChunk(
+        id="c0",
+        text="Writes to SMPR are ignored while CTRL.EN is set.",
+        metadata={
+            # An uploaded file is stored with a 32-hex prefix; the model sees the real name.
+            "source_file": "0123456789abcdef0123456789abcdef_adx12.pdf",
+            "location": "p. 2-3",
+            "section": "2. Register map",
+        },
+    )
+    code = RetrievedChunk(
+        id="c1",
+        text="void Adx12_Init(void) {}",
+        metadata={"source_file": "adx12_driver.c", "location": "lines 20-34", "section": "Adx12_Init"},
+    )
+    user_content = PromptBuilder().build("Why?", [located, code])[1].content
+
+    assert "[1] File: adx12.pdf | Location: p. 2-3 | Section: 2. Register map\n" in user_content
+    assert "[2] File: adx12_driver.c | Location: lines 20-34 | Section: Adx12_Init\n" in user_content
+
+
+def test_citation_instruction_follows_the_include_sources_switch():
+    assert "square brackets" in PromptBuilder().system_prompt
+    assert "square brackets" in PromptBuilder(answer_only_from_context=False).system_prompt
+
+    hidden = PromptBuilder(include_sources=False)
+    assert "square brackets" not in hidden.system_prompt
+    assert "Do not add source labels or citations." in hidden.system_prompt
+    user_content = hidden.build("Why?", [_chunk(0, "a.txt", "Evidence.")])[1].content
+    assert "Evidence." in user_content and "[1]" not in user_content
 
 
 def test_build_handles_no_chunks_gracefully():

@@ -43,7 +43,10 @@ def build_retriever(
     """Build a Retriever with every configured enhancement.
 
     Passing `chat_provider=None` disables the LLM-assisted query techniques
-    (HyDE, multi-query, decomposition) even when their flags are on.
+    (HyDE, multi-query, decomposition, the agent) even when their flags are on.
+
+    With `retrieval.agentic` on (and a chat provider) the result is an
+    `AgentRetriever` wrapped around the Retriever; it offers the same surface.
 
     `return_candidates=None` means "auto": hand the reranker an oversized
     candidate pool when one is configured. Callers that never rerank
@@ -57,7 +60,11 @@ def build_retriever(
     if top_k is not None and not 1 <= top_k <= 100:
         raise ValueError("top_k must be between 1 and 100")
     needs_llm = (
-        r.use_hyde or r.multi_query > 0 or r.query_decomposition or r.multi_hop
+        r.use_hyde
+        or r.multi_query > 0
+        or r.query_decomposition
+        or r.multi_hop
+        or r.rewrite_followups
     )
     retrieval_only = return_candidates is False
     if return_candidates is None:
@@ -92,15 +99,30 @@ def build_retriever(
         neighbor_radius=r.neighbor_radius,
         multi_hop=r.multi_hop,
         multi_hop_max_hops=r.multi_hop_max_hops,
+        rewrite_followups=r.rewrite_followups,
+        graph=r.graph,
         chat_provider=chat_provider if needs_llm else None,
         where=where,
     )
     retriever.effective_settings = r.model_dump()
     retriever.effective_settings["top_k"] = retriever.top_k
     if chat_provider is None:
-        retriever.effective_settings.update(use_hyde=False, multi_query=0, query_decomposition=False, multi_hop=False)
+        retriever.effective_settings.update(
+            use_hyde=False,
+            multi_query=0,
+            query_decomposition=False,
+            multi_hop=False,
+            rewrite_followups=False,
+            agentic=False,
+        )
     if retrieval_only:
         retriever.effective_settings["reranker_model"] = None
+    if r.agentic and chat_provider is not None:
+        # The agent decides which searches to run; each search still goes
+        # through the Retriever built above, with every configured technique.
+        from rag_app.retrieval.agent import AgentRetriever
+
+        return AgentRetriever(retriever, chat_provider, max_steps=r.agent_max_steps)
     return retriever
 
 

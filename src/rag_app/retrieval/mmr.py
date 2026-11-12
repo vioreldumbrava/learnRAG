@@ -135,6 +135,7 @@ def _with_mmr_metadata(
         text=chunk.text,
         metadata=metadata,
         score=chunk.score,
+        score_type=chunk.score_type,
     )
 
 

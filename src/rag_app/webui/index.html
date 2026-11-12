@@ -54,11 +54,44 @@
         role="tab"
         aria-selected="false"
         tabindex="-1"
+        aria-controls="panel-compare"
+        id="tab-compare"
+        data-panel="compare"
+      >
+        Compare
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-lab"
+        id="tab-lab"
+        data-panel="lab"
+      >
+        Lab
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
         aria-controls="panel-experiments"
         id="tab-experiments"
         data-panel="experiments"
       >
         Experiments
+      </button>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected="false"
+        tabindex="-1"
+        aria-controls="panel-learn"
+        id="tab-learn"
+        data-panel="learn"
+      >
+        Learn
       </button>
       <button
         class="tab"
@@ -94,8 +127,24 @@
           No documents are indexed yet.
           <button id="go-ingest">Add your first document</button>
         </div>
+        <div class="controls" id="conversation-bar">
+          <label for="conversation-select">Conversation</label
+          ><select id="conversation-select">
+            <option value="">New conversation</option></select
+          ><button type="button" id="conversation-rename" disabled>Rename</button
+          ><a id="conversation-export" class="button-link" hidden
+            >Export as Markdown</a
+          ><button
+            type="button"
+            id="conversation-delete"
+            class="danger"
+            disabled
+          >
+            Delete
+          </button>
+        </div>
         <div id="transcript" aria-label="Conversation"></div>
-        <form id="ask-form">
+        <form id="ask-form" novalidate>
           <label for="question">Ask your documents</label>
           <textarea
             id="question"
@@ -114,10 +163,26 @@
             <label for="filter">Filter</label
             ><input id="filter" placeholder="module=CAN" />
             <span class="spacer"></span
-            ><button type="button" id="clear-history">Clear conversation</button
+            ><button type="button" id="clear-history">New conversation</button
             ><button type="button" id="stop" hidden>Stop</button
             ><button class="primary" id="ask" type="submit">Ask</button>
           </div>
+          <details id="ask-techniques" class="techniques-drawer">
+            <summary>
+              Techniques for this question
+              <span id="ask-techniques-count" class="muted"></span>
+            </summary>
+            <p class="muted">
+              Starts from your configuration. A change here applies to the
+              questions you ask until you reset it; nothing is saved to the
+              configuration file. Turn on "Show debug details" to see what each
+              technique did.
+            </p>
+            <div id="ask-techniques-form" class="techniques"></div>
+            <button type="button" id="ask-techniques-reset">
+              Reset to configuration
+            </button>
+          </details>
           <p
             id="ask-status"
             class="status"
@@ -125,7 +190,8 @@
             aria-live="polite"
           ></p>
           <p id="history-label" class="muted">
-            Ctrl+Enter to ask. Conversation stays in this tab.
+            Ctrl+Enter to ask. Conversations are saved on this computer and can
+            be continued later.
           </p>
         </form>
       </section>
@@ -146,7 +212,7 @@
             <label for="upload-files">Choose files or drop them here</label
             ><input type="file" id="upload-files" multiple required />
             <p id="upload-limits" class="muted">
-              TXT, Markdown, PDF, DOCX, HTML and CSV
+              TXT, Markdown, PDF, DOCX, PPTX, XLSX, HTML, CSV and source code
             </p>
           </div>
           <button id="upload" class="primary" type="submit">
@@ -167,6 +233,10 @@
             <div class="controls">
               <label
                 ><input type="checkbox" id="force" /> Force re-ingestion</label
+              ><label
+                title="After indexing, forget documents under this folder whose file no longer exists. The job result lists them."
+                ><input type="checkbox" id="prune" /> Forget documents whose
+                file was deleted</label
               ><button id="run-ingest" type="submit">Run ingestion</button>
             </div>
           </form>
@@ -223,6 +293,152 @@
         <div id="chunks-view"></div>
       </section>
       <section
+        id="panel-compare"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-compare"
+        hidden
+      >
+        <h2>Compare two retrieval settings</h2>
+        <p>
+          Retrieve one question twice, with settings A and settings B, and see
+          which chunks each side found and where it ranked them. No answer is
+          generated, so a comparison is quick. Both sides start from your
+          configuration; change one setting on one side.
+        </p>
+        <form id="compare-form" novalidate>
+          <label for="compare-question">Question</label>
+          <textarea
+            id="compare-question"
+            rows="2"
+            maxlength="4000"
+            placeholder="A question your documents can answer"
+            required
+          ></textarea>
+          <div class="compare-columns">
+            <fieldset class="compare-side">
+              <legend>Settings A</legend>
+              <div id="compare-a-form" class="techniques"></div>
+            </fieldset>
+            <fieldset class="compare-side">
+              <legend>Settings B</legend>
+              <div id="compare-b-form" class="techniques"></div>
+            </fieldset>
+          </div>
+          <div class="controls">
+            <label for="compare-filter">Filter</label
+            ><input id="compare-filter" placeholder="module=CAN" />
+            <label
+              ><input type="checkbox" id="compare-llm" checked /> Let the chat
+              model help retrieval</label
+            >
+            <span class="spacer"></span
+            ><button type="button" id="compare-reset">
+              Reset both to configuration</button
+            ><button class="primary" id="run-compare" type="submit">
+              Compare
+            </button>
+          </div>
+        </form>
+        <p class="muted">
+          HyDE, multi-query, decomposition, multi-hop and the LLM reranker need
+          the chat model. Untick the box to keep it out of both runs; those
+          techniques are then skipped.
+        </p>
+        <p id="compare-status" class="status" role="status" aria-live="polite"></p>
+        <div id="compare-results"></div>
+      </section>
+      <section
+        id="panel-lab"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-lab"
+        hidden
+      >
+        <h2>Chunking playground</h2>
+        <p>
+          Chunk one indexed document under settings A and settings B and read
+          the result. Nothing is embedded and nothing in the index changes, so
+          trying a setting takes a moment. To make a setting permanent, put it
+          in your configuration and run ingestion again.
+        </p>
+        <form id="playground-form" novalidate>
+          <div class="controls">
+            <label for="playground-document">Document</label
+            ><select id="playground-document"></select>
+          </div>
+          <div class="compare-columns">
+            <fieldset class="compare-side">
+              <legend>Settings A</legend>
+              <div id="playground-a" class="techniques"></div>
+            </fieldset>
+            <fieldset class="compare-side">
+              <legend>Settings B</legend>
+              <div id="playground-b" class="techniques"></div>
+            </fieldset>
+          </div>
+          <div class="controls">
+            <span class="spacer"></span
+            ><button class="primary" id="run-playground" type="submit">
+              Chunk it
+            </button>
+          </div>
+        </form>
+        <p
+          id="playground-status"
+          class="status"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div id="playground-results" class="compare-columns"></div>
+
+        <h2>Embedding map</h2>
+        <p>
+          Every chunk is a point in a space with hundreds of dimensions. This
+          flattens that space onto the two directions along which your chunks
+          differ most, so related chunks land near each other. Add a question
+          to see where it lands and which chunks are truly nearest to it.
+        </p>
+        <form id="map-form" novalidate>
+          <label for="map-query">Question (optional)</label>
+          <input id="map-query" maxlength="4000" placeholder="Leave empty to see only the chunks" />
+          <div class="controls">
+            <label for="map-group">Color by</label
+            ><select id="map-group">
+              <option value="module">Module (folder)</option>
+              <option value="source_file">File</option>
+              <option value="file_type">File type</option></select
+            ><label for="map-top-k">Nearest chunks to mark</label
+            ><input id="map-top-k" type="number" value="5" min="1" max="50" />
+            <span class="spacer"></span
+            ><button class="primary" id="run-map" type="submit">Draw map</button>
+          </div>
+        </form>
+        <p id="map-status" class="status" role="status" aria-live="polite"></p>
+        <div id="map-results"></div>
+
+        <h2>Entity graph</h2>
+        <p>
+          With <code>chunking.entity_graph</code> on, ingestion records which
+          named things (registers, error codes, functions) each chunk mentions
+          and how they relate. This is what entity-graph retrieval looks things
+          up in: an entity named in a question brings in the chunks that
+          mention it and the chunks of the entities one step away.
+        </p>
+        <form id="graph-form" class="controls" novalidate>
+          <label for="graph-contains">Entity name contains</label
+          ><input id="graph-contains" maxlength="200" placeholder="NBRP" /><span
+            class="spacer"
+          ></span
+          ><button class="primary" id="run-graph" type="submit">
+            Show entities
+          </button>
+        </form>
+        <p id="graph-status" class="status" role="status" aria-live="polite"></p>
+        <div id="graph-results"></div>
+        <div id="graph-detail"></div>
+      </section>
+      <section
         id="panel-experiments"
         class="panel"
         role="tabpanel"
@@ -231,42 +447,80 @@
       >
         <h2>Compare retrieval settings</h2>
         <p>
-          Run the bundled questions against one fixed snapshot of your index.
-          Start with the sample CAN/SPI corpus. Each preset changes one setting
-          from the dense baseline; global settings stay unchanged and caches are
-          disabled.
+          Run a set of questions against one fixed snapshot of your index.
+          Every preset starts from the same dense baseline (top 5, every
+          optional technique off) and changes only what it names; global
+          settings stay unchanged and caches are disabled. Start with the
+          bundled questions on the sample CAN/SPI corpus, then build a question
+          set for your own documents below.
         </p>
-        <form id="experiment-form">
+        <form id="experiment-form" novalidate>
           <fieldset>
             <legend>Presets</legend>
-            <label
-              ><input type="checkbox" name="preset" value="dense" checked />
-              Dense baseline (top 5)</label
-            ><label
-              ><input type="checkbox" name="preset" value="hybrid" checked />
-              Hybrid search</label
-            ><label
-              ><input type="checkbox" name="preset" value="mmr" checked /> MMR
-              diversity</label
-            ><label
-              ><input type="checkbox" name="preset" value="top_k_8" checked />
-              Top 8</label
-            >
+            <div id="experiment-presets">
+              <label
+                ><input type="checkbox" name="preset" value="dense" checked />
+                Dense baseline (top 5)</label
+              ><label
+                ><input type="checkbox" name="preset" value="hybrid" checked />
+                Hybrid search</label
+              ><label
+                ><input type="checkbox" name="preset" value="mmr" checked />
+                MMR diversity</label
+              ><label
+                ><input type="checkbox" name="preset" value="top_k_8" checked />
+                Top 8</label
+              >
+            </div>
           </fieldset>
+          <details id="custom-preset">
+            <summary>
+              A preset of your own
+              <span id="custom-preset-count" class="muted"></span>
+            </summary>
+            <p class="muted">
+              Like the built-in presets, yours starts from the dense baseline,
+              not from your saved configuration. Set what you want to measure,
+              give it a name and add it.
+            </p>
+            <div id="custom-preset-form" class="techniques"></div>
+            <div class="controls">
+              <label for="custom-preset-name">Name</label
+              ><input
+                id="custom-preset-name"
+                maxlength="32"
+                placeholder="wide_hybrid"
+              /><button type="button" id="add-custom-preset">Add preset</button>
+            </div>
+            <ul id="custom-presets" class="chips"></ul>
+          </details>
           <div class="controls">
-            <label for="experiment-mode">Mode</label
+            <label for="experiment-set">Questions</label
+            ><select id="experiment-set">
+              <option value="sample">sample</option></select
+            ><label for="experiment-mode">Mode</label
             ><select id="experiment-mode">
               <option value="retrieval">Retrieval only</option>
-              <option value="full">Retrieval and answers</option></select
+              <option value="retrieval-llm">Retrieval with LLM help</option>
+              <option value="full">Retrieval and answers</option>
+              <option value="full-judge">Answers graded by an LLM judge</option></select
             ><button id="run-experiment" class="primary" type="submit">
               Run comparison
             </button>
           </div>
         </form>
         <p class="muted">
-          Retrieval only skips chat-assisted query transformations and answer
-          checks. Keyword coverage does not prove grounding. Document-level
-          scores cannot measure wider neighboring context.
+          Retrieval only never calls the chat model. Retrieval with LLM help
+          lets it take part in retrieval (HyDE, multi-query, decomposition,
+          multi-hop, the LLM reranker) without writing answers. Answers add
+          keyword, refusal and citation checks; keyword coverage does not prove
+          grounding. Document-level scores cannot measure wider neighboring
+          context.
+        </p>
+        <p class="muted" id="judge-note">
+          The judge is a language model reading each answer: its scores are
+          noisy on small models and flattering when a model grades itself.
+          Compare averages and spot-check rows by hand.
         </p>
         <div id="experiment-job" class="job" aria-live="polite"></div>
         <p id="experiment-status" class="status" role="status"></p>
@@ -292,6 +546,161 @@
         </details>
         <h3>Recent experiment jobs</h3>
         <div id="experiment-jobs"></div>
+
+        <h2>Question sets</h2>
+        <p>
+          The bundled questions only fit the sample corpus. To measure
+          retrieval on your documents, build a set about them: write questions
+          yourself, save a good one from the Ask tab, or let the chat model
+          draft some from your chunks. Drafts are not scored until you have
+          read and accepted them.
+        </p>
+        <div class="controls">
+          <label for="evalset-select">Set</label
+          ><select id="evalset-select"></select
+          ><input
+            id="evalset-new-name"
+            maxlength="64"
+            placeholder="name for the new set"
+            aria-label="Name for the new set"
+            hidden
+          /><span class="spacer"></span
+          ><a id="evalset-export" href="#" hidden>Download this set</a
+          ><button type="button" id="evalset-accept-all" hidden>
+            Accept all drafts</button
+          ><button type="button" id="evalset-delete" class="danger" hidden>
+            Delete set
+          </button>
+        </div>
+        <p
+          id="evalset-status"
+          class="status"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div id="evalset-rows"></div>
+        <details id="evalset-add">
+          <summary>Add a question</summary>
+          <form id="evalset-add-form" novalidate>
+            <label for="evalset-question">Question</label>
+            <textarea id="evalset-question" rows="2" maxlength="4000"></textarea>
+            <label for="evalset-sources"
+              >Files that should be retrieved (comma separated)</label
+            >
+            <input id="evalset-sources" placeholder="adx12_datasheet.pdf" />
+            <label for="evalset-contains"
+              >Text the answer must contain (comma separated, optional)</label
+            >
+            <input id="evalset-contains" />
+            <label for="evalset-reference"
+              >Reference answer (optional; the judge compares answers with
+              it)</label
+            >
+            <textarea id="evalset-reference" rows="2" maxlength="8000"></textarea>
+            <div class="controls">
+              <span class="spacer"></span
+              ><button type="submit">Add question</button>
+            </div>
+          </form>
+        </details>
+        <details id="evalset-generate">
+          <summary>Draft questions with the chat model</summary>
+          <p class="muted">
+            The model is shown one chunk at a time and writes a question that
+            chunk answers, so the expected source is known. Generated questions
+            tend to reuse the chunk's own words, which makes them easier than
+            what a person would ask: read each draft before you accept it.
+          </p>
+          <form id="evalset-generate-form" class="controls" novalidate>
+            <label for="evalset-generate-count">How many</label
+            ><input
+              id="evalset-generate-count"
+              type="number"
+              value="5"
+              min="1"
+              max="50"
+            /><button id="evalset-generate-run" type="submit">
+              Draft questions
+            </button>
+          </form>
+          <div id="evalset-generate-job" class="job" aria-live="polite"></div>
+        </details>
+        <details id="evalset-upload">
+          <summary>Upload a JSON file of questions</summary>
+          <form id="evalset-upload-form" class="controls" novalidate>
+            <input
+              id="evalset-upload-file"
+              type="file"
+              accept=".json,application/json"
+              aria-label="JSON file of questions"
+            /><label
+              ><input type="checkbox" id="evalset-upload-replace" /> Replace
+              the set instead of adding to it</label
+            ><button type="submit">Upload</button>
+          </form>
+        </details>
+      </section>
+      <section
+        id="panel-learn"
+        class="panel"
+        role="tabpanel"
+        aria-labelledby="tab-learn"
+        hidden
+      >
+        <h2>Where you stand</h2>
+        <p>
+          One row per stage of the learning path
+          (<code>docs/00_LEARNING_PATH.md</code>). Open a stage to tick the
+          things you can now do. Your progress is kept on this computer and is
+          the same in the desktop app and on the command line.
+        </p>
+        <p id="learn-summary" class="muted"></p>
+        <div id="learn-stages"></div>
+
+        <h2>Quiz</h2>
+        <p>
+          The questions and reference answers are the interview Q&amp;A
+          (<code>docs/02_INTERVIEW_QA.md</code>). Write your answer before you
+          look: the chat model then lists the key points you covered and the
+          ones you missed, or you compare with the reference yourself.
+          Questions you got wrong come back first.
+        </p>
+        <form id="quiz-form" class="controls" novalidate>
+          <label for="quiz-scope">Questions from</label
+          ><select id="quiz-scope">
+            <option value="">Everything (weakest first)</option></select
+          ><label for="quiz-count">How many</label
+          ><input id="quiz-count" type="number" value="5" min="1" max="50" /><button
+            class="primary"
+            id="quiz-start"
+            type="submit"
+          >
+            Start a round
+          </button>
+        </form>
+        <p id="quiz-status" class="status" role="status" aria-live="polite"></p>
+        <div id="quiz-card" class="quiz-card" hidden>
+          <p id="quiz-position" class="muted"></p>
+          <h3 id="quiz-question"></h3>
+          <label for="quiz-answer">Your answer</label>
+          <textarea id="quiz-answer" rows="4" maxlength="8000"></textarea>
+          <div class="controls">
+            <button type="button" id="quiz-check" class="primary">
+              Check with the model</button
+            ><button type="button" id="quiz-reveal">Show the answer</button
+            ><button type="button" id="quiz-skip">Skip</button>
+          </div>
+          <div id="quiz-feedback"></div>
+        </div>
+
+        <h2>Guided labs</h2>
+        <p>
+          Small experiments with this app, one idea each. Opening a lab takes
+          you to the right panel with the question and settings filled in; you
+          press the button there. Each lab says what to look for. They are
+          written for the sample corpus in <code>documents/</code>.
+        </p>
+        <div id="learn-labs"></div>
       </section>
       <section
         id="panel-stats"
@@ -343,7 +752,35 @@
     <dialog id="source-dialog" aria-labelledby="source-title">
       <h2 id="source-title">Source evidence</h2>
       <button id="close-source" autofocus>Close</button>
+      <a id="source-open" target="_blank" rel="noopener" hidden></a>
       <pre id="source-text"></pre>
+    </dialog>
+    <dialog id="evalq-dialog" aria-labelledby="evalq-title">
+      <h2 id="evalq-title">Save as an evaluation question</h2>
+      <p class="muted">
+        A question you asked for real is the best kind of test. Check the
+        expected files and the reference answer before saving: they become
+        what later runs are measured against.
+      </p>
+      <form id="evalq-form" novalidate>
+        <label for="evalq-set">Question set (new or existing)</label>
+        <input id="evalq-set" maxlength="64" list="evalq-sets" />
+        <datalist id="evalq-sets"></datalist>
+        <label for="evalq-question">Question</label>
+        <textarea id="evalq-question" rows="2" maxlength="4000"></textarea>
+        <fieldset>
+          <legend>Files that should be retrieved</legend>
+          <div id="evalq-sources"></div>
+        </fieldset>
+        <label for="evalq-reference">Reference answer</label>
+        <textarea id="evalq-reference" rows="5" maxlength="8000"></textarea>
+        <p id="evalq-status" class="status" role="status"></p>
+        <div class="controls">
+          <span class="spacer"></span
+          ><button type="button" id="evalq-cancel">Cancel</button
+          ><button type="submit" class="primary">Save question</button>
+        </div>
+      </form>
     </dialog>
     <script type="module" src="app.js"></script>
   </body>

@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
 )
 
 from rag_app.gui.ask_tab import AskTab
+from rag_app.gui.compare_tab import CompareTab
 from rag_app.gui.ingest_tab import IngestTab
+from rag_app.gui.lab_tab import LabTab
+from rag_app.gui.learn_tab import LearnTab
 from rag_app.gui.experiments_tab import ExperimentsTab
 from rag_app.gui.memory_tab import MemoryTab
 from rag_app.gui.settings_tab import SettingsTab
@@ -44,7 +47,10 @@ class MainWindow(QMainWindow):
         self.ask_tab = AskTab(self.runtime)
         self.memory_tab = MemoryTab(self.runtime)
         self.stats_tab = StatsTab(self.runtime)
+        self.compare_tab = CompareTab(self.runtime)
+        self.lab_tab = LabTab(self.runtime)
         self.experiments_tab = ExperimentsTab(self.runtime)
+        self.learn_tab = LearnTab(self.runtime)
 
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
@@ -54,19 +60,76 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.ask_tab, "Ask")
         tabs.addTab(self.memory_tab, "Memory")
         tabs.addTab(self.stats_tab, "Stats")
+        tabs.addTab(self.compare_tab, "Compare")
+        tabs.addTab(self.lab_tab, "Lab")
         tabs.addTab(self.experiments_tab, "Experiments")
+        tabs.addTab(self.learn_tab, "Learn")
+        self.learn_tab.lab_opened.connect(self.open_lab)
+        # Quiz results and ticks may have changed elsewhere (web, CLI).
+        tabs.currentChanged.connect(
+            lambda index: self.learn_tab.refresh() if tabs.widget(index) is self.learn_tab else None
+        )
 
         # When the user saves settings, refresh the stats + memory tabs so
         # they pick up the new config path / providers.
         self.settings_tab.config_saved.connect(self._apply_saved_config)
         self.ingest_tab.completed.connect(self.memory_tab.refresh)
         self.ingest_tab.completed.connect(self.stats_tab.refresh)
+        self.ingest_tab.completed.connect(self.lab_tab.refresh_documents)
+        # A question saved from an answer shows up in the Experiments tab.
+        self.ask_tab.question_saved.connect(self.experiments_tab.refresh_sets)
 
         # Status bar
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready.")
         QTimer.singleShot(0, self.memory_tab.refresh)
         QTimer.singleShot(0, self.stats_tab.refresh)
+        QTimer.singleShot(0, self.lab_tab.refresh_documents)
+        QTimer.singleShot(0, self.learn_tab.refresh)
+
+    def open_lab(self, lab: dict):
+        """Take the learner to a guided lab's tool with everything filled in.
+
+        Nothing runs until they press the button there, so they see the setup.
+        """
+
+        tabs = self.centralWidget()
+        tool, ready = lab["tool"], "Lab loaded. Read the settings, then press"
+        if tool == "compare":
+            compare = self.compare_tab
+            compare.question_edit.setPlainText(lab["question"])
+            compare.panel_a.apply(lab.get("a"))
+            compare.panel_b.apply(lab.get("b"))
+            compare.llm_check.setChecked(bool(lab.get("use_llm")))
+            compare.settings_toggle.setChecked(True)
+            compare.status_label.setText(f"{ready} Compare.")
+            tabs.setCurrentWidget(compare)
+        elif tool == "ask":
+            ask = self.ask_tab
+            ask.question_edit.setPlainText(lab["question"])
+            ask.techniques.apply(lab.get("a"))
+            ask.techniques_toggle.setChecked(bool(lab.get("a")))
+            ask.debug_check.setChecked(True)
+            ask.status_label.setText(f"{ready} Ask.")
+            tabs.setCurrentWidget(ask)
+        elif tool == "map":
+            self.lab_tab.pages.setCurrentIndex(1)
+            self.lab_tab.map_query.setText(lab["question"])
+            self.lab_tab.map_status.setText(f"{ready} Draw map.")
+            tabs.setCurrentWidget(self.lab_tab)
+        elif tool == "playground":
+            self.lab_tab.load_playground(lab["document"], lab.get("a"), lab.get("b"))
+            tabs.setCurrentWidget(self.lab_tab)
+        elif tool == "experiment":
+            experiments = self.experiments_tab
+            for name, check in experiments.preset_checks.items():
+                check.setChecked(name in lab["presets"])
+            experiments.clear_custom_presets()
+            experiments.set_combo.setCurrentIndex(max(0, experiments.set_combo.findData("sample")))
+            experiments.mode_combo.setCurrentIndex(1 if lab.get("use_llm") else 0)
+            experiments.pages.setCurrentIndex(0)
+            experiments.status.setText(f"{ready} Run experiment.")
+            tabs.setCurrentWidget(experiments)
 
     def _apply_saved_config(self, _path):
         self.settings_tab.save_btn.setEnabled(False)
@@ -87,8 +150,14 @@ class MainWindow(QMainWindow):
 
         def applied(_):
             self.ask_tab._clear_history()
+            # Per-question panels start from the configuration that was just saved.
+            self.ask_tab.techniques.reload()
+            self.compare_tab.reload_settings()
+            self.lab_tab.reload_settings()
+            self.experiments_tab.reload_settings()
+            self.learn_tab.refresh()
             self.settings_tab.save_btn.setEnabled(True)
-            self.statusBar().showMessage("Settings applied. Conversation cleared.")
+            self.statusBar().showMessage("Settings applied. New conversation started.")
             self.memory_tab.refresh()
             self.stats_tab.refresh()
 
@@ -111,8 +180,10 @@ class MainWindow(QMainWindow):
             self._apply_timer.stop()
         self.ingest_tab.timer.stop()
         self.experiments_tab.timer.stop()
+        self.experiments_tab.question_sets.timer.stop()
         self.ingest_tab.completed.disconnect(self.memory_tab.refresh)
         self.ingest_tab.completed.disconnect(self.stats_tab.refresh)
+        self.ingest_tab.completed.disconnect(self.lab_tab.refresh_documents)
         self.setEnabled(False)
         self.ask_tab.stop()
         if self.runtime._jobs is not None:

@@ -50,7 +50,9 @@ _REQUIRED_SECTIONS = (
 
 # Config sections the learning path is responsible for teaching. Deliberately
 # not all of AppConfig — `paths` and `server` internals aren't curriculum.
-_TAUGHT_SECTIONS = ("retrieval", "chunking", "cache", "observability", "ocr")
+_TAUGHT_SECTIONS = (
+    "retrieval", "chunking", "cache", "observability", "ocr", "extraction", "evaluation",
+)
 
 
 def _stage_blocks() -> dict[int, str]:

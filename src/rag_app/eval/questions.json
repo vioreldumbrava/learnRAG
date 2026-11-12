@@ -147,6 +147,52 @@
     ]
   },
   {
+    "question": "What is the reset value of the ADX-12 SMPR register?",
+    "expected_sources": [
+      "adx12_datasheet.pdf"
+    ],
+    "expected_contains": [
+      "0x0003"
+    ]
+  },
+  {
+    "question": "How many clock cycles does one ADX-12 conversion take?",
+    "expected_sources": [
+      "adx12_datasheet.pdf"
+    ],
+    "expected_contains": [
+      "14"
+    ]
+  },
+  {
+    "question": "What does error code ADX-E17 mean?",
+    "expected_sources": [
+      "adx12_datasheet.pdf"
+    ],
+    "expected_contains": [
+      "overrun"
+    ]
+  },
+  {
+    "question": "Which driver function changes the ADX-12 sample time at run time?",
+    "expected_sources": [
+      "adx12_driver.c"
+    ],
+    "expected_contains": [
+      "Adx12_SetSampleTime"
+    ]
+  },
+  {
+    "question": "Why does the ADX-12 driver clear the enable bit before it writes the sample time register?",
+    "expected_relevance": {
+      "adx12_driver.c": 2.0,
+      "adx12_datasheet.pdf": 2.0
+    },
+    "expected_contains": [
+      "ignored"
+    ]
+  },
+  {
     "question": "What is the maximum ambient operating temperature of the CHX-2000?",
     "expected_sources": [],
     "expected_contains": [],

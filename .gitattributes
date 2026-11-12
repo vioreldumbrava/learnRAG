@@ -1,0 +1,4 @@
+# The sample datasheet is generated ASCII-only, so Git would otherwise treat it
+# as text and rewrite its line endings on checkout, which breaks the PDF's
+# internal byte offsets (and tests/test_sample_corpus.py).
+*.pdf binary

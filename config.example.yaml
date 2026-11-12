@@ -37,6 +37,13 @@ chunking:
   #   automatically; `ingest --force` also works).
   contextual: false
   contextual_document_chars: 6000   # document truncated to this before the LLM sees it
+  # Entity graph: at ingest, ask the chat model which named things (registers,
+  # error codes, functions, part numbers, ...) each chunk mentions and how they
+  # relate, and store that with the chunk. `retrieval.graph` then looks
+  # questions up by entity name.
+  #   COST: ~1 chat LLM call PER CHUNK at ingest, like `contextual`.
+  #   Turning it on re-ingests your files on the next `ingest`.
+  entity_graph: false
 
 # ---------------------------------------------------------------------------
 # Default provider setup: LM Studio for both chat and embeddings.
@@ -132,6 +139,26 @@ retrieval:
   # query, or a hop that finds nothing new. false = off.
   multi_hop: false
   multi_hop_max_hops: 2   # additional retrieval rounds beyond the first (1-5)
+  # Conversational retrieval: in a conversation, a follow-up such as "what
+  # about the data phase?" has nothing in it to search for. With this on, the
+  # LLM first rewrites a follow-up into a standalone search query using the
+  # conversation; the answer prompt still gets the question as typed plus the
+  # history. One extra LLM call per follow-up; first questions are searched
+  # as typed. If the rewrite fails, the question is searched as typed.
+  rewrite_followups: false
+  # Entity-graph retrieval: entity names found in the question (a text match,
+  # no LLM call) pull in the chunks that mention them, and the chunks of
+  # entities one relation away at half weight, as one more list merged by RRF.
+  # Needs an index ingested with chunking.entity_graph: true; without one the
+  # setting does nothing. Look at the graph with `rag-app graph`.
+  graph: false
+  # Agentic retrieval: instead of one fixed search, the chat model chooses the
+  # next action step by step (SEARCH a query, read the NEIGHBORS of a passage,
+  # list the DOCUMENTS, or FINISH). Helps on questions with several parts.
+  # Costs one LLM call per step and is the least predictable technique here;
+  # two unreadable replies and the fixed pipeline answers instead.
+  agentic: false
+  agent_max_steps: 6      # upper bound on steps, one LLM call each (1-20)
 
 prompt:
   answer_only_from_context: true
@@ -159,6 +186,44 @@ ocr:
   enabled: false
   min_chars_per_page: 50   # pages with fewer chars trigger OCR fallback
   lang: "eng"              # Tesseract language code(s), e.g. "eng+deu"
+
+# ---------------------------------------------------------------------------
+# Extraction — how tables and source code are read at INGEST time.
+# Changing any of these re-ingests the affected files on the next `ingest`.
+#
+#   pdf_tables: pull tables out of PDF pages and write each row with its
+#               column names ("Register: CTRL, Offset: 0x00, ..."), so a row
+#               still makes sense when a chunk boundary falls inside the table.
+#               Needs: pip install -e .[pdf]   (pdfplumber)
+#   code_files: also ingest .c .h .cpp .cc .hpp .py .js .ts .java .cs .go .rs,
+#               split at function/class boundaries. Each chunk records its
+#               symbol and line range. Code in node_modules, build, dist,
+#               __pycache__ and dot-folders is skipped.
+#   code_max_chars: largest code chunk; a longer definition is cut at blank
+#               lines. Keep it within your embedding model's input limit.
+#
+# PowerPoint (.pptx) and Excel (.xlsx) files need: pip install -e .[office]
+# PDF page numbers, slide numbers and sheet names are always recorded.
+# ---------------------------------------------------------------------------
+extraction:
+  pdf_tables: false
+  code_files: true
+  code_max_chars: 2000
+
+# ---------------------------------------------------------------------------
+# Evaluation — the model that grades answers. Only read when `eval` or an
+# experiment runs with the LLM judge (`--judge`, or the judge mode in the UIs).
+#
+#   judge_model: null = the chat model grades its own answers. That works, but
+#                a model is biased towards approving what it wrote; a different,
+#                ideally stronger, model is a fairer judge.
+#   judge_provider / judge_base_url: where the judge model is served.
+#                null = the same provider and URL as `chat`.
+# ---------------------------------------------------------------------------
+evaluation:
+  judge_model: null
+  judge_provider: null     # ollama | lmstudio
+  judge_base_url: null
 
 # ---------------------------------------------------------------------------
 # Caching — optional, off by default. In-memory only (a restart clears them).

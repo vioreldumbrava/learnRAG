@@ -29,6 +29,22 @@ def validate_filter(value):
     return value
 
 
+def matches_filter(metadata, where):
+    """Whether a chunk's metadata satisfies an (already validated) filter.
+
+    The vector stores apply the filter themselves. Result lists that are built
+    in Python (keyword search, the entity graph) use this, so a filter means
+    the same thing whichever list a chunk came from.
+    """
+
+    if not where:
+        return True
+    key, wanted = next(iter(where.items()))
+    if key == "$and":
+        return all(matches_filter(metadata, condition) for condition in wanted)
+    return key in metadata and metadata[key] == wanted
+
+
 def parse_filter(text):
     if not text or not text.strip():
         return None

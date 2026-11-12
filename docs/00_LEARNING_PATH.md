@@ -7,7 +7,7 @@ this repo as its lab.
 **Companion docs**
 
 - [01_RAG_CONCEPTS.md](01_RAG_CONCEPTS.md) — concept-by-concept reference.
-- [02_INTERVIEW_QA.md](02_INTERVIEW_QA.md) — 74 mid-level interview questions.
+- [02_INTERVIEW_QA.md](02_INTERVIEW_QA.md) — 85 mid-level interview questions.
 - [03_GLOSSARY.md](03_GLOSSARY.md) — one-line definitions.
 - [04_SENIOR_DEEP_DIVE.md](04_SENIOR_DEEP_DIVE.md) — senior-level deep dive:
   trade-offs, system design, war stories, newer techniques (Contextual
@@ -25,25 +25,48 @@ this repo as its lab.
   the concept stick. This is where the old `03_RAG_MILESTONES_AND_EXERCISES.md`
   milestones now live, next to the stage they belong to.
 - **Checkpoint** — a `- [ ]` checklist. You're done with a stage when you can
-  tick every box. (GitHub renders these as checkboxes; tick them by editing
-  the file, or just track them in your own notes.)
+  tick every box. Tick them in the app's **Learn** tab (web or desktop) or
+  with `.\run.bat progress --done 3.2` (stage 3, second item); the app keeps
+  the ticks, so this file stays unedited.
 
 So you read, then run, then self-quiz, then practise, then tick off.
+
+**The Learn tab does the last three with you.** It reads this file and the
+interview Q&A, so it never drifts from them:
+
+- **Quiz** — the interview questions, asked one at a time. You write your
+  answer first; the chat model then lists which key points of the reference
+  answer you covered and which you missed (or you compare yourself, with no
+  model). Questions you got wrong come back first.
+  `.\run.bat quiz --stage 3` does the same in a terminal.
+- **Where you stand** — per stage: quiz results, checkpoints ticked, labs
+  opened. `.\run.bat progress` prints it.
+- **Guided labs** — one small experiment per idea (chunk size, top_k, hybrid
+  search, MMR, the agent, ...). Opening a lab takes you to the right panel
+  with the question and settings filled in, and tells you what to look for.
+  `.\run.bat labs` lists them with the equivalent command.
+
+A model's verdict on your answer is feedback, not a grade: small models are
+lenient and noisy (Stage 8 explains why). When it matters, read the reference
+answer and judge yourself.
 [tests/test_learning_path_docs.py](../tests/test_learning_path_docs.py) enforces
 that every stage really has all six sections, so this list cannot drift again.
 
 Before you start: make sure `.\run.bat ingest` has succeeded at least once
 (verify with `.\run.bat inspect` — chunk counts depend on the chosen settings;
-confirm that the six sample files are present). Older indexes need `.\run.bat rebuild`.
+confirm that the nine sample files are present). Older indexes need `.\run.bat rebuild`.
 
-**About the corpus.** `documents/` ships a small synthetic corpus about two
-invented peripherals (a CAN FD controller and an SPI peripheral). It is
+**About the corpus.** `documents/` ships a small synthetic corpus about three
+invented peripherals (a CAN FD controller, an SPI peripheral and an ADC). It is
 deliberately engineered so the exercises can actually demonstrate their point:
-numbered sections for the `heading` chunker, `CAN/` and `SPI/` sub-folders for
-metadata filtering, shared vocabulary across both modules, rare identifiers that
-only keyword search finds, and one fact split across two documents. Every
-register name and error code in it is invented — it is teaching material, not
-engineering reference.
+numbered sections for the `heading` chunker, `CAN/`, `SPI/` and `ADC/`
+sub-folders for metadata filtering, shared vocabulary across the CAN and SPI
+modules, rare identifiers that only keyword search finds, and one fact split
+across two documents. The `ADC/` folder holds the formats the others lack: a
+five-page PDF datasheet with ruled tables (page numbers, table rows) and a C
+driver with its header (functions, line numbers) that implements a rule the
+datasheet states. Every register name and error code in it is invented — it is
+teaching material, not engineering reference.
 
 ## Progress tracker
 
@@ -58,7 +81,7 @@ Tick a stage once you've cleared its **Checkpoint**:
 - [ ] Stage 7 — Provider Abstraction
 - [ ] Stage 8 — Evaluation
 - [ ] Stage 9 — Beyond Naïve RAG (hybrid, rerank, HyDE, multi-query, MMR,
-      neighbors, multi-hop, contextual retrieval)
+      neighbors, multi-hop, contextual retrieval, entity graph, agentic)
 - [ ] Stage 10 — Production Concerns (incl. caching & observability)
 - [ ] Stage 11 — Operating the System (CLI / GUI / Web / REST / Docker)
 - [ ] Stage 12 — Frameworks: LangChain & LlamaIndex
@@ -72,7 +95,7 @@ questions without editing global YAML or rebuilding the corpus. Reports record
 the corpus revision, effective settings, actual model names, per-question
 metrics, and latency. They are the evidence for your conclusions.
 
-**Prerequisites:** ingest the six sample CAN/SPI files, load an embedding model,
+**Prerequisites:** ingest the nine sample files, load an embedding model,
 and start `.\run.bat serve`. Full-answer comparisons also require the chat model.
 Use a separate learning index if your normal corpus contains unrelated files.
 Do not ingest or clear data during a comparison: commits wait for its fixed
@@ -90,18 +113,40 @@ start from this baseline independently; they never stack earlier choices.
 | MMR | `use_mmr: true`, lambda 0.5 | Diversity of source documents and rank changes | Diversity can lower the rank of the strongest evidence | Identify a gain and a trade-off, even if aggregate recall is unchanged |
 | Top 8 | `top_k: 8` | Recall gain versus latency and additional context | More results may add distractors without improving ranking | Explain whether the extra context is justified |
 
+**More presets, and your own:** the four above are the default selection.
+There is one preset per technique (`hybrid_mmr`, `neighbors`, `hyde`,
+`multi_query`, `decomposition`, `multi_hop`, `rerank`), and a custom preset is
+any set of retrieval settings you name. All of them start from the same dense
+baseline. The same comparison runs from the command line:
+`.\run.bat experiment -p dense -p hybrid --custom "wide:top_k=12,hybrid=true"`.
+
+**Questions:** the bundled set fits the sample corpus only. Stage 8 shows how
+to build a question set for your own documents and run every experiment on it.
+
 **Mode:** retrieval-only runs do not generate answers, score refusals, or run
-chat-assisted HyDE, multi-query, decomposition, or multi-hop. The four presets
-also disable reranking. General CLI `eval --skip-llm` may still run a configured
-local cross-encoder, but it disables chat-assisted transformations and the LLM
-reranker. Full-answer mode adds answer keyword coverage and accepted refusal
-checks; keyword coverage is not a faithfulness metric.
+chat-assisted HyDE, multi-query, decomposition, or multi-hop; a preset that
+needs the chat model is refused in this mode rather than silently measured as
+the baseline. **Retrieval with LLM help** lets the chat model take part in
+retrieval without writing answers, which is how those techniques and the LLM
+reranker are measured cheaply. General CLI `eval --skip-llm` may still run a
+configured local cross-encoder, but it disables chat-assisted transformations
+and the LLM reranker. Full-answer mode adds answer keyword coverage, accepted
+refusal checks and citation counts; keyword coverage is not a faithfulness
+metric. The optional **LLM judge** adds faithfulness, answer relevance and
+correctness scores; Stage 8 explains what they are worth.
 
 **Expected observations:** record your own results. Do not require every preset
 to improve, or expect exact agreement with the historical tables below. The
 current gold set includes two unanswerable questions; they are unscored in
 retrieval-only mode. Document-level metrics cannot measure whether neighbor
 expansion supplies the missing sentence within a document.
+
+**One question instead of the whole set:** Experiments tells you whether a
+setting helps *on average*. To see what it changed for *one* question, use the
+**Compare** panel (or `rag-app compare "..." --a ... --b ...`): it retrieves
+the question under settings A and settings B, shows each chunk's rank on both
+sides, and lists every pipeline stage of both runs. No answer is generated, so
+it takes seconds. Use it to explain a number you saw in an experiment report.
 
 **Manual grounding checkpoint:** inspect each important claim and its cited
 passage; check that citations support claims, that missing evidence is
@@ -256,7 +301,30 @@ Two non-obvious points that matter in interviews:
 
 ```powershell
 .\run.bat inspect                                # shows embedding dimension
+
+# Look at the space itself: every chunk as a point, a question among them.
+.\run.bat embedding-map
+.\run.bat embedding-map --query "What is SPI slave underrun?" --top-k 5
 ```
+
+The same picture is drawn in the **Lab** panel of the web UI and the **Lab**
+tab of the desktop GUI, where you can hover a point to read its chunk.
+
+An embedding has hundreds of dimensions, so the map is a projection: PCA keeps
+the two directions along which your chunks differ most and drops the rest.
+[`embedding_map`](../src/rag_app/analysis/embedding_map.py) does it in three
+steps — centre the vectors, take the singular value decomposition, keep the
+first two axes — and reports how much of the variation those two axes hold.
+Chunks about the same subject usually land near each other, which is the
+"similar meaning, nearby vectors" claim made visible.
+
+Read the map for what it is. If the two axes keep 30% of the variation, 70% of
+what separates your chunks is not on the screen: two points that look close can
+be far apart in the full space, and the reverse. That is why the nearest chunks
+to a question are computed in the **full** space (which is what retrieval does)
+and only then drawn. The table under the map sets each neighbour's true rank
+beside its rank on the map; where they disagree, the picture is wrong at that
+spot, not the retriever.
 
 ### Interview check
 
@@ -306,6 +374,9 @@ created by the successful rebuild.
 ### Checkpoint
 
 - [ ] I ran `inspect` and read off the embedding dimension for my model.
+- [ ] I drew the embedding map with a question on it and can say what share of
+      the variation the two axes keep, and why a neighbour's rank on the map
+      can differ from its true rank.
 - [ ] I can explain why swapping the embedding model forces a full re-ingest.
 - [ ] I can define "embedding" in one sentence without saying "vector of
       numbers" and nothing else (say what the direction *encodes*).
@@ -355,7 +426,27 @@ new class + one line in the `_STRATEGIES` registry.
 
 ### Try it
 
-Compare both **chunk size** and **strategy** on the same question:
+First look at the chunks themselves. The **chunking playground** runs
+extraction and chunking on one file and shows the result; nothing is embedded
+and the index is not touched, so each try takes a moment:
+
+```powershell
+.\run.bat chunks --path documents\CAN\can_diagnostics.md
+.\run.bat chunks --path documents\CAN\can_diagnostics.md --size 300 --overlap 50
+.\run.bat chunks --path documents\CAN\can_diagnostics.md --strategy heading --show 2
+```
+
+For each setting read three things: how many chunks there are, how uneven they
+are (smallest, mean, largest), and how many characters are **stored twice**
+because of overlap. Overlap is not free: it is text you embed, store and may
+retrieve twice. The **Lab** panel (web) and **Lab** tab (desktop) show two
+settings side by side with the repeated start of every chunk highlighted.
+[`preview_chunks`](../src/rag_app/ingestion/preview.py) calls the same
+`chunk_file` that ingestion uses, so what you see is what would be stored.
+
+The playground tells you what the chunks look like. Whether they retrieve
+better is a separate question, and it needs a re-ingest. Compare both **chunk
+size** and **strategy** on the same question:
 
 ```powershell
 # (1) Small fixed-size paragraph chunking
@@ -441,6 +532,81 @@ It's surfaced in the desktop GUI (Settings → OCR box), on the CLI (`ingest
   pages already have perfect text, so OCR'ing them wastes time and can *lower*
   quality. The threshold routes only the pages that need it.
 
+### Beyond plain text: pages, tables, slides, sheets and code
+
+Real corpora are not markdown. Three things go wrong when you treat a
+datasheet PDF, a slide deck or a source file as one long string:
+
+- **You lose where the text was.** A source that says "from `spec.pdf`" in a
+  400-page spec cannot be checked. A source that says "`spec.pdf`, p. 41" can.
+- **Tables fall apart.** A text extractor reads a table row as
+  `SMPR 0x04 0x0003 RW Sample time in clock cycles` — values with no column
+  names. Split that table across two chunks and the second chunk has numbers
+  that mean nothing.
+- **Code gets cut in the wrong places.** A 900-character window slices a
+  function in half and separates the body from its signature.
+
+How this repo handles each, all at **ingest time**:
+
+- **Locations.** Extraction returns *segments* — one per PDF page, slide or
+  sheet — instead of one string. The chunkers still work on the joined text
+  (they stay simple), and afterwards
+  [`locate_chunks`](../src/rag_app/ingestion/locator.py) finds each chunk in
+  the document again and records `page_start` / `page_end` and a display
+  `location` such as `p. 41-42`, `slide 7` or `sheet Timing`. The trick: strip
+  all whitespace from both the document and the chunk; every strategy only
+  changes whitespace, so the chunk is still a substring.
+- **Sections.** A chunk that starts mid-section used to have an empty
+  `section`. Now it inherits the last heading before it, so every chunk of
+  "3.1 Sample time" says so.
+- **Tables.** With `extraction.pdf_tables: true`,
+  [`_pdf_pages_with_tables`](../src/rag_app/ingestion/text_extractor.py) pulls
+  each table out with `pdfplumber` and writes every row as
+  `Register: SMPR, Offset: 0x04, Reset: 0x0003, ...`, one row per paragraph.
+  This is *table linearization*: a row carries its column names, so it still
+  makes sense when a chunk boundary falls inside the table. Needs
+  `pip install -e .[pdf]`. PowerPoint tables and Excel sheets are written the
+  same way (`pip install -e .[office]`).
+- **Code.** With `extraction.code_files: true` (the default),
+  [`split_code`](../src/rag_app/ingestion/code_chunker.py) splits `.c .h .cpp
+  .py .js .ts .java .cs .go .rs` files at definitions — brace depth for
+  C-family languages, indentation for Python — and gives each chunk a header
+  line with the file, the symbol and the line range. The symbol is stored as
+  the chunk's `section`, the range as its `location` (`lines 36-55`).
+  `extraction.code_max_chars` caps a chunk; a longer function is cut at blank
+  lines, a large class into its methods. It is a heuristic, not a parser: a
+  wrong guess costs a less precise symbol name, never a broken chunk.
+
+**Try it:**
+
+```powershell
+.\run.bat ingest                                     # picks up documents\ADC\
+.\run.bat inspect --file adx12_driver.c              # one chunk per function
+.\run.bat retrieve "Which function changes the ADC sample time?" --trace
+#   the "where" column shows lines 36-55; the "file" column the driver
+.\run.bat retrieve "What is the reset value of SMPR?" --filter "module=ADC"
+#   the source now reads adx12_datasheet.pdf with a page range
+```
+
+**Interview check:**
+
+- **Q: How do you get page numbers into citations?** Keep positions through
+  extraction (one segment per page), then map each chunk back to the segments
+  it covers and store the range as chunk metadata. Citations are metadata, not
+  something the LLM should guess.
+- **Q: Why not chunk each page separately?** Sentences, tables and sections
+  cross page breaks. Chunk the whole document, then record which pages a chunk
+  touches.
+- **Q: How do you make a table retrievable?** Linearize it: repeat the column
+  names in every row so each row is a self-contained fact. Alternatives are
+  storing the table as markdown/HTML in one oversized chunk, or summarising it
+  with an LLM at ingest.
+- **Q: How is chunking code different from chunking prose?** The unit is a
+  definition, not a size. Split at function/class boundaries, keep the
+  signature and doc comment with the body, and put the symbol name in the
+  chunk so keyword search can hit it. Production systems use a real parser
+  (tree-sitter); the principle is the same.
+
 ### Exercises
 
 #### Exercise 3.1 — Chunk size vs. answer quality (~15 min)
@@ -455,12 +621,14 @@ compare the retrieved chunks and their distances.
 <details>
 <summary>What you should have seen</summary>
 
-The corpus yields **108 chunks at 300, 34 at 900, and 19 at 1500** — chunk size
-is really an index-size dial. At 300 you get a tight, on-topic fragment that
+The corpus yields **133 chunks at 300, 49 at 900, and 32 at 1500** — chunk size
+is really an index-size dial. (Ten of those are the C driver and its header in
+every run: code is split at functions, so `chunk_size` does not touch it. The
+prose goes 123 → 39 → 22.) At 300 you get a tight, on-topic fragment that
 often stops before the reason ("...are silently discarded"), so the answer is
 retrieved but incomplete. At 1500 the right sentence is in there but buried
-among two neighbouring sections, and `top_k: 5` now pulls in ~40% of the whole
-corpus. 900 is the compromise for this material.
+among two neighbouring sections, and `top_k: 5` now pulls in almost a quarter
+of all the prose chunks. 900 is the compromise for this material.
 
 There is no universal winner — that's the point, and it's why you tune against
 an eval set (Stage 8) instead of by eye. Note also that changing `chunk_size`
@@ -494,9 +662,73 @@ the strategy falls back to paragraph splitting inside the section.
 Why it matters for retrieval: a chunk that begins with "## 4. Data Baud Rate
 Prescaler (DBRP)" embeds as a passage *about DBRP*. A chunk that begins
 mid-sentence embeds as a passage about nothing in particular, and it also reads
-badly when it lands in the prompt as `[Source N]`. This is also what populates
+badly when it lands in the prompt as passage `[N]`. This is also what populates
 the `section` metadata field — see
 [`_extract_section`](../src/rag_app/ingestion/ingest_service.py).
+</details>
+
+#### Exercise 3.3 — What a table looks like to the retriever (~10 min)
+
+**Goal:** see why a table needs its column names in every row. **Steps:**
+`pip install -e ".[pdf]"`. With `extraction.pdf_tables: false` (the default)
+run `.\run.bat ingest` and `.\run.bat inspect --file adx12_datasheet.pdf`, and
+find the register table. Set `extraction.pdf_tables: true`, run `.\run.bat
+ingest` again (no `--force` needed), and inspect the same file.
+
+<details>
+<summary>What you should have seen</summary>
+
+Without table extraction the register table is six lines of bare values (the
+first three shown):
+
+```text
+Register Offset Reset Access Purpose
+CTRL 0x00 0x0000 RW Enable, start, mode
+SMPR 0x04 0x0003 RW Sample time in clock cycles
+```
+
+`0x0003` is a reset value only because you can see the header two lines up.
+A chunk that begins at the `SMPR` line has lost that.
+
+With `pdf_tables: true` every row is its own paragraph and names its columns:
+
+```text
+Register: SMPR, Offset: 0x04, Reset: 0x0003, Access: RW, Purpose: Sample time in clock cycles
+```
+
+Now "reset value of SMPR" matches one line that contains the words *Reset*,
+*SMPR* and the value together — for the embedding and for BM25. The second
+`ingest` re-processed the PDF although its bytes had not changed: extraction
+settings are part of the ingestion fingerprint, like `chunk_size`. The
+trade-off is size: repeating five column names per row makes the table longer,
+which matters for wide tables with long headers.
+</details>
+
+#### Exercise 3.4 — Code is chunked by definition (~10 min)
+
+**Goal:** see definition-level chunks and line-number locations. **Steps:**
+`.\run.bat inspect --file adx12_driver.c`, then `.\run.bat retrieve "Why is
+the enable bit cleared before the sample time is written?" --trace`.
+
+<details>
+<summary>What you should have seen</summary>
+
+`adx12_driver.c` is six chunks: one for the file's opening comment and
+include, then one per function — `Adx12_Lcl_WaitWake`, `Adx12_Init`,
+`Adx12_SetSampleTime`, `Adx12_ReadChannel`, `Adx12_IrqHandler`. Each starts
+with a header line such as
+`File: adx12_driver.c | Adx12_SetSampleTime | lines 36-55`, and the comment
+above each function travels with it, because the splitter walks up from the
+opening brace over the signature and the comment block attached to it.
+
+In the trace, the `where` column reads `lines 36-55` for the driver and a page
+range for the datasheet. The question has two good sources: the driver's
+`Adx12_SetSampleTime` (what the code does) and the datasheet's page 2 ("Writes
+to SMPR and SQR are ignored while CTRL.EN is set" — why). That is the corpus's
+second cross-document fact, this time across two *formats*.
+
+Change `chunking.chunk_size` and re-ingest: the driver stays at six chunks.
+Code is bounded by `extraction.code_max_chars`, not by `chunk_size`.
 </details>
 
 ### Checkpoint
@@ -508,6 +740,12 @@ the `section` metadata field — see
       re-ingest.
 - [ ] I can explain what OCR does, that it runs at ingest time only, and why
       it's gated on `min_chars_per_page`.
+- [ ] I can say how a chunk gets its page number, and why chunking page by
+      page would be the wrong way to get it.
+- [ ] I can explain table linearization and what `extraction.pdf_tables`
+      changes in the stored text.
+- [ ] I know why code is split at definitions and which setting
+      (`extraction.code_max_chars`) bounds a code chunk.
 
 ---
 
@@ -528,7 +766,8 @@ finer layers. Sub-millisecond search at million-vector scale.
 
 What's stored in this codebase, per chunk:
 
-- `id` — `<document_hash[:12]>:<chunk_index>` (stable across re-ingest)
+- `id` — `<document_id>:<revision>:<chunk_index>` (the document id is derived
+  from the file's path; each ingestion of the file gets a new revision)
 - `embedding` — the vector
 - `document` — the chunk text itself (so we can paste it into the prompt later)
 - `metadata` — `{source_file, source_path, chunk_index, document_hash, file_type, module}`
@@ -629,10 +868,11 @@ files still live on disk as the source of truth.
 <details>
 <summary>What you should have seen</summary>
 
-34 chunks across six files, each with an id shaped
-`<document_hash[:12]>:<chunk_index>` — twelve hex characters, a colon, then the
-chunk's position in its file. (The hash is of the file's *content*, so it changes
-whenever the file does.) Everything
+49 chunks across nine files (with the default `chunk_size: 900`), each with an
+id shaped `<document_id>:<revision>:<chunk_index>` — a hash of the file's
+*path*, the id of the ingestion run that produced it, then the chunk's position
+in its file. (Re-ingest a changed file and the revision changes; the document
+id does not.) Everything
 in the record is *derived*: the vector from the embedding model, the text from
 the chunker, the metadata from the file's path and content. Delete `storage/` and
 you lose nothing you can't rebuild with one `ingest`; delete `documents/` and
@@ -640,7 +880,10 @@ you've lost the actual data.
 
 Look at the metadata keys on a CAN chunk and an SPI chunk versus one of the two
 flat sample files. The nested ones carry `module: "CAN"` / `module: "SPI"`; the
-flat ones have no `module` key at all. `section` comes from
+flat ones have no `module` key at all. A chunk from the `ADC/` folder carries
+more: the PDF's chunks have `page_start`, `page_end` and `location` (`p. 2-3`),
+the driver's have `symbol`, `language`, `line_start`, `line_end` and `location`
+(`lines 36-55`). `section` comes from
 `_extract_section`, `document_hash` is what the incremental-ingest tracker
 compares against, and `chunk_index` is what makes neighbour expansion possible
 in Stage 9-D — "the chunk after `document:revision:4`" is `document:revision:5`.
@@ -744,7 +987,22 @@ implemented now: flip one config flag and see the difference).
 # Narrow to one module (only works if you have sub-folders in documents/).
 .\run.bat retrieve "What is DBRP?" --filter "module=CAN"
 .\run.bat retrieve "..."             --filter "module=CAN,file_type=pdf"
+
+# Change one setting for one run: no YAML edit, nothing is saved.
+.\run.bat retrieve "ERR080082" --set top_k=8
+
+# See what every stage found, not only the final list.
+.\run.bat retrieve "ERR080082" --trace
+
+# Run the same question under two settings and line the results up.
+.\run.bat compare "ERR080082" --a top_k=3 --b top_k=8
 ```
+
+`--set` takes any name from the `retrieval:` section of `config.yaml`
+(`top_k`, `hybrid`, `use_mmr`, ...). `compare` prints each chunk's rank under
+A and under B, so "what did this setting change?" is one table. The web UI has
+the same two tools as the **Techniques for this question** drawer on Ask and
+the **Compare** panel; the desktop GUI has them on the Ask and Compare tabs.
 
 Watch the distance scores. The first should be low (close). The third
 should be high (far) — but the store will still return something, because
@@ -852,33 +1110,59 @@ System: You are an assistant. Use ONLY the context below.
         If the answer isn't there, say "I don't know."
 
 User: Context:
-      [Source 1] file: foo.pdf, chunk 12
+      [1] File: foo.pdf | Location: p. 41-42 | Section: 3.2 Bit timing
       <chunk text>
-      [Source 2] file: bar.md, chunk 4
+      [2] File: bar.md | Section: ## 4. Errors
       <chunk text>
 
       Question:
       <user question>
 ```
 
-Three engineering details that distinguish "works on demo" from "works in
+Four engineering details that distinguish "works on demo" from "works in
 production":
 
-1. **Source attribution** — label each chunk with `[Source N]` and file
-   name, then ask the model to cite sources in its answer. Helps with
-   debugging and trust.
+1. **Source attribution** — number each chunk `[N]`, say where it is from,
+   and ask the model to put those numbers after the statements they support.
+   Then *check* the numbers after generation: a citation to a passage that was
+   never in the prompt is a made-up reference, and an answer with no citations
+   cannot be traced at all. Helps with debugging and trust.
 2. **"Answer only from context"** — without this instruction, the model
    silently falls back on its training data. Hallucination skyrockets.
 3. **Context order** — models pay more attention to text at the start and
    end of the prompt (the "lost in the middle" effect, Liu et al. 2023).
    Put the most relevant chunks at the top or bottom, not in the middle.
+4. **Follow-ups need two different inputs.** In a conversation, the
+   *generation* step needs the history ("it" refers to something). The
+   *retrieval* step needs a query that stands on its own — "what about the
+   data phase?" embeds to nothing useful. Conversational RAG therefore
+   rewrites a follow-up into a standalone question before searching
+   (sometimes called query condensation), and still shows the model the
+   original question with the history.
 
 ### In this code
 
 - [`PromptBuilder.build`](../src/rag_app/retrieval/prompt_builder.py)
   returns a `list[ChatMessage]` — system, then (optionally) prior
   conversation turns, then the current user message. The user message
-  has the exact `[Source N]` block format described above.
+  has the exact `[N] File: ... | Location: ... | Section: ...` block format
+  described above.
+- [`parse_citations`](../src/rag_app/retrieval/citations.py) reads the
+  finished answer and sorts the passage numbers into **cited**, **invalid**
+  (no such passage) and **uncited**. Every interface shows the result: the
+  web UI turns `[1]` into a link to the passage, the desktop marks cited
+  sources, the CLI adds a `cited` column. It checks that a citation points at
+  something real, not that the passage supports the claim.
+- **Follow-up rewriting:** with `retrieval.rewrite_followups: true`,
+  [`Retriever._rewrite_with_history`](../src/rag_app/retrieval/retriever.py)
+  asks the LLM for a standalone version of a question that has history, and
+  searches (and reranks) with that. One extra LLM call per follow-up; on
+  failure the question is searched as typed.
+- **Saved conversations:**
+  [`conversations.py`](../src/rag_app/conversations.py) keeps every completed
+  turn — question, answer, sources, citations, settings — in a JSON file
+  beside the index, so a conversation can be continued later from any
+  interface (`chat --resume last`).
 - The system prompt has two flavours controlled by
   `prompt.answer_only_from_context` in config:
   - `True` → strict "say I don't know if not in context"
@@ -893,7 +1177,9 @@ production":
 ### Try it
 
 ```powershell
-# --debug prints the exact prompt sent to the LLM.
+# --debug prints the exact prompt sent to the LLM, and the pipeline stage by
+# stage. Read the "Prompt assembly" stage: how many chunks made it into the
+# prompt, how many were dropped by the character guard, how much history went.
 .\run.bat query "What happens if NBRP and DBRP are different?" --debug
 
 # Try an out-of-domain question and watch what the LLM does.
@@ -905,7 +1191,19 @@ production":
 # > You: What happens if NBRP and DBRP are different?
 # > You: What about the arbitration phase specifically?
 # > You: /quit
+# After each answer the sources are listed by number, "(cited)" on the ones
+# the answer referenced. The session is saved: continue it with
+.\run.bat chat --resume last
+
+# The same follow-up, but searched as a standalone question.
+.\run.bat chat --set rewrite_followups=true
 ```
+
+In the web UI, tick **Show debug details** and ask a follow-up with
+**Rewrite follow-ups** switched on in the Techniques drawer: the pipeline
+starts with a **Follow-up rewrite** stage showing the question as typed and
+the query that was searched. Click a `[1]` in an answer to open the passage it
+cites.
 
 ### Interview check
 
@@ -914,9 +1212,16 @@ production":
   forbidding out-of-context answers, (3) post-hoc validation (does the
   answer cite a source that's actually in the retrieved chunks?). No
   single layer is enough.
-- **Q: Why include `[Source N]` markers?**
-  So the model can cite, so you can audit retrieval, and so you can build
-  a clickable UI from the output.
+- **Q: Why number the passages in the prompt?**
+  So the model can cite, so you can audit retrieval, so you can build
+  a clickable UI from the output — and so you can check the answer
+  mechanically: a cited number with no passage behind it is a fabricated
+  reference.
+- **Q: A user asks "and what about the second one?" — what do you search for?**
+  Not that string. Rewrite the follow-up into a standalone question using the
+  conversation, search with the rewrite, and generate with the original
+  question plus history. Cost: one more LLM call, and a wrong rewrite sends
+  retrieval somewhere else, so log both versions.
 - **Q: What's "lost in the middle"?**
   Empirical finding that LLMs attend more strongly to the beginning and
   end of long prompts than the middle. Practical fix: put the highest-
@@ -962,9 +1267,45 @@ manual grounding review (Stage 8) exist — three weak layers, no single strong 
 Put the flag back to `true` when you're done.
 </details>
 
+#### Exercise 6.2 — What does a follow-up actually search for? (~10 min)
+
+**Goal:** see why a conversation needs a rewritten query. **Steps:** start
+`.\run.bat chat`, ask "What does the SMPR register of the ADX-12 do?", then
+the follow-up "What is its reset value?". Note the sources of the second
+answer. Quit, then repeat both questions under
+`.\run.bat chat --set rewrite_followups=true`. To see the rewrite itself, ask
+the same pair in the web UI with **Show debug details** ticked.
+
+<details>
+<summary>What you should have seen</summary>
+
+Without rewriting, the second search is for the five words "What is its reset
+value?". Nothing in them says ADC or SMPR, and the corpus is full of reset
+values: the CAN and SPI documents have whole sections on them. Whether the
+right datasheet page comes back is luck. The model may still answer from the
+first turn's context if the fact happened to be there — which hides the
+problem until the follow-up needs *new* evidence.
+
+With `rewrite_followups` the pipeline starts with a **Follow-up rewrite**
+stage: the question as typed, and the search query the model produced from the
+conversation — something like "What is the reset value of the ADX-12 SMPR
+register?". That query names the register, so the datasheet's register map is
+retrieved on its own merits.
+
+The cost is one extra LLM call per follow-up, and a new failure mode: a bad
+rewrite silently searches for the wrong thing. That is why the stage records
+both versions, and why a failed rewrite falls back to the question as typed
+instead of blocking the answer. A first question is never rewritten — there
+is no conversation to resolve it against.
+</details>
+
 ### Checkpoint
 
 - [ ] I ran `query --debug` and read the exact prompt sent to the LLM.
+- [ ] I clicked (or read) a citation and checked the passage it points to,
+      and I can say what the citation check does and does not prove.
+- [ ] I can explain why a follow-up question is rewritten before searching,
+      and what `retrieval.rewrite_followups` costs.
 - [ ] I asked an out-of-domain question and watched the "answer only from
       context" instruction do its job.
 - [ ] I ran `chat` with a pronoun-only follow-up and saw multi-turn history
@@ -1111,6 +1452,39 @@ substrings in the answer. A false statement can contain every expected word,
 so coverage does not measure faithfulness. Inspect the cited passages and apply
 the manual grounding rubric before drawing an answer-quality conclusion.
 
+**Where the questions come from.** A metric is only as good as the questions
+behind it, and the bundled questions are about the bundled corpus. For your own
+documents you need your own set. There are three sources, best first:
+
+1. **Questions people really asked** — saved from a conversation, with the
+   files that answered them. They have the wording, the vagueness and the
+   vocabulary gaps real users have.
+2. **Questions you write** — good for cases you know are hard (an exact part
+   number, a fact split across two files, a question with no answer).
+3. **Synthetic questions** — the chat model is shown a chunk and writes a
+   question that chunk answers. Fast, and the expected source is known for
+   free. But the model tends to reuse the chunk's own words, so these are
+   easier for retrieval than real questions, and some are simply bad. Treat
+   them as drafts: nothing generated is scored until a person has read it.
+
+**The LLM judge.** Faithfulness and answer relevance need a reader. An LLM
+judge is that reader, automated: for faithfulness it lists the factual claims
+in the answer and marks each as supported or not by the retrieved passages;
+the score is the supported share. This is the method RAGAS made standard. It
+is useful and it is not a measurement in the way recall is:
+
+- **It is noisy.** A small local judge gives different scores on a rerun.
+  Compare averages over many questions; do not read single rows as facts.
+- **Self-grading is biased.** A model asked to grade its own answer tends to
+  approve of it. Use a different, ideally stronger, model as the judge.
+- **Faithful is not correct.** The judge sees only the retrieved passages. An
+  answer that faithfully repeats a wrong or outdated passage scores 1.0.
+  Correctness needs a reference answer written by someone who knows.
+- **It costs calls.** Two more per question here.
+
+So the judge ranks configurations; it does not certify answers. Spot-check
+the claims it lists by hand, which the report makes easy.
+
 ### In this code
 
 - [`src/rag_app/eval/runner.py`](../src/rag_app/eval/runner.py) —
@@ -1141,12 +1515,46 @@ the manual grounding rubric before drawing an answer-quality conclusion.
   (see the `float(gain) > 0.0` filter in `score_question`). That is how you
   encode a known false positive without demanding the retriever return it.
   Rows with only `expected_sources` fall back to a flat gain of 1.0.
-- [`eval/questions.json`](../eval/questions.json) — the shipped gold set: 16
-  questions over the corpus in `documents/`, four of them graded. Each row
-  isolates one thing — an exact-token case, a vocabulary-mismatch case, two
-  multi-source cases, and one deliberately **unanswerable** question that has
-  `expected_sources: []` and expects the model to refuse. Schema is in
+- [`eval/questions.json`](../eval/questions.json) — the shipped gold set: 22
+  questions over the corpus in `documents/`, five of them graded. Each row
+  isolates one thing — an exact-token case, a vocabulary-mismatch case,
+  multi-source cases, table and source-code cases, and two deliberately
+  **unanswerable** questions that have `expected_sources: []` and expect the
+  model to refuse. Schema is in
   [`eval/models.py`](../src/rag_app/eval/models.py).
+- **Question sets** — [`eval/sets.py`](../src/rag_app/eval/sets.py) keeps your
+  own sets as JSON files in `<index_file>.evalsets/`. The bundled set is
+  always there as `sample` and is read-only. A row has a `status`:
+  `EvalSetStore.questions()` returns only `accepted` rows, so a `draft` is
+  stored but never scored.
+- **Generated questions** —
+  [`generate_questions`](../src/rag_app/eval/generate.py) picks chunks in turn
+  across files (so one large file does not write the whole set), asks the chat
+  model for `QUESTION:` / `ANSWER:` per chunk, discards replies it cannot use —
+  including questions that point at "the passage", which no retriever could be
+  asked — and returns drafts with `origin: "synthetic"`, the chunk's file as
+  `expected_sources` and the model's answer as `reference_answer`.
+- **Citation checks** — in a full run `run_eval` keeps
+  [`parse_citations`](../src/rag_app/retrieval/citations.py)' result per
+  answer. The report shows the share of answers that cite a passage, the share
+  of cited passages that come from an expected file, and the number of
+  citations to passages that do not exist. A correct refusal is left out: it
+  has nothing to cite.
+- **The judge** — [`eval/judge.py`](../src/rag_app/eval/judge.py).
+  `judge_faithfulness` asks for one `CLAIM: ... | SUPPORTED: yes/no` line per
+  claim and scores the supported share; a second call rates relevance and, when
+  the question has a `reference_answer`, correctness on a 1-5 scale. Replies
+  are plain text lines, not JSON, so any local model can be the judge, and a
+  reply that cannot be parsed scores `None` (not judged) instead of being
+  guessed at. The judge is the chat model unless `evaluation.judge_model` names
+  another (`evaluation.judge_provider` and `evaluation.judge_base_url` say
+  where it is served; all three default to `null`).
+- **Experiments** —
+  [`eval/experiments.py`](../src/rag_app/eval/experiments.py). `PRESETS` has
+  one entry per technique; `plan_experiment` validates a request (and a custom
+  preset's settings through `apply_overrides`) before a job starts.
+  `run_eval(..., generate_answers=False)` with a chat provider is "retrieval
+  with LLM help": the chat model takes part in retrieval but writes no answers.
 
 ### Try it
 
@@ -1160,6 +1568,29 @@ the manual grounding rubric before drawing an answer-quality conclusion.
 
 Now break it on purpose: edit `eval/questions.json` to expect a wrong
 source file, re-run, see the FAIL row. Then put it back.
+
+Then measure on your own terms:
+
+```powershell
+# A question set of your own: write one, let the model draft some, review them.
+.\run.bat eval-set add mine --question "What does SMPR reset to?" --source adx12_datasheet.pdf --reference "0x0003."
+.\run.bat eval-set generate mine --n 8
+.\run.bat eval-set show mine                 # drafts are marked; read each one
+.\run.bat eval-set accept mine 1 2 4         # only the ones worth keeping
+
+# One preset per technique, from the same dense baseline, on your set.
+.\run.bat experiment --list
+.\run.bat experiment -p dense -p hybrid -p neighbors --question-set mine
+.\run.bat experiment -p dense -p hyde -p rerank --llm --question-set mine
+
+# Answers, citations, and a model's opinion of both.
+.\run.bat experiment -p dense -p hybrid --mode full --judge --question-set mine --out report.csv
+```
+
+In the web UI these are the **Experiments** panel and its **Question sets**
+section; in the desktop GUI the **Experiments** tab with a **Question sets**
+page. Every answer in the Ask tab has **Save as evaluation question**, which
+is the quickest way to grow a set from questions you really asked.
 
 ### Interview check
 
@@ -1177,6 +1608,16 @@ source file, re-run, see the FAIL row. Then put it back.
 - **Q: Why a gold-standard set rather than vibes?**
   Without ground truth you can't tell whether your chunk-size change
   helped or hurt. Eval set + CI = the only way to iterate confidently.
+- **Q: Can you trust an LLM judge?**
+  As a way to rank configurations, with care. It is noisy on small models,
+  biased when a model grades its own output, and it only checks the answer
+  against what was retrieved, so a faithful answer can still be wrong. Use a
+  different, stronger model as judge, compare averages, and spot-check.
+- **Q: What is wrong with a test set the model generated itself?**
+  The questions reuse the source chunk's wording, so retrieval looks better
+  than it is on real questions, and some questions are unanswerable out of
+  context. Review every generated question before it counts, and mix in
+  questions people really asked.
 
 ### Exercises
 
@@ -1196,10 +1637,10 @@ miss, so `report.all_passed` is False and the CLI exits 1. This is why an
 eval set beats "it worked when I tried it" — it turns a regression into a red
 build instead of a surprise in production.
 
-Note the baseline is **not** all green: with every advanced flag off you should
-see roughly `13/16` passing. That is deliberate. A gold set where everything
+Note the baseline is **not** expected to be all green: with every advanced
+flag off some rows fail. That is deliberate. A gold set where everything
 already passes cannot measure an improvement — it has no headroom, so every
-change you make looks free. The three baseline failures are the material for
+change you make looks free. The baseline failures are the material for
 Exercise 8.2.
 </details>
 
@@ -1227,7 +1668,7 @@ techniques instead of eyeballing retrieved chunks.
 
 **Historical illustrative results, not a reproducible benchmark.** These values
 came from the earlier 16-question corpus without a retained exact model/config
-artifact. The current dataset has 17 questions. Neither the numbers nor the
+artifact. The current dataset has 22 questions. Neither the numbers nor the
 directions are acceptance criteria. Export a fresh web experiment report before
 making a quality claim about your model or corpus:
 
@@ -1273,6 +1714,84 @@ tuning to 100% and declaring victory.
 The habit to take away: one change, one measurement, one recorded reason.
 </details>
 
+#### Exercise 8.3 — A question set for your own corpus (~30 min)
+
+**Goal:** stop measuring on someone else's questions. **Steps:**
+
+- Ingest a few of your own documents (or keep the sample corpus and pretend the
+  bundled questions do not exist).
+- Ask three real questions in the Ask tab and press **Save as evaluation
+  question** on each good answer. Check the expected files before saving.
+- Draft more: `.\run.bat eval-set generate mine --n 10`, then
+  `.\run.bat eval-set show mine`. Read every draft (`--row N` shows one in
+  full; in the UIs, open its passage).
+- Accept the good ones, remove the rest, and note *why* you removed each.
+- Run `.\run.bat experiment -p dense -p hybrid --question-set mine` and compare
+  the recall of the rows you saved from conversations with the generated rows
+  (the JSON report has `origin` on every question).
+
+<details>
+<summary>What you should have seen</summary>
+
+What the code guarantees: generated rows arrive as drafts and
+`eval --question-set mine` ignores them until accepted; every draft names the
+file its chunk came from and carries the model's answer as the reference; the
+count of unusable replies is reported, and a question containing "this
+passage" or "the text" never reaches you.
+
+What depends on your model, so judge it yourself: how many drafts are worth
+keeping. Typical reasons to remove one are that it asks about something
+trivial (a heading, a document title), that it can only be answered with the
+chunk in view ("what are the three steps?"), that its answer is wrong, or that
+two files answer it equally well, which makes the single expected file unfair.
+
+The comparison usually shows the pattern this exercise is about: generated
+questions score higher than the ones you really asked, because they share
+words with the chunk they were written from. If your set were all synthetic,
+you would conclude retrieval is better than it is. That gap is the reason to
+keep real questions in the set, and the reason hybrid search can look less
+useful on synthetic questions than it is: dense retrieval already finds
+questions that echo the chunk.
+</details>
+
+#### Exercise 8.4 — Judge the judge (~25 min)
+
+**Goal:** find out how far to trust an LLM judge before relying on it.
+**Steps:**
+
+- Run the same full experiment twice:
+  `.\run.bat experiment -p dense --mode full --judge --question-set mine --out run1.json`
+  and again to `run2.json`. Compare the three judge averages.
+- Open `run1.json`, pick two answers, and check the judge's `claims` yourself
+  against the `sources` listed for that answer. Was every "supported: true"
+  really supported?
+- If you have a second chat model, set `evaluation.judge_model` to it and run
+  once more. Compare faithfulness with the self-graded run.
+
+<details>
+<summary>What you should have seen</summary>
+
+What the code guarantees: each judged answer lists its claims with a verdict,
+faithfulness is the supported share, relevance and correctness are 1-5 ratings
+mapped to 0..1, correctness is `null` for a question without a
+`reference_answer`, and a reply the parser cannot read leaves the score `null`
+with a note instead of a guess. The report header says when the chat model
+graded its own answers.
+
+What to look for in your own runs: the two averages will usually differ in the
+second decimal or more, even though nothing changed. That difference is the
+noise floor. A configuration change that moves faithfulness by less than that
+has not been shown to do anything. In the hand check, the common judge errors
+are marking a claim supported because the passage is on the same topic, and
+splitting one sentence into several claims (which shifts the ratio). With a
+second model as judge, self-graded scores tend to be the higher ones.
+
+The conclusion is not "judges are useless". It is: retrieval metrics are
+exact and cheap, so tune retrieval with them; use the judge to compare answer
+quality between two configurations over many questions; and read the claims,
+not just the number, when a result matters.
+</details>
+
 ### Checkpoint
 
 - [ ] I ran eval with `--skip-llm` (retrieval only) and full (with the LLM).
@@ -1283,6 +1802,12 @@ The habit to take away: one change, one measurement, one recorded reason.
       technique that improved the mean and one that the metric could not see.
 - [ ] I can explain what `expected_relevance` gains buy over pass/fail labels,
       and what a gain of `0.0` means.
+- [ ] I built a question set for a corpus of my own, with at least one
+      question saved from a conversation and one generated draft I rejected.
+- [ ] I ran an experiment on that set, and one with LLM help for a
+      chat-assisted technique.
+- [ ] I can give three reasons an LLM judge's score is not a measurement, and
+      say what `evaluation.judge_model` is for.
 
 ---
 
@@ -1471,14 +1996,74 @@ raw prefix in `metadata["context_prefix"]` so you can always recover or strip
 it. The trade-off: prompts get slightly longer and neighbor-stitched passages
 repeat prefixes.
 
-#### H. Advanced architectures — *not implemented*
+#### H. Agentic retrieval — the model runs the loop
 
-- **Agentic RAG**: LLM decides whether/how/when to retrieve, possibly
-  multiple times, possibly with tools. (Multi-hop above is a constrained,
-  non-tool-using special case of this.)
-- **GraphRAG (Microsoft)**: build a knowledge graph from the corpus,
-  retrieve subgraphs instead of chunks. Better for "what's the
-  relationship between X and Y?" questions; much more infra.
+Everything so far is a **fixed pipeline**: the code decides the steps and the
+model fills in the blanks (write a passage, rephrase, suggest one follow-up).
+Agentic RAG turns that around. The model gets a small set of actions and
+picks one per step, sees what came back, and picks again:
+
+| action | effect |
+|---|---|
+| `SEARCH: <query>` | run the configured retrieval pipeline for that query |
+| `NEIGHBORS: <n>` | read the passages before and after passage `[n]` |
+| `DOCUMENTS` | list the files in the collection |
+| `FINISH` | stop gathering; the answer is written from what was found |
+
+That loop — *decide, act, observe* — is the whole idea, and it is what
+"tool use" and "function calling" mean in practice. Multi-hop (9-F) is the
+constrained special case: one action (search), one decision (follow up or
+stop). It pays off on questions a single search cannot serve, such as two
+unrelated parts ("compare the CAN error code with the SPI one") or a lookup
+that depends on the previous result.
+
+What it costs is what makes it the last technique to reach for:
+
+- **One model call per step**, before the answer is even started.
+- **Unpredictability.** The same question can take a different path on a
+  rerun. A fixed pipeline fails the same way every time, which is easier to
+  debug and to evaluate.
+- **It depends on the model.** A small model that cannot follow the action
+  format, or that searches the same thing three times, makes it worse than
+  the fixed pipeline.
+
+So the loop is boxed in on every side: a step budget
+(`retrieval.agent_max_steps`), a refusal to run the same search twice, a
+plain-text action format instead of native tool calling (function calling
+differs between model servers and small local models do it badly), and a
+fallback to the fixed pipeline after two unreadable replies. The agent only
+*gathers evidence*; the answer still comes from the normal prompt, so
+citations and everything after retrieval work unchanged.
+
+#### I. Entity-graph retrieval — look it up by name
+
+Similarity search finds passages that *sound like* the question. Some
+questions are about a **thing**: "what does NBRP depend on?". The best
+evidence is every passage that mentions NBRP, and the passages about what
+NBRP is tied to, even if those never use the question's words.
+
+**GraphRAG** (Microsoft, 2024) builds a knowledge graph of the corpus for
+this. This project implements its entity half:
+
+1. **At ingest** (`chunking.entity_graph`), the chat model lists the named
+   things each chunk mentions and the relations it states:
+   `NBRP -must match-> DBRP`. They are stored in the chunk's metadata.
+2. **At query time** (`retrieval.graph`), entity names in the question are
+   found by plain text match. Chunks that mention a matched entity form a
+   ranked list (rarer entities count for more), and chunks of entities **one
+   relation away** join at half weight. That list is fused with the vector
+   and BM25 lists by RRF, exactly as hybrid search fuses its two.
+
+The one-relation step is the point: a chunk about DBRP can be the right
+evidence for a question that only says NBRP, and no embedding would rank it.
+
+Costs: one model call **per chunk** at ingest (like contextual retrieval),
+nothing extra per query, and the graph is only as good as the extraction, so
+look at it before trusting it. What is *not* implemented is the other half of
+GraphRAG: clustering the graph into communities and summarising each one,
+which is what answers corpus-wide questions ("what are the main themes?").
+That needs far more ingest-time model calls and is where most of GraphRAG's
+infrastructure cost lies.
 
 ### In this code
 
@@ -1499,6 +2084,8 @@ exactly once:
 | Neighbor expansion | `retrieval.neighbor_radius: 1` | [`Retriever._expand_neighbors`](../src/rag_app/retrieval/retriever.py) (stitch +/-N adjacent chunks by id) |
 | Reranker | `retrieval.reranker_model: "llm-rerank"` or `retrieval.reranker_backend: "sentence-transformers"` | [`reranker.py`](../src/rag_app/retrieval/reranker.py) + [`RagService._retrieve_and_rerank`](../src/rag_app/retrieval/rag_service.py) |
 | Multi-hop | `retrieval.multi_hop: true`, `multi_hop_max_hops: 2` | [`Retriever._run_hops` / `_follow_up_query`](../src/rag_app/retrieval/retriever.py) (LLM issues follow-up queries; hops RRF-merged) |
+| Entity graph | `chunking.entity_graph: true` (ingest) + `retrieval.graph: true` (query) | [`entity_extractor.py`](../src/rag_app/ingestion/entity_extractor.py) (entities and relations per chunk) + [`entity_graph.py`](../src/rag_app/retrieval/entity_graph.py) (`EntityGraph.search`: matched entities and their neighbours as one more RRF list) |
+| Agentic retrieval | `retrieval.agentic: true`, `agent_max_steps: 6` | [`agent.py`](../src/rag_app/retrieval/agent.py) (`AgentRetriever` wraps the Retriever; `parse_action` reads the model's `ACTION:` line) |
 
 Combined flow when everything is on:
 
@@ -1520,56 +2107,90 @@ question
 
 (Contextual retrieval, 9-G, isn't in this query-time flow — it runs once at
 *ingest*, enriching each chunk's stored/embedded text so every step above
-matches better.)
+matches better. Entity extraction, 9-I, also runs at ingest; at query time it
+adds one more list to the "RRF merge" line.)
+
+With `agentic` on, the flow above becomes the body of a loop: the model
+issues `SEARCH` actions, each one runs that whole flow for its query, and the
+results of all searches are RRF-merged before the prompt is built. Note the
+design: `AgentRetriever` has the same surface as `Retriever`, so
+`RagService`, the eval runner and the comparison tools use either without
+knowing which. The framework version of the same loop is
+[`examples/langgraph_agentic_rag.py`](../examples/langgraph_agentic_rag.py),
+where the `for` is a state graph.
 
 ### Try it
 
-Watch each upgrade fix a specific failure:
+Watch each upgrade fix a specific failure. Every step changes **one setting
+for one run** with `--set`, so `config.yaml` keeps your defaults; to make a
+setting permanent, write the same name under `retrieval:` in the file.
+`--trace` (on `retrieve`/`compare`) and `--debug` (on `query`) print the
+pipeline stage by stage, which is where you see what the technique did.
 
 ```powershell
-# 1) Cement the dense-only failure mode.
-.\run.bat retrieve "ERR080082"     # often misses the chunk with that exact identifier
+# 1) Dense-only misses an exact identifier; hybrid search finds it.
+.\run.bat compare "ERR080082" --a hybrid=false --b hybrid=true --trace
+#    The table shows each chunk's rank under A and B. In pipeline B, read
+#    "BM25 keyword search" and then "Reciprocal rank fusion": the "found by"
+#    column says which list contributed each chunk and at what rank.
 
-# 2) Turn on hybrid search.
-#    Edit config.yaml: retrieval.hybrid = true
-.\run.bat retrieve "ERR080082"     # now BM25 finds it even if vector search didn't
+# 2) HyDE. `retrieve` keeps the chat model out unless you pass --llm.
+.\run.bat retrieve "vague natural-language question about your domain" --llm --set use_hyde=true --trace
+#    The "HyDE hypothetical passage" stage shows the text that was embedded
+#    instead of your question. Slower: that is the extra LLM call.
 
-# 3) Turn on HyDE (keep hybrid on if you like).
-#    Edit config.yaml: retrieval.use_hyde = true
-.\run.bat retrieve "vague natural-language question about your domain"
-#    The first time will be slower — that's the extra LLM call writing
-#    the hypothetical paragraph.
+# 3) Multi-query. Ask with vocabulary that does NOT appear in the document.
+.\run.bat retrieve "how fast can the bus go" --llm --set multi_query=3 --trace
+#    "Query variants" lists the rephrasings; one usually lands on the
+#    document's own wording ("baud rate", "bit timing"). Each variant gets
+#    its own "Vector search" stage, then fusion merges them.
 
-# 4) Turn on multi-query.
-#    Edit config.yaml: retrieval.multi_query = 3
-.\run.bat query "how fast can the bus go" --debug
-#    Ask using vocabulary that does NOT appear in the document. The log
-#    shows the LLM's rephrasings; one of them usually lands on the
-#    document's own wording ("baud rate", "bit timing") and retrieves it.
+# 4) Neighbor expansion.
+.\run.bat query "..." --debug --set neighbor_radius=1
+#    Same hits, but the "Neighbor expansion" stage shows each chunk's size
+#    before and after its neighbors were stitched in.
 
-# 5) Turn on neighbor expansion.
-#    Edit config.yaml: retrieval.neighbor_radius = 1
-.\run.bat query "..." --debug
-#    Same hits — but each retrieved chunk in the debug output is now
-#    visibly longer because its neighbors were stitched in.
+# 5) The reranker, with a candidate pool to choose from.
+.\run.bat query "..." --debug --set reranker_model=llm-rerank --set candidate_k=20
+#    The "Reranker" stage has a "was" column: where each survivor ranked
+#    before the reranker scored it.
 
-# 6) Turn on the reranker.
-#    Edit config.yaml: retrieval.reranker_model = "llm-rerank"
-.\run.bat query "..." --debug
-#    Inspect the order of returned sources; the reranker should push the
-#    most-relevant chunk to position 1.
+# 6) MMR: trade a little relevance for less repetition.
+.\run.bat compare "What is bit timing?" --a use_mmr=false --b use_mmr=true --b mmr_lambda=0.3
 
-# 7) Turn on multi-hop and ask a bridge question.
-#    Edit config.yaml: retrieval.multi_hop = true
-.\run.bat query "Compare CAN FD bit timing with SPI double buffering" --debug
-#    The debug output gains a "Hops" row and a follow-up-query table; the
-#    retrieved-chunks table shows which hop each chunk came from.
+# 7) Multi-hop and a bridge question.
+.\run.bat query "Compare CAN FD bit timing with SPI double buffering" --debug --set multi_hop=true
+#    "Multi-hop follow-up" stages show the follow-up queries (or why the
+#    loop stopped); "Merge hops" shows which hop found each chunk.
 
-# 8) Check what the system thinks is on:
+# 8) Agentic retrieval on a two-part question. Each step prints as it happens.
+.\run.bat query "Compare the CAN error code ERR080082 with the SPI report QR-4471-B" --agent --debug
+#    Read the "agent step" lines: which searches did the model choose, and
+#    did it stop by itself? "Evidence gathered by the agent" says why the
+#    loop ended. Run it twice: the path may differ.
+
+# 9) Entity graph. Needs an ingest with extraction on (one chat call per chunk).
+#    In config.yaml: chunking.entity_graph: true, then:
+.\run.bat ingest
+.\run.bat graph                       # what was extracted; check it makes sense
+.\run.bat graph "NBRP"                # one entity: relations and chunks
+.\run.bat compare "What does NBRP depend on?" --a graph=false --b graph=true --trace
+#    In pipeline B, "Entity graph lookup" names the entities it matched and
+#    the related ones; "Reciprocal rank fusion" shows which chunks only the
+#    graph list contributed.
+
+# 10) Check what your config file has switched on by default:
 .\run.bat stats
 #    The bottom rows: Hybrid search / HyDE / Reranker / Multi-query /
-#    Neighbor expansion / Multi-hop.
+#    Neighbor expansion / Multi-hop / Entity-graph retrieval / Agentic retrieval.
 ```
+
+The same experiments without a terminal: on the web **Ask** panel open
+**Techniques for this question**, tick a technique, tick **Show debug
+details**, and ask; the **Compare** panel runs settings A against settings B.
+The desktop Ask and Compare tabs work the same way. With **Agentic
+retrieval** ticked, the agent's steps appear above the answer while it works.
+The entity graph is browsable in the **Lab** (web panel and desktop tab).
 
 ### Interview check
 
@@ -1625,6 +2246,18 @@ Watch each upgrade fix a specific failure:
   Decomposition plans every sub-question up front from the question text
   alone. Multi-hop conditions each follow-up on what the previous hop
   actually retrieved — a feedback loop, not a static plan.
+- **Q: What makes RAG "agentic", and when is it worth it?**
+  The model chooses the retrieval steps itself (search this, read around
+  that, stop) instead of following a fixed pipeline. Worth it for multi-part
+  or dependent questions; costs a model call per step and predictability, so
+  it needs a step budget, a repeat check and a fallback, and it should earn
+  its place on an eval set like any other technique.
+- **Q: What does a knowledge graph add to RAG?**
+  Lookup by entity and by relationship. Entities and relations are extracted
+  at ingest; a question that names an entity retrieves the chunks that
+  mention it and the chunks of related entities, which similarity search
+  would not connect. Full GraphRAG also summarises communities of the graph
+  to answer corpus-wide questions.
 
 ### Exercises
 
@@ -1743,6 +2376,104 @@ If your model does chase the lead, you have a strong retrieval planner — worth
 knowing before you build anything agentic on top of it.
 </details>
 
+#### Exercise 9.3 — Let the model run the loop (~20 min)
+
+**Goal:** see what an agent adds over a fixed pipeline, and what it costs.
+**Steps:**
+
+- Ask a two-part question without and with the agent, with `--debug`:
+
+  ```powershell
+  .\run.bat query "Compare the CAN error code ERR080082 with the SPI report QR-4471-B" --debug
+  .\run.bat query "Compare the CAN error code ERR080082 with the SPI report QR-4471-B" --agent --debug
+  ```
+
+- For the agent run, write down each step's action and query, and the reason
+  given in "Evidence gathered by the agent" for stopping.
+- Run the agent a second time. Did it take the same steps?
+- Lower the budget: `--agent --set agent_max_steps=1`. What happens?
+- Measure it: `.\run.bat experiment -p dense -p multi_hop -p agentic --llm`.
+
+<details>
+<summary>What you should have seen</summary>
+
+What the code guarantees: every step is one chat call and is printed with the
+model's `THOUGHT`, its action and what came back; a search the model already
+made is not run again (it is told so instead); the loop ends on `FINISH`, on
+the step budget, or after two replies that are not in the action format, and
+in that last case the trace shows "Fixed pipeline (agent fallback)" followed
+by the ordinary stages. With `agent_max_steps=1` there is room for one search
+and the answer is written from that. The sources of the agent run are the
+RRF-merged results of all its searches, at most `2 x top_k`.
+
+What depends on your model, so observe it: whether it splits the question
+into one search per part (the behaviour you want), whether it stops by itself
+or runs to the budget, and whether two runs take the same path. Small local
+models often produce one good search and then repeat or rephrase it; that is
+the same planner weakness Exercise 9.2 showed for multi-hop, with more rope.
+If your model emits prose instead of `ACTION:` lines, you will see the
+fallback, which is the system working as designed.
+
+The experiment puts a number on it. Compare the `agentic` row with `dense`
+and `multi_hop`: recall may rise on multi-part questions, and the seconds
+column shows what each step costs. If recall does not move, the agent is
+paying model calls for nothing on this corpus, and the fixed pipeline is the
+better engineering choice. An agent is justified by a measured gain on
+questions the fixed pipeline fails, not by being the newer idea.
+</details>
+
+#### Exercise 9.4 — Build and question an entity graph (~30 min, mostly ingest time)
+
+**Goal:** understand what a knowledge graph adds, and check the extraction
+before trusting it. **Steps:**
+
+- Use a separate learning index (extraction re-ingests everything). Set
+  `chunking.entity_graph: true` and run `.\run.bat ingest`. Note how long it
+  takes compared with a normal ingest.
+- `.\run.bat graph`. Read the top entities. Are they things a person would
+  look up, or generic words? Pick one you know and run `.\run.bat graph "<it>"`.
+- Find a relation that is wrong or missing by reading one of the listed chunks
+  (`.\run.bat inspect --id <chunk id>` shows its `entities` and `relations`
+  metadata).
+- Ask a question that names an entity but not its neighbour, with and without
+  the graph:
+  `.\run.bat compare "What must NBRP match?" --a graph=false --b graph=true --trace`
+- Ask a question that names no entity, with `--set graph=true --debug`.
+
+<details>
+<summary>What you should have seen</summary>
+
+What the code guarantees: ingest makes one extra chat call per chunk, so it is
+slower by roughly your model's response time multiplied by the chunk count;
+each chunk's metadata gains `entities`, `entity_types` and `relations` strings;
+a chunk whose extraction failed or returned nothing simply has none and still
+ingests. At query time no model is called for the graph. The "Entity graph
+lookup" stage lists `matched` (names found in the question as whole words,
+longest name first, so "CAN FD" does not also match "CAN") and `related`
+(entities one relation away). Chunks from the graph list appear in "Reciprocal
+rank fusion" with `graph #n` in their "found by" column. A question with no
+known entity shows `matched` empty and the result is identical to the run
+without the graph.
+
+What depends on your model: the quality of the graph. Expect some generic
+entities, the same thing under two names ("CAN FD" and "CAN-FD" are two
+nodes; nothing merges them), and relations the passage does not really state.
+This is the main practical weakness of LLM-built graphs: errors made at ingest
+are baked in, invisible at query time, and expensive to fix (re-ingest). It is
+why the graph has a browser at all.
+
+In the comparison, look for a chunk that only side B found and whose "found
+by" is the graph alone. If it is about the related entity and helps answer the
+question, that is the technique working: evidence reached through a
+relationship, not through similar wording. If the graph list only repeats what
+vector search already ranked first, it added cost at ingest and nothing at
+query time for that question.
+
+What this graph cannot do: answer "what are the main topics of this corpus?".
+No single entity is named, so nothing matches. That is the question full
+GraphRAG's community summaries exist for, and they are not implemented here.
+</details>
+
 ### Checkpoint
 
 - [ ] I toggled hybrid, HyDE, multi-query, MMR, neighbor expansion, and
@@ -1750,6 +2481,12 @@ knowing before you build anything agentic on top of it.
       debug output.
 - [ ] I can explain RRF and why it needs no score normalisation.
 - [ ] I can contrast multi-hop with query decomposition in one sentence.
+- [ ] I ran a question with `--agent`, read its steps, and can name the four
+      things that keep the loop from running away.
+- [ ] I can say when an agent is worth its cost and how I would show it.
+- [ ] I built an entity graph, found one extraction error in it, and can
+      explain what the one-relation step retrieves that similarity search
+      does not, and what full GraphRAG adds on top.
 
 ---
 
@@ -2272,7 +3009,7 @@ this is `chat.generate`."
 The LCEL chain `{"context": retriever | format_docs, "question": passthrough} |
 prompt | llm | StrOutputParser()` is a one-line spelling of
 `RagService.answer`: `retriever` is `Retriever.retrieve`, `format_docs` is the
-`[Source N]` block assembly inside `PromptBuilder.build`, `prompt | llm` is
+numbered `[N]` block assembly inside `PromptBuilder.build`, `prompt | llm` is
 `ChatProvider.generate`, and `StrOutputParser()` is the `.content` access you do
 by hand. What the framework adds is composition and streaming plumbing; what it
 hides is *which* of those steps is costing you latency — which is why your

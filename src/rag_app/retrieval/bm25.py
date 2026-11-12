@@ -20,6 +20,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from rag_app.models import RetrievedChunk
+from rag_app.validation import matches_filter
 from rag_app.vectorstores.base import VectorStore
 
 
@@ -73,8 +74,12 @@ class BM25Index:
         total_tokens = sum(len(d.tokens) for d in self._docs)
         self._avg_dl = total_tokens / self._n if self._n else 1.0
 
-    def search(self, query: str, top_k: int = 20) -> list[RetrievedChunk]:
-        """Score every document against `query` and return top-k results."""
+    def search(self, query: str, top_k: int = 20, where: dict | None = None) -> list[RetrievedChunk]:
+        """Score every document against `query` and return top-k results.
+
+        `where` is the same metadata filter the vector search gets; chunks
+        outside it are not scored.
+        """
 
         if not self._docs:
             return []
@@ -85,6 +90,8 @@ class BM25Index:
 
         scored: list[tuple[float, str]] = []
         for doc in self._docs:
+            if where and not matches_filter(self._chunk_map[doc.chunk_id].metadata, where):
+                continue
             score = self._score_doc(doc, query_tokens)
             if score > 0:
                 scored.append((score, doc.chunk_id))
@@ -131,6 +138,22 @@ _INDEX_CACHE: dict[tuple, BM25Index] = {}
 _INDEX_LOCK = RLock()
 
 
+def corpus_cache_key(store: VectorStore) -> tuple | None:
+    """A key that changes whenever the stored corpus does, or None.
+
+    Anything derived from "every chunk in the store" (the BM25 index, the
+    entity graph) can be kept under this key and rebuilt when it changes.
+    """
+
+    key_fn = getattr(store, "bm25_cache_key", None)
+    key = key_fn() if key_fn is not None else None
+    coordinator = getattr(store, "coordinator", None)
+    if key is not None and coordinator:
+        from rag_app.ingestion.hash_tracker import HashTracker
+        key = (*key, HashTracker(coordinator.path).metadata.get("revision"))
+    return key
+
+
 def get_bm25_index(store: VectorStore) -> BM25Index:
     with _INDEX_LOCK:
         return _get_bm25_index(store)
@@ -150,13 +173,7 @@ def _get_bm25_index(store: VectorStore) -> BM25Index:
     Raises NotImplementedError when the store cannot enumerate its chunks.
     """
 
-    key_fn = getattr(store, "bm25_cache_key", None)
-    key = key_fn() if key_fn is not None else None
-
-    coordinator = getattr(store, "coordinator", None)
-    if key is not None and coordinator:
-        from rag_app.ingestion.hash_tracker import HashTracker
-        key = (*key, HashTracker(coordinator.path).metadata.get("revision"))
+    key = corpus_cache_key(store)
 
     if key is not None:
         cached = _INDEX_CACHE.get(key)

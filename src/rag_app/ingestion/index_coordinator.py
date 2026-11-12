@@ -48,13 +48,30 @@ def store_identity(cfg) -> dict:
 
 
 def ingestion_settings(cfg) -> dict:
-    return {
-        "extractor_version": 2,
-        "chunking": cfg.chunking.model_dump(),
+    chunking = cfg.chunking.model_dump()
+    # Entity extraction is described by its own key below, and only while it
+    # is on, so an index built before the setting existed keeps its
+    # fingerprint and is not re-ingested for nothing.
+    extracts_entities = chunking.pop("entity_graph")
+    settings = {
+        # 3: chunks carry locations (page/slide/sheet/lines) and code is split
+        # at definitions. Bumping this re-ingests unchanged files on the next run.
+        "extractor_version": 3,
+        "chunking": chunking,
         "ocr": cfg.ocr.model_dump(),
+        "extraction": cfg.extraction.model_dump(),
         "embeddings": embedding_identity(cfg),
         "contextual_chat": cfg.chat.model_dump() if cfg.chunking.contextual else None,
     }
+    if extracts_entities:
+        settings["entity_graph_chat"] = cfg.chat.model_dump()
+    return settings
+
+
+def ingest_needs_chat(cfg) -> bool:
+    """Whether ingestion calls the chat model (once per chunk, per feature)."""
+
+    return bool(cfg.chunking.contextual or cfg.chunking.entity_graph)
 
 
 def ingestion_fingerprint(cfg) -> str:
@@ -292,7 +309,7 @@ def rebuild_index(cfg, embedding_provider, store, chat_provider=None):
     collection are retained for rollback. Run with other app processes stopped.
     """
     from rag_app.ingestion.ingest_service import IngestService, IngestSummary
-    from rag_app.ingestion.document_loader import scan_folder
+    from rag_app.ingestion.document_loader import scan_folder, scan_options
 
     coordinator = IndexCoordinator(cfg, store)
     with coordinator.writer(), coordinator.locked():
@@ -302,7 +319,7 @@ def rebuild_index(cfg, embedding_provider, store, chat_provider=None):
         if root.exists():
             paths.update(
                 canonical_path(d.path)
-                for d in scan_folder(root, include_ocr_types=cfg.ocr.enabled)
+                for d in scan_folder(root, **scan_options(cfg))
             )
         missing = [p for p in paths if not Path(p).is_file()]
         if missing:

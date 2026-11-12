@@ -1,0 +1,283 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R] /Count 5 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Length 1701 >>
+stream
+BT /F2 10 Tf 72 740 Td (ADX-12 12-bit SAR ADC - Reference Sheet) Tj ET
+BT /F1 10 Tf 72 724 Td (Synthetic teaching corpus - not a real datasheet. Written for the RAG learning path.) Tj ET
+BT /F1 10 Tf 72 708 Td (Every register name, error code and timing value on these pages is invented.) Tj ET
+BT /F2 10 Tf 72 676 Td (1. Overview) Tj ET
+BT /F1 10 Tf 72 660 Td (The ADX-12 is a 12-bit successive-approximation converter with eight analog inputs.) Tj ET
+BT /F1 10 Tf 72 644 Td (One conversion takes 14 clock cycles plus the programmed sample time.) Tj ET
+BT /F1 10 Tf 72 628 Td (The converter is controlled through five memory-mapped registers \(section 2\).) Tj ET
+BT /F1 10 Tf 72 612 Td (Results are right-aligned by default; set CTRL.ALIGN for left alignment.) Tj ET
+BT /F2 10 Tf 72 580 Td (1.1 Ordering codes) Tj ET
+BT /F2 10 Tf 76 562 Td (Code) Tj ET
+BT /F2 10 Tf 129.4 562 Td (Package) Tj ET
+BT /F2 10 Tf 189.0 562 Td (Channels) Tj ET
+BT /F2 10 Tf 248.6 562 Td (Max clock) Tj ET
+BT /F1 10 Tf 76 542 Td (ADX-12A) Tj ET
+BT /F1 10 Tf 129.4 542 Td (QFN-24) Tj ET
+BT /F1 10 Tf 189.0 542 Td (8) Tj ET
+BT /F1 10 Tf 248.6 542 Td (14 MHz) Tj ET
+BT /F1 10 Tf 76 522 Td (ADX-12B) Tj ET
+BT /F1 10 Tf 129.4 522 Td (TSSOP-20) Tj ET
+BT /F1 10 Tf 189.0 522 Td (4) Tj ET
+BT /F1 10 Tf 248.6 522 Td (14 MHz) Tj ET
+BT /F1 10 Tf 76 502 Td (ADX-12Q) Tj ET
+BT /F1 10 Tf 129.4 502 Td (QFN-24) Tj ET
+BT /F1 10 Tf 189.0 502 Td (8) Tj ET
+BT /F1 10 Tf 248.6 502 Td (36 MHz) Tj ET
+0.5 w
+72 576 m 310.4 576 l S
+72 556 m 310.4 556 l S
+72 536 m 310.4 536 l S
+72 516 m 310.4 516 l S
+72 496 m 310.4 496 l S
+72 576 m 72 496 l S
+125.4 576 m 125.4 496 l S
+185.0 576 m 185.0 496 l S
+244.6 576 m 244.6 496 l S
+310.4 576 m 310.4 496 l S
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 1967 >>
+stream
+BT /F2 10 Tf 72 740 Td (2. Register map) Tj ET
+BT /F1 10 Tf 72 724 Td (Table 2 lists the registers. Offsets are relative to the peripheral base address.) Tj ET
+BT /F2 10 Tf 76 706 Td (Register) Tj ET
+BT /F2 10 Tf 135.6 706 Td (Offset) Tj ET
+BT /F2 10 Tf 182.8 706 Td (Reset) Tj ET
+BT /F2 10 Tf 230.0 706 Td (Access) Tj ET
+BT /F2 10 Tf 277.2 706 Td (Purpose) Tj ET
+BT /F1 10 Tf 76 686 Td (CTRL) Tj ET
+BT /F1 10 Tf 135.6 686 Td (0x00) Tj ET
+BT /F1 10 Tf 182.8 686 Td (0x0000) Tj ET
+BT /F1 10 Tf 230.0 686 Td (RW) Tj ET
+BT /F1 10 Tf 277.2 686 Td (Enable, start, mode) Tj ET
+BT /F1 10 Tf 76 666 Td (SMPR) Tj ET
+BT /F1 10 Tf 135.6 666 Td (0x04) Tj ET
+BT /F1 10 Tf 182.8 666 Td (0x0003) Tj ET
+BT /F1 10 Tf 230.0 666 Td (RW) Tj ET
+BT /F1 10 Tf 277.2 666 Td (Sample time in clock cycles) Tj ET
+BT /F1 10 Tf 76 646 Td (SQR) Tj ET
+BT /F1 10 Tf 135.6 646 Td (0x08) Tj ET
+BT /F1 10 Tf 182.8 646 Td (0x0000) Tj ET
+BT /F1 10 Tf 230.0 646 Td (RW) Tj ET
+BT /F1 10 Tf 277.2 646 Td (Channel sequence) Tj ET
+BT /F1 10 Tf 76 626 Td (DR) Tj ET
+BT /F1 10 Tf 135.6 626 Td (0x0C) Tj ET
+BT /F1 10 Tf 182.8 626 Td (0x0000) Tj ET
+BT /F1 10 Tf 230.0 626 Td (RO) Tj ET
+BT /F1 10 Tf 277.2 626 Td (Conversion result) Tj ET
+BT /F1 10 Tf 76 606 Td (ISR) Tj ET
+BT /F1 10 Tf 135.6 606 Td (0x10) Tj ET
+BT /F1 10 Tf 182.8 606 Td (0x0000) Tj ET
+BT /F1 10 Tf 230.0 606 Td (RW1C) Tj ET
+BT /F1 10 Tf 277.2 606 Td (Status and error flags) Tj ET
+0.5 w
+72 720 m 450.6 720 l S
+72 700 m 450.6 700 l S
+72 680 m 450.6 680 l S
+72 660 m 450.6 660 l S
+72 640 m 450.6 640 l S
+72 620 m 450.6 620 l S
+72 600 m 450.6 600 l S
+72 720 m 72 600 l S
+131.6 720 m 131.6 600 l S
+178.8 720 m 178.8 600 l S
+226.0 720 m 226.0 600 l S
+273.2 720 m 273.2 600 l S
+450.6 720 m 450.6 600 l S
+BT /F1 10 Tf 72 584 Td (Writes to SMPR and SQR are ignored while CTRL.EN is set.) Tj ET
+BT /F1 10 Tf 72 568 Td (Clear CTRL.EN, write the register, then set CTRL.EN again.) Tj ET
+BT /F1 10 Tf 72 552 Td (Reading DR clears the EOC flag in ISR.) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 1538 >>
+stream
+BT /F2 10 Tf 72 740 Td (3. CTRL bit fields) Tj ET
+BT /F2 10 Tf 76 722 Td (Field) Tj ET
+BT /F2 10 Tf 117.0 722 Td (Bits) Tj ET
+BT /F2 10 Tf 151.8 722 Td (Meaning) Tj ET
+BT /F1 10 Tf 76 702 Td (EN) Tj ET
+BT /F1 10 Tf 117.0 702 Td (0) Tj ET
+BT /F1 10 Tf 151.8 702 Td (Converter enable) Tj ET
+BT /F1 10 Tf 76 682 Td (START) Tj ET
+BT /F1 10 Tf 117.0 682 Td (1) Tj ET
+BT /F1 10 Tf 151.8 682 Td (Start one conversion; self-clearing) Tj ET
+BT /F1 10 Tf 76 662 Td (CONT) Tj ET
+BT /F1 10 Tf 117.0 662 Td (2) Tj ET
+BT /F1 10 Tf 151.8 662 Td (Continuous conversion) Tj ET
+BT /F1 10 Tf 76 642 Td (ALIGN) Tj ET
+BT /F1 10 Tf 117.0 642 Td (3) Tj ET
+BT /F1 10 Tf 151.8 642 Td (Left-align the result in DR) Tj ET
+BT /F1 10 Tf 76 622 Td (RES) Tj ET
+BT /F1 10 Tf 117.0 622 Td (5:4) Tj ET
+BT /F1 10 Tf 151.8 622 Td (Resolution: 0=12, 1=10, 2=8 bit) Tj ET
+0.5 w
+72 736 m 374.8 736 l S
+72 716 m 374.8 716 l S
+72 696 m 374.8 696 l S
+72 676 m 374.8 676 l S
+72 656 m 374.8 656 l S
+72 636 m 374.8 636 l S
+72 616 m 374.8 616 l S
+72 736 m 72 616 l S
+113.0 736 m 113.0 616 l S
+147.8 736 m 147.8 616 l S
+374.8 736 m 374.8 616 l S
+BT /F1 10 Tf 72 600 Td (START is ignored unless EN has been set for at least 2 clock cycles.) Tj ET
+BT /F2 10 Tf 72 568 Td (3.1 Sample time) Tj ET
+BT /F1 10 Tf 72 552 Td (SMPR holds the sample time minus one, so the reset value 0x0003 means 4 cycles.) Tj ET
+BT /F1 10 Tf 72 536 Td (Total conversion time in clock cycles = 14 + SMPR + 1.) Tj ET
+BT /F1 10 Tf 72 520 Td (High-impedance sources need a longer sample time; see section 5.) Tj ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Length 1836 >>
+stream
+BT /F2 10 Tf 72 740 Td (4. Timing) Tj ET
+BT /F2 10 Tf 76 722 Td (Parameter) Tj ET
+BT /F2 10 Tf 191.4 722 Td (Min) Tj ET
+BT /F2 10 Tf 220.0 722 Td (Typ) Tj ET
+BT /F2 10 Tf 248.6 722 Td (Max) Tj ET
+BT /F2 10 Tf 277.2 722 Td (Unit) Tj ET
+BT /F1 10 Tf 76 702 Td (f_clk \(ADX-12A/B\)) Tj ET
+BT /F1 10 Tf 191.4 702 Td (0.5) Tj ET
+BT /F1 10 Tf 220.0 702 Td () Tj ET
+BT /F1 10 Tf 248.6 702 Td (14) Tj ET
+BT /F1 10 Tf 277.2 702 Td (MHz) Tj ET
+BT /F1 10 Tf 76 682 Td (f_clk \(ADX-12Q\)) Tj ET
+BT /F1 10 Tf 191.4 682 Td (0.5) Tj ET
+BT /F1 10 Tf 220.0 682 Td () Tj ET
+BT /F1 10 Tf 248.6 682 Td (36) Tj ET
+BT /F1 10 Tf 277.2 682 Td (MHz) Tj ET
+BT /F1 10 Tf 76 662 Td (t_conv) Tj ET
+BT /F1 10 Tf 191.4 662 Td () Tj ET
+BT /F1 10 Tf 220.0 662 Td (14) Tj ET
+BT /F1 10 Tf 248.6 662 Td () Tj ET
+BT /F1 10 Tf 277.2 662 Td (cycles) Tj ET
+BT /F1 10 Tf 76 642 Td (t_wake) Tj ET
+BT /F1 10 Tf 191.4 642 Td () Tj ET
+BT /F1 10 Tf 220.0 642 Td (20) Tj ET
+BT /F1 10 Tf 248.6 642 Td () Tj ET
+BT /F1 10 Tf 277.2 642 Td (us) Tj ET
+BT /F1 10 Tf 76 622 Td (t_sample) Tj ET
+BT /F1 10 Tf 191.4 622 Td (1) Tj ET
+BT /F1 10 Tf 220.0 622 Td (4) Tj ET
+BT /F1 10 Tf 248.6 622 Td (256) Tj ET
+BT /F1 10 Tf 277.2 622 Td (cycles) Tj ET
+0.5 w
+72 736 m 320.4 736 l S
+72 716 m 320.4 716 l S
+72 696 m 320.4 696 l S
+72 676 m 320.4 676 l S
+72 656 m 320.4 656 l S
+72 636 m 320.4 636 l S
+72 616 m 320.4 616 l S
+72 736 m 72 616 l S
+187.4 736 m 187.4 616 l S
+216.0 736 m 216.0 616 l S
+244.6 736 m 244.6 616 l S
+273.2 736 m 273.2 616 l S
+320.4 736 m 320.4 616 l S
+BT /F1 10 Tf 72 600 Td (After setting CTRL.EN wait t_wake before the first START.) Tj ET
+BT /F2 10 Tf 72 568 Td (5. Source impedance) Tj ET
+BT /F1 10 Tf 72 552 Td (Sources above 10 kOhm need at least 16 sample cycles for 12-bit accuracy.) Tj ET
+BT /F1 10 Tf 72 536 Td (Sources above 50 kOhm need at least 64 sample cycles.) Tj ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 1754 >>
+stream
+BT /F2 10 Tf 72 740 Td (6. Status flags and error codes) Tj ET
+BT /F2 10 Tf 76 722 Td (Flag) Tj ET
+BT /F2 10 Tf 110.8 722 Td (Bit) Tj ET
+BT /F2 10 Tf 139.4 722 Td (Code) Tj ET
+BT /F2 10 Tf 192.8 722 Td (Meaning) Tj ET
+BT /F1 10 Tf 76 702 Td (EOC) Tj ET
+BT /F1 10 Tf 110.8 702 Td (0) Tj ET
+BT /F1 10 Tf 139.4 702 Td () Tj ET
+BT /F1 10 Tf 192.8 702 Td (End of conversion; result is in DR) Tj ET
+BT /F1 10 Tf 76 682 Td (OVR) Tj ET
+BT /F1 10 Tf 110.8 682 Td (1) Tj ET
+BT /F1 10 Tf 139.4 682 Td (ADX-E17) Tj ET
+BT /F1 10 Tf 192.8 682 Td (Overrun: DR was not read in time) Tj ET
+BT /F1 10 Tf 76 662 Td (CLKE) Tj ET
+BT /F1 10 Tf 110.8 662 Td (2) Tj ET
+BT /F1 10 Tf 139.4 662 Td (ADX-E21) Tj ET
+BT /F1 10 Tf 192.8 662 Td (Clock below f_clk minimum) Tj ET
+BT /F1 10 Tf 76 642 Td (SEQE) Tj ET
+BT /F1 10 Tf 110.8 642 Td (3) Tj ET
+BT /F1 10 Tf 139.4 642 Td (ADX-E30) Tj ET
+BT /F1 10 Tf 192.8 642 Td (SQR selects a channel that does not exist) Tj ET
+0.5 w
+72 736 m 453.00000000000006 736 l S
+72 716 m 453.00000000000006 716 l S
+72 696 m 453.00000000000006 696 l S
+72 676 m 453.00000000000006 676 l S
+72 656 m 453.00000000000006 656 l S
+72 636 m 453.00000000000006 636 l S
+72 736 m 72 636 l S
+106.8 736 m 106.8 636 l S
+135.4 736 m 135.4 636 l S
+188.8 736 m 188.8 636 l S
+453.00000000000006 736 m 453.00000000000006 636 l S
+BT /F1 10 Tf 72 620 Td (Flags are cleared by writing 1 to them \(RW1C\). Writing 0 has no effect.) Tj ET
+BT /F1 10 Tf 72 604 Td (ADX-E17 does not stop the converter; the newest result overwrites DR.) Tj ET
+BT /F1 10 Tf 72 588 Td (ADX-E30 is raised on ADX-12B when SQR selects channels 4 to 7.) Tj ET
+BT /F2 10 Tf 72 556 Td (6.1 Recovery) Tj ET
+BT /F1 10 Tf 72 540 Td (After ADX-E21 clear CTRL.EN, restore the clock, and wait t_wake again.) Tj ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 13 0 R >>
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000142 00000 n 
+0000000212 00000 n 
+0000000287 00000 n 
+0000002040 00000 n 
+0000002176 00000 n 
+0000004195 00000 n 
+0000004331 00000 n 
+0000005921 00000 n 
+0000006058 00000 n 
+0000007947 00000 n 
+0000008085 00000 n 
+0000009892 00000 n 
+trailer
+<< /Size 15 /Root 1 0 R >>
+startxref
+10030
+%%EOF

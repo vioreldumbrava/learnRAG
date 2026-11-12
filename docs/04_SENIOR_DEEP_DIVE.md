@@ -980,7 +980,7 @@ rather than a quality mystery.
 Assume retrieved content is untrusted input, because that's exactly what it is —
 this is the RAG-specific attack surface. Defences layer: keep instructions and
 data structurally separated in the prompt (retrieved chunks arrive as labelled
-`[Source N]` data, never as system-role text), instruct the model that context is
+numbered `[N]` data, never as system-role text), instruct the model that context is
 reference material and not instructions, constrain what a compromised answer can
 *do* (no tool calls or side effects driven by retrieved text), and scan or quarantine
 at ingest. Then contain the blast radius: per-tenant isolation means a poisoned

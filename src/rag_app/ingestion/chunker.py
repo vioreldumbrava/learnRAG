@@ -106,6 +106,9 @@ _HEADING_RE = re.compile(
     r")",
     re.IGNORECASE | re.MULTILINE,
 )
+# Public name: ingestion metadata uses the same pattern, so a "section" is
+# exactly what the heading chunker treats as a section boundary.
+HEADING_RE = _HEADING_RE
 
 
 class HeadingStrategy(ChunkStrategy):

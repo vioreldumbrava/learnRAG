@@ -48,3 +48,6 @@ class RagAnswer(BaseModel):
 
     answer: str
     sources: list[RetrievedChunk]
+    # Which numbered passages the answer cites: {"cited": [1, 3],
+    # "invalid": [7], "uncited": [2]} (see retrieval/citations.py).
+    citations: dict[str, list[int]] = Field(default_factory=dict)

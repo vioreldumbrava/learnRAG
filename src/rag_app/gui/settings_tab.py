@@ -70,6 +70,8 @@ class SettingsTab(QWidget):
         layout.addWidget(self._build_chunking_box())
         layout.addWidget(self._build_retrieval_box())
         layout.addWidget(self._build_ocr_box())
+        layout.addWidget(self._build_extraction_box())
+        layout.addWidget(self._build_evaluation_box())
         layout.addWidget(self._build_performance_box())
         layout.addWidget(self._build_prompt_box())
 
@@ -128,6 +130,7 @@ class SettingsTab(QWidget):
         chunking["chunk_overlap"] = int(self.chunk_overlap_spin.value())
         chunking["strategy"] = self.strategy_combo.currentText()
         chunking["contextual"] = self.contextual_check.isChecked()
+        chunking["entity_graph"] = self.entity_graph_check.isChecked()
 
         data["vector_store"] = {
             "provider": self.store_provider_combo.currentText(),
@@ -173,11 +176,25 @@ class SettingsTab(QWidget):
         retrieval["neighbor_radius"] = int(self.neighbor_spin.value())
         retrieval["multi_hop"] = self.multi_hop_check.isChecked()
         retrieval["multi_hop_max_hops"] = int(self.multi_hop_max_spin.value())
+        retrieval["rewrite_followups"] = self.rewrite_followups_check.isChecked()
+        retrieval["graph"] = self.graph_check.isChecked()
+        retrieval["agentic"] = self.agentic_check.isChecked()
+        retrieval["agent_max_steps"] = int(self.agent_steps_spin.value())
 
         data["ocr"] = {
             "enabled": self.ocr_enabled_check.isChecked(),
             "min_chars_per_page": int(self.ocr_min_chars_spin.value()),
             "lang": self.ocr_lang_edit.text().strip() or "eng",
+        }
+        data["extraction"] = {
+            "pdf_tables": self.pdf_tables_check.isChecked(),
+            "code_files": self.code_files_check.isChecked(),
+            "code_max_chars": int(self.code_max_chars_spin.value()),
+        }
+        data["evaluation"] = {
+            "judge_model": self.judge_model_edit.text().strip() or None,
+            "judge_provider": self.judge_provider_combo.currentData(),
+            "judge_base_url": self.judge_url_edit.text().strip() or None,
         }
         data["cache"] = {
             "embedding": self.embed_cache_check.isChecked(),
@@ -228,6 +245,8 @@ class SettingsTab(QWidget):
         self.chunk_overlap_spin.setValue(cfg.chunking.chunk_overlap)
         self.strategy_combo.setCurrentText(cfg.chunking.strategy)
         self.contextual_check.setChecked(cfg.chunking.contextual)
+        self.entity_graph_check.setChecked(cfg.chunking.entity_graph)
+        self.graph_check.setChecked(cfg.retrieval.graph)
         self.top_k_spin.setValue(cfg.retrieval.top_k)
         self.candidate_k_spin.setValue(cfg.retrieval.candidate_k or 0)
         self.score_threshold_spin.setValue(cfg.retrieval.score_threshold or 0.0)
@@ -247,12 +266,23 @@ class SettingsTab(QWidget):
         self.neighbor_spin.setValue(cfg.retrieval.neighbor_radius)
         self.multi_hop_check.setChecked(cfg.retrieval.multi_hop)
         self.multi_hop_max_spin.setValue(cfg.retrieval.multi_hop_max_hops)
+        self.rewrite_followups_check.setChecked(cfg.retrieval.rewrite_followups)
+        self.agentic_check.setChecked(cfg.retrieval.agentic)
+        self.agent_steps_spin.setValue(cfg.retrieval.agent_max_steps)
         self.store_provider_combo.setCurrentText(cfg.vector_store.provider)
         self.qdrant_url_edit.setText(cfg.vector_store.qdrant_url or "")
         self.collection_edit.setText(cfg.vector_store.collection_name)
         self.ocr_enabled_check.setChecked(cfg.ocr.enabled)
         self.ocr_min_chars_spin.setValue(cfg.ocr.min_chars_per_page)
         self.ocr_lang_edit.setText(cfg.ocr.lang)
+        self.pdf_tables_check.setChecked(cfg.extraction.pdf_tables)
+        self.code_files_check.setChecked(cfg.extraction.code_files)
+        self.code_max_chars_spin.setValue(cfg.extraction.code_max_chars)
+        self.judge_model_edit.setText(cfg.evaluation.judge_model or "")
+        self.judge_provider_combo.setCurrentIndex(
+            max(0, self.judge_provider_combo.findData(cfg.evaluation.judge_provider))
+        )
+        self.judge_url_edit.setText(cfg.evaluation.judge_base_url or "")
         self.embed_cache_check.setChecked(cfg.cache.embedding)
         self.answer_cache_check.setChecked(cfg.cache.answer)
         self.cache_max_spin.setValue(cfg.cache.max_entries)
@@ -348,6 +378,8 @@ class SettingsTab(QWidget):
         self.chunk_overlap_spin.setValue(150)
         self.strategy_combo.setCurrentText("paragraph")
         self.contextual_check.setChecked(False)
+        self.entity_graph_check.setChecked(False)
+        self.graph_check.setChecked(False)
         self.top_k_spin.setValue(5)
         self.candidate_k_spin.setValue(0)
         self.score_threshold_spin.setValue(0.0)
@@ -364,12 +396,21 @@ class SettingsTab(QWidget):
         self.neighbor_spin.setValue(0)
         self.multi_hop_check.setChecked(False)
         self.multi_hop_max_spin.setValue(2)
+        self.rewrite_followups_check.setChecked(False)
+        self.agentic_check.setChecked(False)
+        self.agent_steps_spin.setValue(6)
         self.store_provider_combo.setCurrentText("chroma")
         self.qdrant_url_edit.setText("")
         self.collection_edit.setText("local_rag_docs")
         self.ocr_enabled_check.setChecked(False)
         self.ocr_min_chars_spin.setValue(50)
         self.ocr_lang_edit.setText("eng")
+        self.pdf_tables_check.setChecked(False)
+        self.code_files_check.setChecked(True)
+        self.code_max_chars_spin.setValue(2000)
+        self.judge_model_edit.setText("")
+        self.judge_provider_combo.setCurrentIndex(0)
+        self.judge_url_edit.setText("")
         self.embed_cache_check.setChecked(False)
         self.answer_cache_check.setChecked(False)
         self.cache_max_spin.setValue(1024)
@@ -425,6 +466,14 @@ class SettingsTab(QWidget):
             "with a local model. Queries are unaffected. Requires re-ingest."
         )
         form.addRow("", self.contextual_check)
+
+        self.entity_graph_check = QCheckBox("Extract entities for the entity graph")
+        self.entity_graph_check.setToolTip(
+            "At ingest, ask the chat model which named things (registers, error codes,\n"
+            "functions, ...) each chunk mentions and how they relate. Needed for\n"
+            "entity-graph retrieval. One chat call PER CHUNK; changing it re-ingests."
+        )
+        form.addRow("", self.entity_graph_check)
         return box
 
     def _build_retrieval_box(self) -> QGroupBox:
@@ -541,6 +590,37 @@ class SettingsTab(QWidget):
         )
         form.addRow("Max hops:", self.multi_hop_max_spin)
 
+        self.rewrite_followups_check = QCheckBox("Rewrite follow-up questions before searching")
+        self.rewrite_followups_check.setToolTip(
+            "In a conversation, the model first rewrites a follow-up such as\n"
+            "\"what about the data phase?\" into a standalone search query.\n"
+            "One extra LLM call per follow-up; first questions are searched as typed."
+        )
+        form.addRow("", self.rewrite_followups_check)
+
+        self.graph_check = QCheckBox("Entity-graph retrieval")
+        self.graph_check.setToolTip(
+            "Entities named in the question pull in the chunks that mention them and the\n"
+            "chunks of directly related entities, merged with the other results by RRF.\n"
+            "No extra model call. Needs an index ingested with entity extraction on."
+        )
+        form.addRow("", self.graph_check)
+
+        self.agentic_check = QCheckBox("Agentic retrieval (the model chooses its own searches)")
+        self.agentic_check.setToolTip(
+            "Instead of one fixed search, the chat model picks the next action step by\n"
+            "step: search, read neighbouring passages, list files, or stop. Helps on\n"
+            "questions with several parts. One chat call per step; falls back to the\n"
+            "fixed pipeline when the model's replies cannot be read."
+        )
+        form.addRow("", self.agentic_check)
+        self.agent_steps_spin = QSpinBox()
+        self.agent_steps_spin.setRange(1, 20)
+        self.agent_steps_spin.setToolTip("Upper bound on the agent's steps; each one is a chat call.")
+        form.addRow("Max agent steps:", self.agent_steps_spin)
+        self.agentic_check.toggled.connect(self.agent_steps_spin.setEnabled)
+        self.agent_steps_spin.setEnabled(False)
+
         self.store_provider_combo = QComboBox()
         self.store_provider_combo.addItems(["chroma", "qdrant"])
         self.store_provider_combo.setToolTip(
@@ -598,6 +678,63 @@ class SettingsTab(QWidget):
 
         self.ocr_enabled_check.toggled.connect(_toggle)
         _toggle(self.ocr_enabled_check.isChecked())
+
+        return box
+
+    def _build_extraction_box(self) -> QGroupBox:
+        box = QGroupBox("Extraction  (PDF tables and source code)")
+        form = QFormLayout(box)
+
+        self.pdf_tables_check = QCheckBox("Extract PDF tables as labelled rows")
+        self.pdf_tables_check.setToolTip(
+            "Pull tables out of PDF pages and write every row with its column\n"
+            "names (Field: NBRP, Bits: 9:0), so a row survives chunking.\n"
+            "Needs: pip install -e .[pdf]. Changing this re-ingests your PDFs."
+        )
+        form.addRow("", self.pdf_tables_check)
+
+        self.code_files_check = QCheckBox("Ingest source code (.c .h .cpp .py .js .ts .java .cs .go .rs)")
+        self.code_files_check.setToolTip(
+            "Source files are split at function/class boundaries and each chunk\n"
+            "records its symbol and line range."
+        )
+        form.addRow("", self.code_files_check)
+
+        self.code_max_chars_spin = QSpinBox()
+        self.code_max_chars_spin.setRange(200, 20000)
+        self.code_max_chars_spin.setSingleStep(200)
+        self.code_max_chars_spin.setToolTip(
+            "Largest code chunk in characters. A longer definition is cut at\n"
+            "blank lines. Keep it within your embedding model's input limit."
+        )
+        form.addRow("Max code chunk (chars):", self.code_max_chars_spin)
+        self.code_files_check.toggled.connect(self.code_max_chars_spin.setEnabled)
+
+        return box
+
+    def _build_evaluation_box(self) -> QGroupBox:
+        box = QGroupBox("Evaluation  (the model that grades answers)")
+        form = QFormLayout(box)
+
+        self.judge_model_edit = QLineEdit()
+        self.judge_model_edit.setPlaceholderText("empty = the chat model grades its own answers")
+        self.judge_model_edit.setToolTip(
+            "The model used when an experiment runs with the LLM judge (faithfulness,\n"
+            "answer relevance, correctness). A model grading its own answers is biased\n"
+            "towards approval; a different, ideally stronger, model is a fairer judge."
+        )
+        form.addRow("Judge model:", self.judge_model_edit)
+
+        self.judge_provider_combo = QComboBox()
+        self.judge_provider_combo.addItem("same as chat", None)
+        self.judge_provider_combo.addItem("ollama", "ollama")
+        self.judge_provider_combo.addItem("lmstudio", "lmstudio")
+        self.judge_provider_combo.setToolTip("Where the judge model is served.")
+        form.addRow("Judge provider:", self.judge_provider_combo)
+
+        self.judge_url_edit = QLineEdit()
+        self.judge_url_edit.setPlaceholderText("empty = same URL as chat")
+        form.addRow("Judge base URL:", self.judge_url_edit)
 
         return box
 

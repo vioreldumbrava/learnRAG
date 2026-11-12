@@ -15,8 +15,8 @@ def test_hiding_citations_keeps_evidence():
         "What is supported?", [RetrievedChunk(id="1", text="Unique evidence sentence.")]
     )
     assert "Unique evidence sentence." in messages[-1].content
-    assert "[Source" not in messages[-1].content
-    assert "Mention the sources" not in messages[0].content
+    assert "[1]" not in messages[-1].content
+    assert "cite the passages" not in messages[0].content
 
 
 def test_budget_removes_old_history_before_evidence():

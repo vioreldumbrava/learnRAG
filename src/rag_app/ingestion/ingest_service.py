@@ -3,26 +3,31 @@
 from __future__ import annotations
 
 import logging
-import re
+import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
 from rag_app.config import AppConfig
-from rag_app.ingestion.chunker import Chunker
+from rag_app.ingestion.chunker import HEADING_RE, Chunker
+from rag_app.ingestion.code_chunker import LANGUAGES, split_code
 from rag_app.ingestion.document_loader import (
     LoadedDocument,
     load_single,
     scan_folder,
+    scan_options,
 )
 from rag_app.ingestion.hash_tracker import (
     HashTracker,
+    canonical_path,
     compute_file_hash,
     document_id,
 )
+from rag_app.ingestion.entity_extractor import entity_metadata, extract_entities
 from rag_app.ingestion.index_coordinator import IndexCoordinator, ingestion_fingerprint, ingestion_settings
-from rag_app.ingestion.text_extractor import extract_text
+from rag_app.ingestion.locator import locate_chunks
+from rag_app.ingestion.text_extractor import extract_segments, join_segments
 from rag_app.models import DocumentChunk
 from rag_app.providers.base import ChatProvider, EmbeddingProvider
 from rag_app.vectorstores.base import VectorStore
@@ -30,16 +35,9 @@ from rag_app.vectorstores.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
-# Heading pattern — same as in chunker.py so section names match what the
-# chunker recognises as section boundaries.
-_HEADING_RE = re.compile(
-    r"^(?:"
-    r"(?:\d+\.)+\d*\s+"            # 1.2 or 1.2.3
-    r"|(?:section|chapter)\s+\d+"  # Section 4 / Chapter 5
-    r"|#{1,6}\s+"                   # Markdown headings
-    r")",
-    re.IGNORECASE | re.MULTILINE,
-)
+# The chunker's own heading pattern, so a "section" here is exactly what the
+# heading strategy treats as a section boundary.
+_HEADING_RE = HEADING_RE
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +77,9 @@ class IngestSummary:
     total_chunks: int = 0
     embedding_dim: int | None = None
     cancelled: bool = False
+    # Documents forgotten because their source file no longer exists (only
+    # when the run was asked to prune).
+    pruned_files: list[str] = field(default_factory=list)
 
 
 class IngestService:
@@ -111,17 +112,21 @@ class IngestService:
         single_path: str | None = None,
         on_progress: Callable[..., None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        prune: bool = False,
     ) -> IngestSummary:
         with self.coordinator.writer():
-            return self._run(force, single_path, on_progress, should_cancel)
+            return self._run(force, single_path, on_progress, should_cancel, prune)
 
-    def _run(self, force, single_path, on_progress, should_cancel) -> IngestSummary:
+    def _run(self, force, single_path, on_progress, should_cancel, prune=False) -> IngestSummary:
         """Run the full ingestion pipeline.
 
         Args:
             force: re-ingest even if unchanged.
             single_path: ingest an explicit file or folder instead of the configured folder.
             on_progress: optional callback called for each file processed.
+            prune: afterwards, forget indexed documents under the scanned
+                folder whose source file no longer exists. Off by default:
+                a missing file is otherwise left indexed until you Forget it.
         """
 
         progress = on_progress or _noop_progress
@@ -150,17 +155,26 @@ class IngestService:
                 summary.skipped_files.append(doc.source_path)
                 progress(idx, total, doc.source_path, "skipped")
 
+        if prune and not summary.cancelled:
+            for path in missing_sources(self.config, single_path):
+                try:
+                    self.coordinator.forget(path)
+                except KeyError:
+                    continue  # forgotten by someone else in the meantime
+                summary.pruned_files.append(path)
+                logger.info("Pruned (source file is gone): %s", path)
+
         return summary
 
     # ----- internals -------------------------------------------------------
 
     def _discover(self, single_path: str | None) -> list[LoadedDocument]:
-        ocr_on = self.config.ocr.enabled
+        options = scan_options(self.config)
         if single_path:
             if Path(single_path).is_dir():
-                return scan_folder(single_path, include_ocr_types=ocr_on)
-            return [load_single(single_path, include_ocr_types=ocr_on)]
-        return scan_folder(self.config.paths.documents_dir, include_ocr_types=ocr_on)
+                return scan_folder(single_path, **options)
+            return [load_single(single_path, **options)]
+        return scan_folder(self.config.paths.documents_dir, **options)
 
     def _ingest_one(
         self,
@@ -178,13 +192,7 @@ class IngestService:
             logger.info("Unchanged, skipping: %s", path)
             return False
 
-        text = extract_text(
-            path,
-            ocr_enabled=self.config.ocr.enabled,
-            ocr_lang=self.config.ocr.lang,
-            ocr_min_chars=self.config.ocr.min_chars_per_page,
-        )
-        chunk_texts = self.chunker.split(text)
+        text, chunk_texts, where = chunk_file(self.config, doc)
 
         if not chunk_texts:
             raise ValueError("No text extracted; previous indexed content retained. Enable OCR for scanned documents.")
@@ -195,6 +203,9 @@ class IngestService:
         # Contextual retrieval: prepend an LLM-written "situating" sentence to
         # each chunk before embedding (one chat call per chunk).
         prefixes = self._contextualize(text, chunk_texts)
+        # Entity graph: which named things each chunk mentions (one chat call
+        # per chunk), stored in the chunk's metadata.
+        entities = self._extract_entities(chunk_texts)
 
         chunks = []
         doc_id = document_id(path)
@@ -210,12 +221,14 @@ class IngestService:
                 "document_id": doc_id,
                 "revision": revision,
                 "file_type": doc.file_type,
-                "section": _extract_section(chunk_text),
+                **where[i],
                 **folder_meta,
             }
             if prefix:
                 metadata["contextualized"] = True
                 metadata["context_prefix"] = prefix
+            if entities:
+                metadata.update(entity_metadata(entities[i]))
             chunks.append(
                 DocumentChunk(
                     id=f"{doc_id}:{revision}:{i}",
@@ -272,6 +285,117 @@ class IngestService:
             self.chat_provider,
             max_doc_chars=self.config.chunking.contextual_document_chars,
         )
+
+
+    def _extract_entities(self, chunk_texts: list[str]) -> list[dict] | None:
+        """Per-chunk entities and relations, or None when the feature is off."""
+
+        if not self.config.chunking.entity_graph:
+            return None
+        if self.chat_provider is None:
+            logger.warning(
+                "chunking.entity_graph is on but no chat provider was supplied — "
+                "ingesting without entities."
+            )
+            return None
+        return extract_entities(chunk_texts, self.chat_provider)
+
+
+def chunk_file(config: AppConfig, doc: LoadedDocument) -> tuple[str, list[str], list[dict]]:
+    """Turn one file into chunk texts, without embedding or storing anything.
+
+    Returns `(document text, chunk texts, per-chunk metadata)`. The metadata
+    says where each chunk sits in the file — what lets a source read "p. 41"
+    or "lines 120-180" instead of just a file name. Ingestion calls this, and
+    so does the chunking playground (`ingestion/preview.py`), which is why it
+    takes a config and not a service: preview must not touch the index.
+    """
+
+    language = (
+        LANGUAGES.get(doc.path.suffix.lower()) if config.extraction.code_files else None
+    )
+    if language:
+        return _chunk_code(config, doc, language)
+    return _chunk_document(config, doc.path)
+
+
+def _chunk_document(config: AppConfig, path: Path) -> tuple[str, list[str], list[dict]]:
+    """Extract, chunk, then map each chunk back to its page/slide/sheet."""
+
+    segments = extract_segments(
+        path,
+        ocr_enabled=config.ocr.enabled,
+        ocr_lang=config.ocr.lang,
+        ocr_min_chars=config.ocr.min_chars_per_page,
+        pdf_tables=config.extraction.pdf_tables,
+    )
+    text = join_segments(segments)
+    chunker = Chunker(
+        chunk_size=config.chunking.chunk_size,
+        chunk_overlap=config.chunking.chunk_overlap,
+        strategy=config.chunking.strategy,
+    )
+    chunk_texts = chunker.split(text)
+    where = [
+        {
+            # A heading inside the chunk wins; otherwise the chunk belongs
+            # to the last heading before it (it starts mid-section).
+            "section": _extract_section(chunk_text) or located.section,
+            **located.metadata,
+        }
+        for chunk_text, located in zip(chunk_texts, locate_chunks(segments, chunk_texts))
+    ]
+    return text, chunk_texts, where
+
+
+def _chunk_code(
+    config: AppConfig, doc: LoadedDocument, language: str
+) -> tuple[str, list[str], list[dict]]:
+    """Split a source file at its definitions (see `code_chunker.py`)."""
+
+    text = doc.path.read_text(encoding="utf-8", errors="replace")
+    code_chunks = split_code(
+        text,
+        file_name=doc.source_file,
+        language=language,
+        max_chars=config.extraction.code_max_chars,
+    )
+    where = [
+        {
+            # The symbol doubles as the section, so every place that shows
+            # "file | section" shows "driver.c | Spi_Init" for code.
+            "section": chunk.symbol,
+            "symbol": chunk.symbol,
+            "language": language,
+            "line_start": chunk.line_start,
+            "line_end": chunk.line_end,
+            "location": f"lines {chunk.line_start}-{chunk.line_end}",
+        }
+        for chunk in code_chunks
+    ]
+    return text, [chunk.text for chunk in code_chunks], where
+
+
+def missing_sources(config: AppConfig, single_path: str | None = None) -> list[str]:
+    """Indexed documents under the scanned folder whose file is gone.
+
+    These are what `prune` would forget. Documents indexed from outside that
+    folder are never listed: their absence from a scan says nothing.
+    """
+
+    root = Path(single_path or config.paths.documents_dir)
+    if not root.is_dir():
+        return []  # a single file was ingested: nothing was scanned
+    root_key = canonical_path(root)
+    missing: list[str] = []
+    for path in HashTracker(config.paths.index_file).all_entries():
+        try:
+            inside = os.path.commonpath([root_key, path]) == root_key
+        except ValueError:  # different drives
+            inside = False
+        if inside and not Path(path).exists():
+            missing.append(path)
+    return sorted(missing)
 
 
 def _derive_folder_metadata(doc: LoadedDocument, documents_dir: str) -> dict[str, str]:

@@ -64,6 +64,20 @@ ocr:
   min_chars_per_page: 50
   lang: "eng"
 
+# pdf_tables and .pptx/.xlsx ingestion need the image built with
+# `--build-arg WITH_DOC_FORMATS=true`. Source-code ingestion needs nothing extra.
+extraction:
+  pdf_tables: false
+  code_files: true
+  code_max_chars: 2000
+
+# The model that grades answers when an experiment runs with the LLM judge.
+# null = the chat model grades its own answers (biased towards approval).
+evaluation:
+  judge_model: null
+  judge_provider: null
+  judge_base_url: null
+
 server:
   host: "0.0.0.0"   # required inside a container
   port: 8000

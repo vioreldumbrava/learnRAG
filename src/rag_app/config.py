@@ -45,6 +45,11 @@ class ChunkingSection(BaseModel):
     # The document is truncated to this many characters before being shown to
     # the LLM as context (local models have small windows).
     contextual_document_chars: int = Field(default=6000, ge=500)
+    # Entity graph: at ingest time, ask the chat LLM which named things
+    # (registers, error codes, functions, ...) each chunk mentions and how they
+    # relate, and store that with the chunk. Needed for `retrieval.graph`.
+    # Like `contextual`, it costs one LLM call PER CHUNK at ingest.
+    entity_graph: bool = False
 
     @model_validator(mode="after")
     def _valid_overlap(self):
@@ -115,6 +120,26 @@ class RetrievalSection(BaseModel):
     multi_hop: bool = False
     # Maximum number of ADDITIONAL retrieval rounds beyond the first.
     multi_hop_max_hops: int = Field(default=2, ge=1, le=5)
+    # Conversational retrieval: when a question has conversation history, ask
+    # the LLM to rewrite it into a standalone search query first ("what about
+    # the data phase?" -> "What happens in the CAN FD data phase when NBRP and
+    # DBRP differ?"). Costs one LLM call per follow-up; first questions are
+    # searched as typed.
+    rewrite_followups: bool = False
+    # Entity-graph retrieval: names of known entities found in the question
+    # (a text match, no LLM call) pull in the chunks that mention them and the
+    # chunks of directly related entities, as one more ranked list merged by
+    # RRF. Needs an index ingested with `chunking.entity_graph: true`.
+    graph: bool = False
+    # Agentic retrieval: instead of one fixed search, the chat model chooses
+    # the next action step by step (search for something, read the passages
+    # next to one, list the files, or stop). Helps on questions with several
+    # parts; costs one chat call per step and is the least predictable
+    # technique here. Falls back to the fixed pipeline if the model's replies
+    # cannot be read.
+    agentic: bool = False
+    # Upper bound on agent steps (each step = one chat call).
+    agent_max_steps: int = Field(default=6, ge=1, le=20)
 
 
 class PromptSection(BaseModel):
@@ -133,6 +158,19 @@ class OcrSection(BaseModel):
     lang: str = "eng"
 
 
+class ExtractionSection(BaseModel):
+    # Pull tables out of PDF pages with pdfplumber and write each row with its
+    # column names ("Field: NBRP, Bits: 9:0"), so a row survives chunking.
+    # Needs the optional extra: pip install -e .[pdf]
+    pdf_tables: bool = False
+    # Also ingest source files (.c .h .cpp .py .js .ts .java .cs .go .rs),
+    # split at function/class boundaries instead of by character count.
+    code_files: bool = True
+    # Largest code chunk in characters. A definition longer than this is cut
+    # at blank lines; keep it within your embedding model's input limit.
+    code_max_chars: int = Field(default=2000, ge=200)
+
+
 class CacheSection(BaseModel):
     # Cache query embeddings: hash(query) -> vector. Skips re-embedding a
     # repeated question. Keyed on the embedding model, so changing the model
@@ -143,6 +181,17 @@ class CacheSection(BaseModel):
     answer: bool = False
     # Upper bound on entries per cache (LRU eviction beyond this).
     max_entries: int = Field(default=1024, ge=1)
+
+
+class EvaluationSection(BaseModel):
+    # The model that grades answers when an experiment runs with the LLM judge
+    # (faithfulness, answer relevance, correctness). null = the chat model
+    # grades its own answers, which works but is biased towards approval; a
+    # different, ideally stronger, model is a fairer judge.
+    judge_model: str | None = None
+    # Where the judge model is served. null = the same provider / URL as chat.
+    judge_provider: ProviderName | None = None
+    judge_base_url: str | None = None
 
 
 class ObservabilitySection(BaseModel):
@@ -169,7 +218,9 @@ class AppConfig(BaseModel):
     retrieval: RetrievalSection = Field(default_factory=RetrievalSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
     ocr: OcrSection = Field(default_factory=OcrSection)
+    extraction: ExtractionSection = Field(default_factory=ExtractionSection)
     cache: CacheSection = Field(default_factory=CacheSection)
+    evaluation: EvaluationSection = Field(default_factory=EvaluationSection)
     observability: ObservabilitySection = Field(default_factory=ObservabilitySection)
     server: ServerSection = Field(default_factory=ServerSection)
 

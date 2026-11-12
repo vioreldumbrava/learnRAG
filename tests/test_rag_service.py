@@ -45,7 +45,9 @@ def test_full_query_flow(
     assert [m.role for m in received] == ["system", "user"]
     user_content = received[1].content
     assert "NBRP" in user_content
-    assert "[Source 1]" in user_content
+    assert "[1] File: " in user_content
+    # The fake answer cites nothing, so both passages are reported as uncited.
+    assert answer.citations == {"cited": [], "invalid": [], "uncited": [1, 2]}
 
 
 def test_debug_flow_returns_debug_info(

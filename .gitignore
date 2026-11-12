@@ -28,6 +28,9 @@ storage/*.pending
 storage/*.backup-*
 storage/*.building-*
 storage/*.jobs/
+storage/*.chats/
+storage/*.evalsets/
+storage/*.learning.json
 storage/qdrant/
 documents/uploads/
 .artifacts/

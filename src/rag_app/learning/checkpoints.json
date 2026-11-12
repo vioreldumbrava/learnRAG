@@ -1,0 +1,124 @@
+[
+ {
+  "stage": 1,
+  "title": "What is RAG?",
+  "items": [
+   "I ran ingest then query and watched an answer come back grounded in a retrieved chunk.",
+   "I can state, in one sentence each, why RAG beats fine-tuning for facts and why it beats stuffing everything into the context window.",
+   "I asked a question with no answer in the docs and observed what the system did."
+  ]
+ },
+ {
+  "stage": 2,
+  "title": "Text → Vectors (Embeddings)",
+  "items": [
+   "I ran inspect and read off the embedding dimension for my model.",
+   "I drew the embedding map with a question on it and can say what share of the variation the two axes keep, and why a neighbour's rank on the map can differ from its true rank.",
+   "I can explain why swapping the embedding model forces a full re-ingest.",
+   "I can define \"embedding\" in one sentence without saying \"vector of numbers\" and nothing else (say what the direction encodes)."
+  ]
+ },
+ {
+  "stage": 3,
+  "title": "Chunking",
+  "items": [
+   "I ran the same query under at least two chunk sizes and can describe the trade-off in one sentence.",
+   "I know which config keys control chunking (chunk_size, chunk_overlap, strategy) and that changing any of them requires a re-ingest.",
+   "I can explain what OCR does, that it runs at ingest time only, and why it's gated on min_chars_per_page.",
+   "I can say how a chunk gets its page number, and why chunking page by page would be the wrong way to get it.",
+   "I can explain table linearization and what extraction.pdf_tables changes in the stored text.",
+   "I know why code is split at definitions and which setting (extraction.code_max_chars) bounds a code chunk."
+  ]
+ },
+ {
+  "stage": 4,
+  "title": "The Vector Store",
+  "items": [
+   "I can list what a chunk record stores (id, vector, text, metadata) and say why the vector store is a rebuildable index, not the source of truth.",
+   "I can explain what HNSW buys over a flat index.",
+   "I ran the corpus on both Chroma and Qdrant and understand the two quirks the Qdrant adapter hides (id mapping, similarity→distance)."
+  ]
+ },
+ {
+  "stage": 5,
+  "title": "Retrieval",
+  "items": [
+   "I ran retrieve on a close question, an opaque-identifier question, and an out-of-domain question, and can explain each result's distances.",
+   "I used a --filter and understand how module metadata gets derived.",
+   "I can name pure dense retrieval's core failure mode (rare/opaque tokens) and the two-layer \"I don't know\" defence."
+  ]
+ },
+ {
+  "stage": 6,
+  "title": "Prompt Construction & Generation",
+  "items": [
+   "I ran query --debug and read the exact prompt sent to the LLM.",
+   "I clicked (or read) a citation and checked the passage it points to, and I can say what the citation check does and does not prove.",
+   "I can explain why a follow-up question is rewritten before searching, and what retrieval.rewrite_followups costs.",
+   "I asked an out-of-domain question and watched the \"answer only from context\" instruction do its job.",
+   "I ran chat with a pronoun-only follow-up and saw multi-turn history supply the missing referent."
+  ]
+ },
+ {
+  "stage": 7,
+  "title": "Provider Abstraction",
+  "items": [
+   "I swapped the chat and/or embedding provider in config.yaml and re-ran a query (re-ingesting when the embedding model changed).",
+   "I can name the two provider interfaces and one production reason to abstract them (vendor risk, cost, A/B testing).",
+   "I can explain the common \"hosted chat + self-hosted embeddings\" split."
+  ]
+ },
+ {
+  "stage": 8,
+  "title": "Evaluation",
+  "items": [
+   "I ran eval with --skip-llm (retrieval only) and full (with the LLM).",
+   "I deliberately broke a question and watched it FAIL, then fixed it.",
+   "I can define recall@k and MRR, and explain why answer-faithfulness is the harder second layer that usually needs an LLM judge.",
+   "I recorded a baseline, changed one flag at a time, and can name one technique that improved the mean and one that the metric could not see.",
+   "I can explain what expected_relevance gains buy over pass/fail labels, and what a gain of 0.0 means.",
+   "I built a question set for a corpus of my own, with at least one question saved from a conversation and one generated draft I rejected.",
+   "I ran an experiment on that set, and one with LLM help for a chat-assisted technique.",
+   "I can give three reasons an LLM judge's score is not a measurement, and say what evaluation.judge_model is for."
+  ]
+ },
+ {
+  "stage": 9,
+  "title": "Beyond Naïve RAG",
+  "items": [
+   "I toggled hybrid, HyDE, multi-query, MMR, neighbor expansion, and multi-hop one at a time and saw each change the retrieved set or the debug output.",
+   "I can explain RRF and why it needs no score normalisation.",
+   "I can contrast multi-hop with query decomposition in one sentence.",
+   "I ran a question with --agent, read its steps, and can name the four things that keep the loop from running away.",
+   "I can say when an agent is worth its cost and how I would show it.",
+   "I built an entity graph, found one extraction error in it, and can explain what the one-relation step retrieves that similarity search does not, and what full GraphRAG adds on top."
+  ]
+ },
+ {
+  "stage": 10,
+  "title": "Production Concerns",
+  "items": [
+   "I enabled cache.answer and observed a HIT with a near-zero generate time on the second identical query.",
+   "I can explain why the answer cache includes the ordered evidence, prompt instructions, provider identity, and generation settings.",
+   "I know which stage dominates query latency and where to read the per-stage timings."
+  ]
+ },
+ {
+  "stage": 11,
+  "title": "Operating the system",
+  "items": [
+   "I asked one question through at least two different surfaces and got the same sources.",
+   "I ran the REST server and hit /api/query (bonus: with debug, filter, and history).",
+   "I can explain why the container binds 0.0.0.0, why storage/ is a volume, and why the model servers live outside the image."
+  ]
+ },
+ {
+  "stage": 12,
+  "title": "Frameworks: LangChain & LlamaIndex",
+  "items": [
+   "I installed a framework extra and ran an example against the same models as the from-scratch app, and compared answers.",
+   "I can map at least five of my from-scratch components to their LangChain and LlamaIndex equivalents without looking.",
+   "I can explain what LCEL is, what as_query_engine() hides, and when I'd reach for a framework vs. roll my own."
+  ]
+ }
+]

@@ -143,7 +143,19 @@ START → retrieve → decide ─┬─(follow-up)→ retrieve (loop)
 - **Agentic RAG** generalises this: the LLM *decides* whether/when/how to
   retrieve, possibly calling tools. LangChain agents and LlamaIndex agents /
   `QueryPipeline` do the same. Multi-hop is the constrained, no-tools special
-  case — which is why it was a good place to start.
+  case — which is why it was a good place to start. The from-scratch agent is
+  [`retrieval/agent.py`](../src/rag_app/retrieval/agent.py): a `for` loop over
+  a step budget, a text action parser, and the same guards written as plain
+  `if`s. Compare it with the LangGraph example to see what the framework
+  buys (explicit state, branching, checkpoints) and what it hides (the prompt
+  and the parsing, which is where local models fail).
+- **Knowledge graphs**: LlamaIndex `PropertyGraphIndex` and LangChain's graph
+  retrievers do entity extraction and graph retrieval, usually against a graph
+  database. The from-scratch equivalent is
+  [`entity_extractor.py`](../src/rag_app/ingestion/entity_extractor.py) +
+  [`entity_graph.py`](../src/rag_app/retrieval/entity_graph.py), which keeps
+  the graph in chunk metadata and memory: no extra store, at the price of
+  rebuilding it when the corpus changes.
 
 ---
 

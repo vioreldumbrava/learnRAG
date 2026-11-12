@@ -1,6 +1,6 @@
 # RAG Interview Q&A
 
-74 questions you should be able to answer confidently for a mid-level
+85 questions you should be able to answer confidently for a mid-level
 engineering interview. Each answer is short by design (≤ 4 sentences) —
 that's how you'd answer in a real interview. File pointers anchor
 answers to this codebase so you can demo / explain on the spot.
@@ -183,6 +183,32 @@ Storing only the original would make the sparse index miss the added
 context; storing both (as text + recoverable metadata) is the pragmatic
 middle, at the cost of slightly longer prompts.
 
+### 15f. How do you make tables in PDFs retrievable?
+
+Linearize them: write each row with its column names (`Register: SMPR,
+Reset: 0x0003`) so a row is a self-contained fact wherever a chunk
+boundary falls. Plain extraction gives bare values whose header may sit in
+another chunk. Here it is `extraction.pdf_tables`, via `pdfplumber`
+([`text_extractor.py`](../src/rag_app/ingestion/text_extractor.py)); the
+cost is longer text.
+
+### 15g. How do citations get page numbers?
+
+From metadata, not from the model. Extraction keeps one segment per page,
+the document is chunked as a whole, and each chunk is then mapped back to
+the pages it covers and stored with `page_start` / `page_end`
+([`locator.py`](../src/rag_app/ingestion/locator.py)). Chunking page by
+page would also give page numbers, but it breaks sentences and tables
+that cross a page break.
+
+### 15h. How is chunking source code different from chunking prose?
+
+The unit is a definition, not a size: split at function and class
+boundaries, keep the signature and doc comment with the body, and store
+the symbol and line range. This project uses brace depth and indentation
+([`code_chunker.py`](../src/rag_app/ingestion/code_chunker.py));
+production systems use a parser such as tree-sitter.
+
 ---
 
 ## Vector stores & indexes
@@ -335,16 +361,77 @@ Four guards, any of which ends it: a hard hop cap
 check that the follow-up isn't a repeat of an earlier query, and a check
 that the hop actually found new chunks.
 
+### 29d. What is agentic RAG, and what does it cost you?
+
+The model runs the retrieval loop: it picks an action (search for X, read
+around passage N, list the files, stop), sees the result, and picks again.
+A fixed pipeline cannot serve a question with two unrelated parts in one
+search; an agent can issue two. The costs: a model call per step before the
+answer starts, runs that differ from each other (harder to debug and to
+evaluate), and strong dependence on the model's planning. So you bound it —
+step budget, no repeated action, fallback to the fixed pipeline when the
+replies cannot be parsed — and you make it earn its place on an eval set.
+In this project: [`retrieval/agent.py`](../src/rag_app/retrieval/agent.py),
+`retrieval.agentic`, `agent_max_steps`. The agent only gathers evidence;
+the answer comes from the normal prompt, so citations still work.
+
+### 29e. Why would you parse actions from text instead of using function calling?
+
+Portability and control. Native tool calling is a server feature whose
+format and reliability vary: hosted models do it well, local servers
+implement it unevenly, and small models often emit malformed calls. A
+two-line text protocol (`THOUGHT: ...` / `ACTION: SEARCH: ...`) works on any
+chat model, is trivial to log and read, and lets you decide what an
+unparseable reply means (here: one reminder, then fall back). With a strong
+hosted model and many tools with structured arguments, native function
+calling is the better choice; the loop around it is the same.
+
+### 29f. What does a knowledge graph add to RAG, and what is GraphRAG?
+
+Retrieval by entity and relationship instead of by similar wording. At
+ingest an LLM extracts entities and relations from each chunk; at query time
+the entities named in the question pull in the chunks that mention them and
+the chunks of related entities. That reaches evidence that shares no
+vocabulary with the question ("NBRP" retrieving the passage about DBRP,
+because the two must match). GraphRAG is Microsoft's full version: it also
+clusters the graph into communities and writes a summary of each, so
+corpus-wide questions can be answered from summaries. Costs: an LLM call per
+chunk (or more) at ingest, extraction errors baked into the index, and
+duplicate nodes unless you resolve entity names. This project implements
+the entity half ([`entity_graph.py`](../src/rag_app/retrieval/entity_graph.py),
+`chunking.entity_graph` + `retrieval.graph`) and not community summaries.
+
 ---
 
 ## Prompt construction & generation
 
 ### 30. How is the context typically formatted in the prompt?
 
-Numbered source blocks with file name and chunk identifier:
-`[Source 1] file: foo.pdf, chunk 12\n<text>\n[Source 2] ...`. Helps
-the model cite and helps you audit which chunk produced which claim.
+Numbered passages, each with where it is from:
+`[1] File: foo.pdf | Location: p. 41-42 | Section: 3.2 Bit timing\n<text>\n[2] ...`.
+The number is what the model cites, and it lets you audit which chunk
+produced which claim.
 See [`PromptBuilder.build`](../src/rag_app/retrieval/prompt_builder.py).
+
+### 30a. The answer contains citations. How do you know they are real?
+
+Parse the markers out of the finished answer and compare them with the
+passages that were in the prompt: a number with no passage behind it is
+a fabricated reference, and an answer with no markers cannot be traced.
+That is a cheap, deterministic check
+([`citations.py`](../src/rag_app/retrieval/citations.py)). Whether a
+cited passage actually *supports* the claim needs a reader or a judge
+model.
+
+### 30b. In a chat, what do you search for when the user asks a follow-up?
+
+Not the follow-up as typed: "what about the second one?" has nothing
+to search for. Rewrite it into a standalone question using the
+conversation (query condensation), search with the rewrite, and
+generate with the original question plus history. Here:
+`retrieval.rewrite_followups`
+([`Retriever._rewrite_with_history`](../src/rag_app/retrieval/retriever.py)).
+It costs one LLM call per follow-up.
 
 ### 31. How do you prevent hallucination?
 
@@ -403,6 +490,49 @@ without a comparable baseline. Without an eval set, every "I think
 this is better now" is a vibe, and vibes lie. Maintain a small
 (10–500 question) gold set and CI-gate on it.
 
+### 37a. You have a corpus and no test questions. How do you get an eval set?
+
+Three sources, in order of value. Questions people really asked (log them,
+or save them from chat sessions) because they carry real wording and real
+vocabulary gaps. Questions you write for cases you know are hard: an exact
+identifier, a fact split across two documents, a question with no answer.
+And synthetic questions: show an LLM one chunk, ask for a question that
+chunk answers, and you get the expected source for free. Synthetic ones are
+drafts, not tests, until someone has read them: they reuse the chunk's own
+words (so retrieval looks better than it is), some only make sense with the
+passage in view, and none of them needs more than one chunk. In this
+project: `eval-set generate` stores them as drafts that `eval` ignores
+until `eval-set accept`
+([`eval/generate.py`](../src/rag_app/eval/generate.py),
+[`eval/sets.py`](../src/rag_app/eval/sets.py)).
+
+### 37b. How far can you trust an LLM judge?
+
+Far enough to rank two configurations over many questions, not far enough to
+certify one answer. Four limits to name: it is noisy (rerun and the score
+moves, especially with a small judge, so measure that difference first); a
+model grading its own answers is biased towards approval, so use a different
+and ideally stronger model; faithfulness is checked against the retrieved
+passages only, so an answer that repeats a wrong passage scores perfectly;
+and it costs extra calls per answer. Good practice: retrieval metrics for
+retrieval tuning (they are exact and free), the judge for answer quality,
+and a human reading the judged claims when the result matters. Here:
+[`eval/judge.py`](../src/rag_app/eval/judge.py), `--judge`,
+`evaluation.judge_model`.
+
+### 37c. Someone shows you a 2D plot of the embeddings with neat clusters. What do you ask?
+
+How much of the variance the two axes keep, and which projection made it.
+A 2D picture of a 768-dimensional space discards most of the information:
+with PCA at 30% explained variance, two points that look adjacent can be far
+apart, and t-SNE or UMAP distort global distances even more while producing
+prettier clusters. So the plot is good for seeing structure (groups,
+outliers, duplicates) and useless for reading distances. Nearest neighbours
+must come from the full space. This project's embedding map prints the
+explained variance and shows each neighbour's true rank beside its rank on
+the map, so the disagreement is visible
+([`analysis/embedding_map.py`](../src/rag_app/analysis/embedding_map.py)).
+
 ---
 
 ## Production & failure modes
@@ -419,6 +549,9 @@ the user.
 Retrieval misses — the right chunk isn't in the top-K. Logging
 top-K IDs and scores per query is how you triage. Fixes, in order:
 better chunking, raise `top_k`, add hybrid search, add a reranker.
+Here, `rag-app retrieve "..." --trace` shows what each stage found, so
+you can tell "never retrieved" from "retrieved, then dropped" (see
+[`trace.py`](../src/rag_app/retrieval/trace.py)).
 
 ### 40. How do you handle stale data?
 

@@ -5,6 +5,7 @@
 # Build:            docker build -t rag-api .
 # Build with OCR:   docker build -t rag-api --build-arg WITH_OCR=true .
 # Build with Qdrant client: docker build -t rag-api --build-arg WITH_QDRANT=true .
+# Build with PPTX/XLSX + PDF tables: docker build -t rag-api --build-arg WITH_DOC_FORMATS=true .
 # Run (compose):    docker compose up --build -d
 
 FROM python:3.12-slim
@@ -23,6 +24,10 @@ RUN if [ "$WITH_OCR" = "true" ]; then \
 # point qdrant_url at an external server.
 ARG WITH_QDRANT=false
 
+# Optional document formats: PowerPoint/Excel ingestion and PDF table
+# extraction (extraction.pdf_tables). Pure-Python wheels, no system packages.
+ARG WITH_DOC_FORMATS=false
+
 WORKDIR /app
 
 # README.md is referenced by pyproject metadata, so it must be present.
@@ -35,6 +40,9 @@ RUN if [ "$WITH_QDRANT" = "true" ]; then \
     fi \
     && if [ "$WITH_OCR" = "true" ]; then \
         pip install --no-cache-dir pytesseract pdf2image Pillow; \
+    fi \
+    && if [ "$WITH_DOC_FORMATS" = "true" ]; then \
+        pip install --no-cache-dir ".[pdf,office]"; \
     fi
 
 # Baked-in default config (server.host=0.0.0.0). docker-compose mounts the

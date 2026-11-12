@@ -40,6 +40,7 @@ def test_every_retrieval_field_reaches_the_retriever():
         neighbor_radius=2,
         multi_hop=True,
         multi_hop_max_hops=3,
+        rewrite_followups=True,
     )
     chat = FakeChatProvider()
     retriever = build_retriever(cfg, FakeEmbeddingProvider(), FakeVectorStore(), chat)
@@ -58,6 +59,7 @@ def test_every_retrieval_field_reaches_the_retriever():
     assert retriever.neighbor_radius == 2
     assert retriever.multi_hop is True
     assert retriever.multi_hop_max_hops == 3
+    assert retriever.rewrite_followups is True
     assert retriever.chat_provider is chat  # needs_llm techniques are on
 
 
@@ -65,12 +67,13 @@ def test_factory_covers_the_whole_retrieval_schema():
     """Fail when a new RetrievalSection field is added but not forwarded.
 
     Every retrieval config field (except reranker settings, which live on
-    the RagService) must exist as a Retriever attribute with the configured
-    value — that's what build_retriever is for.
+    the RagService, and the agent's, which live on the AgentRetriever wrapper
+    — see test_agentic_wraps_the_retriever) must exist as a Retriever
+    attribute with the configured value — that's what build_retriever is for.
     """
 
     section = RetrievalSection()
-    reranker_fields = {"reranker_model", "reranker_backend"}
+    reranker_fields = {"reranker_model", "reranker_backend", "agentic", "agent_max_steps"}
     retriever = build_retriever(
         _make_cfg(), FakeEmbeddingProvider(), FakeVectorStore(),
     )
@@ -81,6 +84,30 @@ def test_factory_covers_the_whole_retrieval_schema():
             f"RetrievalSection.{field_name} is not wired into the Retriever — "
             "update rag_app/retrieval/factory.py (one build site for everyone)."
         )
+
+
+def test_agentic_wraps_the_retriever():
+    """`retrieval.agentic` puts an AgentRetriever around the configured Retriever."""
+
+    from rag_app.retrieval.agent import AgentRetriever
+    from rag_app.retrieval.retriever import Retriever
+
+    cfg = _make_cfg(agentic=True, agent_max_steps=4, hybrid=True, top_k=3)
+    chat = FakeChatProvider()
+    agent = build_retriever(cfg, FakeEmbeddingProvider(), FakeVectorStore(), chat)
+
+    assert isinstance(agent, AgentRetriever) and agent.max_steps == 4
+    assert agent.agent_chat is chat and agent.max_chunks == 6
+    # Each search still runs the configured pipeline, and the wrapper answers
+    # for everything a Retriever is asked.
+    assert isinstance(agent.inner, Retriever) and agent.inner.hybrid is True
+    assert agent.top_k == 3 and agent.effective_settings["agentic"] is True
+
+    # No chat model, no agent: the flag is reported as off.
+    plain = build_retriever(cfg, FakeEmbeddingProvider(), FakeVectorStore())
+    assert isinstance(plain, Retriever) and plain.effective_settings["agentic"] is False
+    # The RagService takes it like any retriever.
+    assert build_rag_service(cfg, agent, chat).retriever is agent
 
 
 def test_chat_provider_omitted_when_no_llm_technique_is_on():

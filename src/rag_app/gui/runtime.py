@@ -8,6 +8,7 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 
 from rag_app.config import load_config
+from rag_app.eval.judge import judge_section
 from rag_app.jobs import JobManager, TERMINAL
 from rag_app.providers.factory import build_chat_provider, build_embedding_provider
 from rag_app.vectorstores.factory import build_vector_store
@@ -19,6 +20,7 @@ class DesktopRuntime:
         self._lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._resources = None
+        self._judge = None
         self._jobs = None
         self._owner_lock = None
         self._query_active = False
@@ -55,6 +57,19 @@ class DesktopRuntime:
     def jobs(self):
         self.resources()
         return self._jobs
+
+    def judge_provider(self):
+        """The model that grades answers; call from a worker thread.
+
+        Its own provider when `evaluation.judge_model` is set, otherwise the
+        chat model (which then grades its own answers).
+        """
+        with self._lock:
+            cfg, _, chat, _ = self.resources()
+            if self._judge is None:
+                section = judge_section(cfg)
+                self._judge = chat if section is None else build_chat_provider(section)
+            return self._judge
 
     def begin_query(self):
         with self._state_lock:
@@ -93,6 +108,7 @@ class DesktopRuntime:
                 if close:
                     close()
                 self._resources = None
+                self._judge = None
         finally:
             if self._owner_lock is not None:
                 self._owner_lock.release()

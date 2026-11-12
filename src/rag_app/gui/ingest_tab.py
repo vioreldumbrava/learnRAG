@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from rag_app.gui.workers import run_in_thread
+from rag_app.ingestion.index_coordinator import ingest_needs_chat
 from rag_app.ingestion.ingest_service import IngestService, IngestSummary
 from rag_app.jobs import TERMINAL
 from rag_app.workflow import import_stream
@@ -61,6 +62,12 @@ class IngestTab(QWidget):
         row = QHBoxLayout()
         self.force_check = QCheckBox("Force re-ingest")
         row.addWidget(self.force_check)
+        self.prune_check = QCheckBox("Forget documents whose file was deleted")
+        self.prune_check.setToolTip(
+            "After indexing a folder, forget documents under it whose file no longer\n"
+            "exists. The job output lists them. Does not apply to imported files."
+        )
+        row.addWidget(self.prune_check)
         row.addStretch()
         self.ingest_btn = QPushButton("Ingest path")
         self.ingest_btn.clicked.connect(self.run_ingest)
@@ -109,6 +116,8 @@ class IngestTab(QWidget):
             QMessageBox.warning(self, "Save settings first", "Save configuration before ingesting.")
             return
         force = self.force_check.isChecked()
+        # Pruning is about a scanned folder; an import copies new files in.
+        prune = self.prune_check.isChecked() and not managed
 
         def submit():
             jobs = self.runtime.jobs()
@@ -117,7 +126,7 @@ class IngestTab(QWidget):
                 cfg, embedder, chat, store = self.runtime.resources()
                 if managed and len(paths) > cfg.server.upload_max_files:
                     raise ValueError(f"At most {cfg.server.upload_max_files} files per import")
-                service = IngestService(cfg, embedder, store, chat if cfg.chunking.contextual else None)
+                service = IngestService(cfg, embedder, store, chat if ingest_needs_chat(cfg) else None)
                 combined = asdict(IngestSummary())
                 total = len(paths)
                 for index, original in enumerate(paths, 1):
@@ -131,7 +140,7 @@ class IngestTab(QWidget):
                                 path = import_stream(cfg, Path(original).name, stream)
                         job.progress(index, total, path or cfg.paths.documents_dir, "indexing")
                         result = service.run(
-                            force=force, single_path=path,
+                            force=force, single_path=path, prune=prune,
                             should_cancel=job.cancelled.is_set,
                             on_progress=lambda c, t, p, status: job.progress(
                                 index if managed else c,
@@ -139,7 +148,7 @@ class IngestTab(QWidget):
                                 p, status,
                             ),
                         )
-                        for key in ("indexed_files", "skipped_files", "failed_files"):
+                        for key in ("indexed_files", "skipped_files", "failed_files", "pruned_files"):
                             combined[key].extend(getattr(result, key))
                         combined["total_chunks"] += result.total_chunks
                         combined["embedding_dim"] = result.embedding_dim or combined["embedding_dim"]
@@ -199,12 +208,18 @@ class IngestTab(QWidget):
         record = self.runtime._jobs.get(item.data(Qt.UserRole))
         result = record.get("result") or {}
         failures = result.get("failed_files") or []
+        pruned = result.get("pruned_files") or []
         self.output.setPlainText(
             f"Job {record['id']}\nState: {record['state']}\n"
             f"Indexed: {len(result.get('indexed_files', []))}\n"
             f"Skipped: {len(result.get('skipped_files', []))}\n"
             f"Failed: {len(failures)}\n"
             + "\n".join(f"{path}: {error}" for path, error in failures)
+            + (
+                f"\nForgotten (source file is gone): {len(pruned)}\n" + "\n".join(pruned)
+                if pruned
+                else ""
+            )
             + ("\n" + record["error"] if record.get("error") else "")
         )
 

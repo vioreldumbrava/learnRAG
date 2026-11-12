@@ -1,0 +1,163 @@
+[
+ {
+  "id": "embedding-map",
+  "stage": 2,
+  "title": "See where a question lands among the chunks",
+  "goal": "Make 'similar meaning, nearby vectors' visible, and find out how much a 2D picture can be trusted.",
+  "tool": "map",
+  "question": "What is SPI slave underrun?",
+  "look_for": [
+   "Do the chunks of one module sit together, apart from the other modules?",
+   "How much of the variation do the two axes keep? Everything else is not on the screen.",
+   "In the table, compare each neighbour's true rank with its rank on the map. Where they differ, the picture is misleading at that spot."
+  ]
+ },
+ {
+  "id": "chunk-size",
+  "stage": 3,
+  "title": "Small chunks against large chunks",
+  "goal": "See what chunk size does to the number, evenness and overlap of chunks before paying for a re-ingest.",
+  "tool": "playground",
+  "document": "documents/CAN/can_diagnostics.md",
+  "a": {"chunk_size": 900, "chunk_overlap": 150, "strategy": "paragraph"},
+  "b": {"chunk_size": 300, "chunk_overlap": 50, "strategy": "paragraph"},
+  "look_for": [
+   "How many chunks does each side make, and how uneven are they (smallest against largest)?",
+   "How many characters are stored twice because of overlap on each side?",
+   "Open a small chunk on side B. Does it still make sense on its own, or did it lose the sentence that says what it is about?"
+  ]
+ },
+ {
+  "id": "chunk-strategy",
+  "stage": 3,
+  "title": "Paragraph chunking against heading chunking",
+  "goal": "See why structure-aware chunking suits documents with numbered sections.",
+  "tool": "playground",
+  "document": "documents/CAN/can_fd_bit_timing.md",
+  "a": {"chunk_size": 900, "chunk_overlap": 150, "strategy": "paragraph"},
+  "b": {"chunk_size": 900, "chunk_overlap": 150, "strategy": "heading"},
+  "look_for": [
+   "On side B every chunk should start at a section heading. Does one section ever get split?",
+   "Look at the Section column on side A: where does a chunk start in the middle of a section?",
+   "Which side would you rather retrieve for a question about one register?"
+  ]
+ },
+ {
+  "id": "top-k",
+  "stage": 5,
+  "title": "Retrieve 3 chunks or 8",
+  "goal": "Watch recall and noise trade against each other as top_k grows.",
+  "tool": "compare",
+  "question": "What is bit timing?",
+  "a": {"top_k": 3},
+  "b": {"top_k": 8},
+  "look_for": [
+   "Which chunks does only side B have? Are they evidence, or distractors from another topic?",
+   "Does the top result change? More results is not better ranking.",
+   "Every extra chunk is prompt text the model must read on every question."
+  ]
+ },
+ {
+  "id": "citations",
+  "stage": 6,
+  "title": "Check an answer against its sources",
+  "goal": "Read an answer the way a reviewer would: every claim traced to a numbered passage.",
+  "tool": "ask",
+  "question": "What happens if NBRP and DBRP are different?",
+  "a": {},
+  "look_for": [
+   "Does the answer put a [n] after its statements? Open each cited passage and check it says that.",
+   "Which retrieved passages were never cited? Were they needed?",
+   "Is there a citation number that matches no passage? The check under the answer says so."
+  ]
+ },
+ {
+  "id": "baseline-experiment",
+  "stage": 8,
+  "title": "Measure instead of looking",
+  "goal": "Get numbers for the dense baseline and one change, on a fixed set of questions.",
+  "tool": "experiment",
+  "presets": ["dense", "hybrid"],
+  "use_llm": false,
+  "look_for": [
+   "Recall, MRR and nDCG for both presets. Which moved, and by how much?",
+   "Open the per-question results: which question changed? Can you explain why from its wording?",
+   "A change you cannot trace to specific questions is a coincidence waiting to reverse."
+  ]
+ },
+ {
+  "id": "hybrid-exact-token",
+  "stage": 9,
+  "title": "Hybrid search rescues an exact identifier",
+  "goal": "See keyword search find a rare token that the embedding of a whole question smears away.",
+  "tool": "compare",
+  "question": "What is published in qualification report QR-4471-B?",
+  "a": {"hybrid": false},
+  "b": {"hybrid": true},
+  "look_for": [
+   "Is the chunk that contains QR-4471-B in side A's results at all?",
+   "In pipeline B, read 'BM25 keyword search' and then 'Reciprocal rank fusion': the 'found by' column shows which list contributed each chunk.",
+   "The scores change units between the sides: a distance on A, an RRF score on B."
+  ]
+ },
+ {
+  "id": "mmr-diversity",
+  "stage": 9,
+  "title": "MMR trades relevance for variety",
+  "goal": "Watch near-duplicate chunks get replaced by different ones.",
+  "tool": "compare",
+  "question": "What is bit timing?",
+  "a": {"use_mmr": false},
+  "b": {"use_mmr": true, "mmr_lambda": 0.3},
+  "look_for": [
+   "Which chunks did MMR drop, and were they saying the same thing as one it kept?",
+   "Did a chunk from a different file come in?",
+   "Did the best chunk keep its place? Diversity can demote the strongest evidence."
+  ]
+ },
+ {
+  "id": "neighbors",
+  "stage": 9,
+  "title": "Read a little before and after each hit",
+  "goal": "See neighbor expansion widen the context without changing what was found.",
+  "tool": "compare",
+  "question": "How does bus-off recovery work?",
+  "a": {"neighbor_radius": 0},
+  "b": {"neighbor_radius": 1},
+  "look_for": [
+   "The two sides list the same chunks: neighbor expansion changes the text handed to the model, not the ranking.",
+   "In pipeline B, 'Neighbor expansion' shows each chunk's size before and after.",
+   "This is why a source-file metric cannot measure this technique: nothing about which files were found changed."
+  ]
+ },
+ {
+  "id": "multi-hop-bridge",
+  "stage": 9,
+  "title": "A question whose answer is in two places",
+  "goal": "Find out whether your chat model can notice what is missing and search for it.",
+  "tool": "compare",
+  "question": "What does the errata triggered by an NBRP/DBRP time-quantum mismatch cost in throughput?",
+  "a": {"multi_hop": false},
+  "b": {"multi_hop": true},
+  "use_llm": true,
+  "look_for": [
+   "In pipeline B, the 'Multi-hop follow-up' stages show the follow-up queries the model wrote, or why the loop stopped.",
+   "Did a follow-up name the errata (CHEN0)? If it only rephrased the question, the planner is the weak part, not the search.",
+   "Each hop cost one chat call. Was a new chunk found for it?"
+  ]
+ },
+ {
+  "id": "agentic-two-parts",
+  "stage": 9,
+  "title": "Let the model choose its own searches",
+  "goal": "Watch an agent split a two-part question, and see what each step costs.",
+  "tool": "ask",
+  "question": "Compare the CAN error code ERR080082 with the SPI report QR-4471-B",
+  "a": {"agentic": true},
+  "look_for": [
+   "Read the agent's steps above the answer. Did it search once per part of the question?",
+   "Did it stop by itself, or run to the step budget? 'Evidence gathered by the agent' says why it ended.",
+   "Ask the same question again. Did it take the same steps? A fixed pipeline would."
+  ]
+ }
+]

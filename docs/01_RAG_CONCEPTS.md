@@ -77,6 +77,38 @@ the embedding space.
 Sentence-BERT (Reimers 2019). Modern models: OpenAI
 `text-embedding-3-*`, BGE, E5, Jina, Nomic, Cohere Embed.
 
+### Embedding map (PCA projection)
+
+**What:** A picture of the embedding space. Each chunk's vector has hundreds
+of dimensions; principal component analysis (PCA) finds the two directions
+along which the vectors differ most and plots every chunk on those two axes.
+Chunks about the same subject tend to form groups; a question can be drawn
+among them.
+
+**How it is computed:** centre the vectors (subtract the mean), take the
+singular value decomposition, keep the first two right-singular vectors as
+axes. The share of total variance those two axes hold is the *explained
+variance*.
+
+**The catch:** a projection throws information away. With 35% explained
+variance, most of what separates the chunks is invisible, so points that look
+adjacent may be far apart and the reverse. Never read distances off the map.
+Nearest neighbours must be computed in the full space; the map only helps you
+see structure (clusters, outliers, a file that sits apart from the rest).
+
+**When it matters:** Building intuition, spotting a corpus that mixes
+unrelated material, noticing duplicated content (points on top of each other),
+and explaining to someone else what "semantic search" searches in.
+
+**Where in this code:**
+[`analysis/embedding_map.py`](../src/rag_app/analysis/embedding_map.py);
+`rag-app embedding-map`, the Lab panel and tab. The neighbours table shows
+true rank beside rank on the map so the projection's errors are visible.
+
+**Read more:** t-SNE and UMAP are the non-linear alternatives. They make
+prettier clusters and distort global distances even more; PCA is linear,
+deterministic and needs no tuning, which is why it is used here.
+
 ### Embedding dimension
 
 **What:** Length of the embedding vector. Property of the model. Common
@@ -145,6 +177,66 @@ image-only and sent to OCR; born-digital pages skip it.
 Surfaced on the CLI (`ingest --ocr/--no-ocr`, `stats`), in the GUI Settings
 tab, and in Docker (`--build-arg WITH_OCR=true`).
 
+### Source locations (page, slide, sheet, line)
+
+**What:** Chunk metadata that says *where in the file* the chunk came from:
+`p. 41-42`, `slide 7`, `sheet Timing`, `lines 36-55`. It is what turns "the
+answer is somewhere in this 400-page PDF" into a citation you can open.
+
+**How:** Positions exist only at extraction time, and chunkers work on plain
+text, so there are two designs. (1) Thread offsets through every chunker.
+(2) Chunk first, then find each chunk in the document again. This project
+does (2): extraction returns one *segment* per page/slide/sheet, the chunker
+splits the joined text, and the locator matches each chunk back to the
+segments it covers by comparing whitespace-stripped text. The chunkers stay
+simple and a new strategy gets locations for free.
+
+**Pitfall:** Chunking page by page to "get" page numbers. Sentences, tables
+and sections cross page breaks; you would trade retrieval quality for
+bookkeeping.
+
+**Where in this code:**
+[`extract_segments`](../src/rag_app/ingestion/text_extractor.py) →
+[`locate_chunks`](../src/rag_app/ingestion/locator.py), called from
+[`IngestService._chunk_document`](../src/rag_app/ingestion/ingest_service.py).
+
+### Table linearization
+
+**What:** Rewriting a table so every row carries its column names:
+`Register: SMPR, Offset: 0x04, Reset: 0x0003`. A plain text extractor yields
+`SMPR 0x04 0x0003` — values whose meaning lives in a header row that may end
+up in a different chunk.
+
+**Why:** Chunks are retrieved one at a time. A row is only useful if it is a
+self-contained fact. Linearized rows also give BM25 the column name and the
+value in the same passage.
+
+**Trade-off:** Longer text (headers repeat on every row). Alternatives: keep
+the whole table as markdown in one oversized chunk, or have an LLM summarise
+it at ingest.
+
+**Where in this code:** `extraction.pdf_tables: true` →
+[`_pdf_pages_with_tables`](../src/rag_app/ingestion/text_extractor.py) and
+`render_table_rows` (also used for PowerPoint tables and Excel sheets).
+
+### Code-aware chunking
+
+**What:** Splitting source files at definitions (functions, classes, structs)
+instead of at a character count, and recording the symbol and line range of
+each chunk.
+
+**Why:** A function is the unit a question is about. A character window cuts
+bodies from signatures and comments from the code they explain. Putting the
+symbol name in the chunk also makes exact-identifier queries hit.
+
+**Here vs production:** This project finds definitions with brace depth
+(C-family) and indentation (Python) — readable, no dependencies, occasionally
+imprecise about the symbol name. Production systems parse the code
+(tree-sitter) and often add repository structure and call graphs.
+
+**Where in this code:** `extraction.code_files`, `extraction.code_max_chars`
+→ [`split_code`](../src/rag_app/ingestion/code_chunker.py).
+
 ---
 
 ## Chunking
@@ -196,6 +288,14 @@ chunks. Defends against facts split across a boundary.
 
 **When it matters:** Always use some overlap unless you're storage-bound.
 10–25% of chunk size is typical.
+
+**What it costs:** overlap is text that is embedded, stored and possibly
+retrieved twice. With 900-character chunks and 150 of overlap, roughly a sixth
+of the index is repetition, and two adjacent chunks can both land in the top-k
+carrying the same sentences. The chunking playground
+([`ingestion/preview.py`](../src/rag_app/ingestion/preview.py); `rag-app
+chunks`, the Lab panel and tab) reports the repeated characters for any
+setting before you ingest with it.
 
 ---
 
@@ -497,6 +597,51 @@ expected output). Currently ranges from 8k (older local models) to 1M+
 **When it matters:** Limits `top_k × chunk_size`. Cost scales with
 context size — long context isn't free.
 
+### Citations and citation checking
+
+**What:** Numbering the context passages in the prompt (`[1]`, `[2]`, ...)
+and asking the model to put those numbers after the statements they support.
+
+**Why:** A grounded answer you cannot check is only a claim of being
+grounded. A citation turns "trust me" into "read passage 2".
+
+**The check:** After generation, parse the markers and compare them with the
+passages that were in the prompt. Three outcomes per passage: *cited*,
+*uncited*, and — for numbers that match nothing — *invalid*. Invalid
+citations are fabricated references; an answer with no citations at all cannot
+be traced. Both are caught without another model call.
+
+**What it does not prove:** that the cited passage supports the claim. That is
+*faithfulness*, and it needs a reader or an LLM judge.
+
+**Where in this code:**
+[`PromptBuilder._format_context`](../src/rag_app/retrieval/prompt_builder.py)
+(numbering) and [`parse_citations`](../src/rag_app/retrieval/citations.py)
+(the check). `prompt.include_sources: false` turns both off.
+
+### Conversational query rewriting (query condensation)
+
+**What:** Turning a follow-up question into a standalone one before
+searching: "what about its reset value?" → "What is the reset value of the
+ADX-12 SMPR register?".
+
+**Why:** Generation and retrieval need different things from a conversation.
+The LLM can resolve "its" from the history. A vector search cannot — it embeds
+the words it is given, and a follow-up often contains none of the terms that
+matter.
+
+**How:** One LLM call with the recent turns and the follow-up; search (and
+rerank) with the result; build the answer prompt from the *original* question
+plus the history.
+
+**Trade-offs:** One more LLM call per follow-up, and a wrong rewrite sends
+retrieval to the wrong place — so record both versions and fall back to the
+question as typed when the rewrite fails.
+
+**Where in this code:** `retrieval.rewrite_followups` →
+[`Retriever._rewrite_with_history`](../src/rag_app/retrieval/retriever.py);
+shown as the **Follow-up rewrite** stage in the pipeline view.
+
 ### "Answer only from context"
 
 **What:** A system-prompt instruction forbidding the model from using
@@ -577,15 +722,69 @@ expected answer keywords)` tuples. Your ground truth.
 chunk-size change helped or hurt.
 
 **Where in this code:** [`eval/questions.json`](../eval/questions.json)
-+ [`eval/runner.py`](../src/rag_app/eval/runner.py).
++ [`eval/runner.py`](../src/rag_app/eval/runner.py). Your own sets live beside
+the index ([`eval/sets.py`](../src/rag_app/eval/sets.py)).
+
+### Synthetic evaluation questions
+
+**What:** Test questions written by an LLM instead of a person. The model is
+shown one chunk and asked for a question that chunk answers (and the answer).
+Because the chunk is known, the expected source comes for free, which is the
+expensive part of labelling by hand.
+
+**When it matters:** When you have a corpus and no question set, which is
+always the situation on day one.
+
+**Why they are drafts, not tests:**
+
+- *Lexical leakage.* The question is written from the chunk, so it shares the
+  chunk's vocabulary. Real users do not know your document's words. Synthetic
+  sets therefore overstate retrieval quality, and understate what hybrid search
+  or query rewriting would buy you on real traffic.
+- *Out-of-context questions.* "What does this section describe?" has an answer
+  only with the passage in view.
+- *Single-chunk bias.* One chunk in, one question out: nothing generated this
+  way needs two documents, so multi-hop and synthesis are never tested.
+- *Wrong answers.* The generating model can misread the chunk.
+
+**Practice:** review every generated question before it counts, keep the
+ones a real user might ask, and mix them with questions people really asked.
+
+**Where in this code:** [`eval/generate.py`](../src/rag_app/eval/generate.py)
+— chunks are picked in turn across files, questions that point at "the
+passage" are discarded, and every result is stored with `status: "draft"`
+until accepted (`rag-app eval-set generate / accept`).
 
 ### LLM-as-judge
 
 **What:** Use a (usually stronger) LLM to score the output of your
 production LLM. Common in RAGAS, MT-Bench, AlpacaEval.
 
-**Caveat:** Position bias, length bias, model-family bias. Always
-spot-check with humans.
+**How faithfulness is judged:** the judge lists the factual claims in the
+answer and marks each as supported or not by the retrieved passages; the score
+is the supported share. Relevance and correctness (against a reference answer)
+are usually a rating on a small scale.
+
+**Caveats:**
+
+- *Noise.* Rerun the same evaluation and the scores move, more so with a small
+  judge. Establish the run-to-run difference before reading anything into a
+  change smaller than it.
+- *Self-preference.* A model grading its own output approves of it more often
+  than another judge would. Position bias, length bias and model-family bias
+  are documented too.
+- *Faithful is not correct.* The judge checks the answer against what was
+  retrieved, so an answer that repeats a wrong passage is fully faithful.
+- *Cost.* One or more extra model calls per answer.
+
+Always spot-check with humans, and prefer comparing two configurations over
+many questions to trusting an absolute score.
+
+**Where in this code:** [`eval/judge.py`](../src/rag_app/eval/judge.py);
+opt-in with `--judge` on `eval` / `experiment` or the judge mode in the UIs;
+`evaluation.judge_model` selects a different model. The reply format is plain
+text lines so any local model can judge, and an unreadable reply scores
+"not judged" instead of a guess.
 
 ---
 
@@ -817,19 +1016,73 @@ check, and a "no new chunks" check — any one ends the loop.
 [`Retriever._run_hops` / `_follow_up_query`](../src/rag_app/retrieval/retriever.py),
 behind `retrieval.multi_hop` (+ `multi_hop_max_hops`).
 
-### Agentic RAG *(theory only — not implemented)*
+### Agentic RAG *(implemented)*
 
-**What:** Wrap retrieval in a tool that the LLM calls when it decides
-it needs more info. Generalises multi-hop. Token-hungry but flexible.
+**What:** The LLM decides the retrieval steps instead of following a fixed
+pipeline. It is given a few actions (tools), chooses one, sees the result,
+and chooses again: a loop of *decide, act, observe*. Generalises multi-hop,
+which allows one action (search) and one decision (follow up or stop).
 
-### GraphRAG *(theory only — not implemented)*
+**When it matters:** Questions a single search cannot serve: several
+unrelated parts, or a second lookup that depends on the first result. Also
+the base pattern behind every "AI agent": retrieval is just one tool.
 
-**What:** Build a knowledge graph from the corpus during ingestion;
-retrieve sub-graphs of entities/relationships instead of raw text
-chunks. Excels at relationship questions ("how is A connected to B?").
-Heavy ingestion cost, more infra.
+**Trade-offs:** One model call per step before the answer starts; behaviour
+varies between runs, which makes failures harder to reproduce and evaluate;
+quality depends heavily on the model's ability to plan and to follow the
+action format. Needs guard rails: a step budget, a repeated-action check, a
+fallback.
 
-**Read more:** Microsoft GraphRAG (2024).
+**Tool calling vs a text protocol:** Hosted models expose native function
+calling (a structured tool-call message). Local model servers implement it
+unevenly and small models use it unreliably, so a plain-text protocol
+(`ACTION: SEARCH: ...`) that you parse yourself is the portable choice. It
+is also easy to read in a trace.
+
+**Where in this code:** `retrieval.agentic: true` (or `query --agent`).
+[`AgentRetriever`](../src/rag_app/retrieval/agent.py) wraps the ordinary
+`Retriever` and offers the same surface, so the rest of the pipeline does not
+know the difference. Actions: `SEARCH`, `NEIGHBORS`, `DOCUMENTS`, `FINISH`.
+Guards: `agent_max_steps`, no repeated searches, two unreadable replies fall
+back to the fixed pipeline. The agent gathers evidence only; the answer is
+written by the normal prompt. Framework parallel:
+[`examples/langgraph_agentic_rag.py`](../examples/langgraph_agentic_rag.py).
+
+### GraphRAG and entity-graph retrieval *(entity half implemented)*
+
+**What:** Build a knowledge graph from the corpus during ingestion —
+entities as nodes, stated relationships as edges, each node linked to the
+chunks that mention it — and retrieve through it instead of (or beside)
+similarity. Excels at relationship questions ("how is A connected to B?")
+and at exact lookups by name.
+
+**How retrieval uses it:** find the entities named in the question; take the
+chunks that mention them; follow edges to related entities and take their
+chunks too. The second step retrieves evidence that shares no wording with
+the question.
+
+**Trade-offs:** Heavy ingestion cost (an LLM call per chunk, or more);
+extraction errors are baked into the index and invisible at query time; the
+same entity under two spellings becomes two nodes unless you add entity
+resolution; nothing happens for a question that names no entity.
+
+**Full GraphRAG adds:** community detection over the graph and an
+LLM-written summary per community, at several levels. Corpus-wide questions
+("what are the main themes?") are then answered from the summaries
+(map-reduce over communities) rather than from chunks. That is the expensive
+part, and the part that plain RAG cannot imitate.
+
+**Where in this code:** `chunking.entity_graph: true` extracts entities and
+relations per chunk
+([`entity_extractor.py`](../src/rag_app/ingestion/entity_extractor.py)) into
+chunk metadata; `retrieval.graph: true` adds
+[`EntityGraph.search`](../src/rag_app/retrieval/entity_graph.py) as one more
+RRF list (matched entities weighted by rarity, one-relation neighbours at
+half weight). No model call at query time. Community summaries are not
+implemented. Browse the graph with `rag-app graph` or the Lab.
+
+**Read more:** Microsoft GraphRAG (2024); LightRAG (2024) for a cheaper
+variant.
 
 ---
 
